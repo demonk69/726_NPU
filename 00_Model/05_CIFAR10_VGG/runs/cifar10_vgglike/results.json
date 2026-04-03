@@ -1,0 +1,17 @@
+{
+  "best_val_acc": 92.72,
+  "test_loss": 0.4943608791351318,
+  "test_acc": 92.51,
+  "per_class_accuracy": {
+    "airplane": 93.8,
+    "automobile": 96.6,
+    "bird": 89.2,
+    "cat": 84.1,
+    "deer": 93.0,
+    "dog": 88.6,
+    "frog": 95.4,
+    "horse": 94.3,
+    "ship": 95.1,
+    "truck": 95.0
+  }
+}

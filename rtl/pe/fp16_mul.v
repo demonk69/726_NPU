@@ -83,13 +83,15 @@ wire [15:0] fp16_result = is_nan  ? {sign_r, 5'h1F, 10'h001} :
 wire [ACC_W-1:0] fp16_ext = {{(ACC_W-16){fp16_result[15]}}, fp16_result};
 
 // ---------------------------------------------------------------------------
-// Output register (Stage-1 → Stage-2 boundary)
+// Combinational output — registration happens in pe_top Stage-1 always block.
+// Removing the extra register here aligns FP16 latency with INT8 (both = 0
+// combinational delay through the multiply, registered once in pe_top).
 // ---------------------------------------------------------------------------
-always @(posedge clk) begin
-    if (!rst_n)
-        result <= 0;
-    else if (en)
-        result <= fp16_ext;
-end
+assign result = fp16_ext;
+
+// Suppress unused-port warnings for clk/rst_n/en (kept for interface compat)
+// synthesis translate_off
+wire _unused = clk & rst_n & en;
+// synthesis translate_on
 
 endmodule

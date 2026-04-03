@@ -149,6 +149,15 @@ end
 
 // ---------------------------------------------------------------------------
 // Stage-2: Accumulate / output
+//
+// WS (Weight-Stationary):
+//   External logic chains partial sums via acc_in → acc_out each cycle.
+//   This PE just does: acc_out = acc_in + product (registered).
+//   flush is not used in WS; acc_out is valid every cycle s1_valid is high.
+//
+// OS (Output-Stationary):
+//   Internal os_acc accumulates products.
+//   flush=1 → output os_acc, then clear it to start fresh.
 // ---------------------------------------------------------------------------
 always @(posedge clk) begin
     if (!rst_n) begin
@@ -156,21 +165,26 @@ always @(posedge clk) begin
         acc_out   <= 0;
         valid_out <= 0;
     end else begin
-        valid_out <= 0;   // default: no valid output
-        if (s1_valid && s1_flush) begin
-            // Only assert valid on flush: output the accumulated result
-            valid_out <= 1;
+        valid_out <= 0;   // default
+
+        if (s1_valid) begin
             if (s1_stat == 1'b0) begin
-                // Weight-Stationary / Output-Stationary: output accumulated sum
-                acc_out <= os_acc;
-                os_acc  <= s1_mul;   // seed next accumulation (if any)
+                // ----- Weight-Stationary -----
+                // acc_out = acc_in (carried externally) + this cycle's product
+                acc_out   <= s1_acc_in + s1_mul;
+                valid_out <= 1'b1;
             end else begin
-                acc_out <= os_acc;
-                os_acc  <= s1_mul;
+                // ----- Output-Stationary -----
+                if (s1_flush) begin
+                    // Output accumulated result, then reset accumulator
+                    acc_out   <= os_acc;
+                    os_acc    <= 32'd0;
+                    valid_out <= 1'b1;
+                end else begin
+                    // Accumulate; no output yet
+                    os_acc <= os_acc + s1_mul;
+                end
             end
-        end else if (s1_valid) begin
-            // Normal compute: accumulate, no output
-            os_acc <= os_acc + s1_mul;
         end
     end
 end

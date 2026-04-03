@@ -18,6 +18,8 @@ iverilog -g2012 \
     -I "$RTL_PE" \
     -o "$SIM_OUT/sim_pe.out" \
     "$RTL_PE/fp16_mul.v" \
+    "$RTL_PE/fp16_add.v" \
+    "$RTL_PE/fp32_add.v" \
     "$RTL_PE/pe_top.v"   \
     "$TB/tb_pe_top.v"
 

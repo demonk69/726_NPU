@@ -56,7 +56,7 @@ iverilog -V && gtkwave --version
 ```
 NPU_prj/
 ├── rtl/                 ← RTL 源码（全部可综合 Verilog-2001）
-│   ├── pe/              ← PE 单元 & FP16 乘法器
+│   ├── pe/              ← PE 单元 & FP16/FP32 运算器
 │   ├── array/           ← 脉动阵列
 │   ├── axi/             ← AXI-Lite 从机 & DMA
 │   ├── ctrl/            ← 控制器 FSM
@@ -66,12 +66,14 @@ NPU_prj/
 ├── tb/                  ← Testbench（所有仿真入口）
 │   ├── tb_pe_top.v          ← 场景A: 单 PE 功能测试
 │   ├── tb_comprehensive.v   ← 场景B: NPU 综合用例（推荐入口）★
-│   ├── tb_npu_top.v         ← 场景C: 带性能报告的系统测试
-│   └── tb_soc.v             ← 场景D: SoC CPU+NPU 联调
+│   ├── tb_classifier.v      ← 场景C: 三层 FC 网络推理测试
+│   ├── tb_npu_top.v         ← 场景D: 带性能报告的系统测试
+│   └── tb_soc.v             ← 场景E: SoC CPU+NPU 联调
 ├── scripts/
 │   ├── run_sim.ps1          ← 运行场景A
-│   ├── run_full_sim.ps1     ← 运行场景C（含性能报告）
-│   └── run_soc_sim.ps1      ← 运行场景D
+│   ├── run_full_sim.ps1     ← 运行场景D（含性能报告）
+│   ├── run_classifier_sim.ps1 ← 运行场景C（分类器推理）
+│   └── run_soc_sim.ps1      ← 运行场景E
 └── sim/wave/            ← VCD 波形输出目录（自动创建）
 ```
 
@@ -133,6 +135,8 @@ cd D:\NPU_prj
 iverilog -g2012 -DDUMP_VCD `
   -o sim\tb_comprehensive.vvp `
   rtl\pe\fp16_mul.v `
+  rtl\pe\fp16_add.v `
+  rtl\pe\fp32_add.v `
   rtl\pe\pe_top.v `
   rtl\common\fifo.v `
   rtl\common\axi_monitor.v `
@@ -265,6 +269,55 @@ powershell -ExecutionPolicy Bypass -File scripts\run_full_sim.ps1
 
 ---
 
+## 5.1 分类器推理仿真（`tb_classifier.v`）
+
+`run_classifier_sim.ps1` 运行一个**三层全连接神经网络（Tiny-FC-Net）**的端到端推理测试：
+
+```
+FC1(16→8) → ReLU → FC2(8→4) → ReLU → FC3(4→4)
+```
+
+权重由 `scripts/gen_classifier_data.py` 随机生成并预存到 `tb/classifier_dram.hex`，golden reference 存于 `tb/classifier_golden.txt`。
+
+### 运行
+
+```powershell
+cd D:\NPU_prj
+powershell -ExecutionPolicy Bypass -File scripts\run_classifier_sim.ps1
+```
+
+### 预期输出
+
+```
+========================================
+  Tiny-FC-Net Classifier Simulation
+========================================
+
+[0/4] Generating test data...
+  [OK] classifier_dram.hex exists, skipping generation.
+
+[1/4] Compiling...
+  [OK] Icarus Verilog version 12.0 ...
+  [OK] Compilation successful.
+
+[2/4] Running simulation...
+  [PASS] STEP 1: FC1(16->8) verified
+  [PASS] STEP 2: FC2(8->4) verified
+  [PASS] STEP 3: FC3(4->4) verified
+  [PASS] ALL CLASSIFICATIONS VERIFIED
+
+[3/4] Results:
+  VCD waveform : sim/wave/tb_classifier.vcd (XXX KB)
+
+[4/4] Files:
+  DRAM hex     : tb/classifier_dram.hex
+  Golden ref   : tb/classifier_golden.txt
+  Layout       : tb/classifier_layout.txt
+  Expected .vh : tb/classifier_expected.vh
+```
+
+---
+
 ## 6. 用 GTKWave 看波形
 
 所有带 `-DDUMP_VCD` 编译的仿真会在运行目录生成 `.vcd` 波形文件。
@@ -339,6 +392,8 @@ gtkwave sim\wave\tb_npu_top.vcd
 iverilog -g2012 `
   -o sim\wave\sim_pe.out `
   rtl\pe\fp16_mul.v `
+  rtl\pe\fp16_add.v `
+  rtl\pe\fp32_add.v `
   rtl\pe\pe_top.v `
   tb\tb_pe_top.v
 
@@ -352,6 +407,8 @@ iverilog -g2012 -DDUMP_VCD `
   -I rtl `
   -o sim\npu_sim `
   rtl\pe\fp16_mul.v `
+  rtl\pe\fp16_add.v `
+  rtl\pe\fp32_add.v `
   rtl\pe\pe_top.v `
   rtl\common\fifo.v `
   rtl\common\axi_monitor.v `
@@ -390,6 +447,7 @@ vvp ..\npu_sim
 | `tb_fp16_add.v` | FP16 加法器单元测试 | < 1s | FP16 加法器独立验证 |
 | `tb_pe_top.v` | 单 PE：INT8/FP16 × WS/OS | < 5s | 初次验证 PE 功能 |
 | `tb_comprehensive.v` | NPU 端到端：8 个测试用例 | ~30s | **日常回归测试** ★ |
+| `tb_classifier.v` | 三层 FC 网络端到端推理 | ~30s | 网络推理集成验证 |
 | `tb_npu_top.v` | NPU 系统：含性能报告 | ~30s | 性能分析与带宽分析 |
 | `tb_soc.v` | SoC 全系统：CPU固件驱动NPU | 数分钟 | SoC 集成验证 |
 
@@ -657,7 +715,7 @@ cd D:\NPU_prj
 # 重新编译（替换 .vvp 文件名以区分）
 iverilog -g2012 -DDUMP_VCD `
   -o sim\tb_comprehensive.vvp `
-  rtl\pe\fp16_mul.v rtl\pe\pe_top.v `
+  rtl\pe\fp16_mul.v rtl\pe\fp16_add.v rtl\pe\fp32_add.v rtl\pe\pe_top.v `
   rtl\common\fifo.v rtl\common\axi_monitor.v rtl\common\op_counter.v `
   rtl\array\pe_array.v rtl\buf\pingpong_buf.v `
   rtl\power\npu_power.v rtl\ctrl\npu_ctrl.v `
@@ -686,14 +744,16 @@ C:\iverilog\bin\iverilog -g2012 ...
 
 ---
 
-### ❌ `Error: Unknown module type: npu_top`
+### ❌ `Error: Unknown module type: fp32_add`
 
-**原因**：编译时遗漏了某个 RTL 源文件。
+**原因**：编译时遗漏了 `rtl\pe\fp32_add.v`（FP32 累加器模块）。
 
 **解决**：确保 `iverilog` 命令包含所有以下文件：
 
 ```
 rtl\pe\fp16_mul.v        ← 必须在 pe_top.v 之前
+rtl\pe\fp16_add.v        ← FP16 加法器
+rtl\pe\fp32_add.v        ← FP32 累加器（WS/OS FP16 模式使用）
 rtl\pe\pe_top.v
 rtl\common\fifo.v
 rtl\common\axi_monitor.v
@@ -771,6 +831,7 @@ vvp ..\sim\tb_comprehensive.vvp   # vcd 会生成在 sim\ 下
 ├─────────────────────────┬───────────────────────────────────────┤
 │ 运行 PE 单元测试         │ scripts\run_sim.ps1                   │
 │ 运行综合回归测试         │ 手动编译 tb_comprehensive.v（见第4节） │
+│ 运行分类器推理测试       │ scripts\run_classifier_sim.ps1        │
 │ 运行全系统性能测试       │ scripts\run_full_sim.ps1              │
 │ 打开波形                 │ gtkwave sim\wave\*.vcd                │
 ├─────────────────────────┼───────────────────────────────────────┤

@@ -88,11 +88,9 @@ always @(posedge clk) begin
         s0_stat  <= stat_mode;
         s0_flush <= flush;
         s0_valid <= 1'b1;
-        // Weight-Stationary: capture weight on flush (load phase)
+        // Weight-Stationary: weight streams in each cycle
         if (stat_mode == 1'b0) begin
-            if (flush)
-                weight_reg <= w_in;
-            s0_w <= weight_reg;
+            s0_w <= w_in;
             s0_a <= a_in;
         end
         // Output-Stationary: weight streams in, activation is stored or streamed
@@ -115,8 +113,8 @@ wire [ACC_W-1:0] fp16_prod;
 // INT8: signed 8-bit multiply -> 16-bit sign-extended to ACC_W
 wire signed [7:0] int8_w = s0_w[7:0];
 wire signed [7:0] int8_a = s0_a[7:0];
-assign int8_prod = {{(ACC_W-16){int8_w[7] ^ int8_a[7]}},
-                    $signed(int8_w) * $signed(int8_a)};
+wire signed [15:0] int8_mul_16 = $signed(int8_w) * $signed(int8_a);
+assign int8_prod = {{(ACC_W-16){int8_mul_16[15]}}, int8_mul_16};
 
 // FP16: instantiate fp16 MAC
 wire [ACC_W-1:0] fp16_mul_out;
@@ -137,12 +135,15 @@ always @(posedge clk) begin
         s1_flush  <= 0;
         s1_stat   <= 0;
         s1_acc_in <= 0;
-    end else begin
+    end else if (s0_valid) begin
+        // Only update stage-1 when valid data is present
         s1_valid  <= s0_valid;
         s1_flush  <= s0_flush;
         s1_stat   <= s0_stat;
-        s1_acc_in <= acc_in;   // carry through partial sum
+        s1_acc_in <= acc_in;
         s1_mul    <= s0_mode ? fp16_mul_out : int8_prod;
+    end else begin
+        s1_valid <= 0;
     end
 end
 
@@ -155,24 +156,21 @@ always @(posedge clk) begin
         acc_out   <= 0;
         valid_out <= 0;
     end else begin
-        valid_out <= s1_valid;
-        if (s1_valid) begin
+        valid_out <= 0;   // default: no valid output
+        if (s1_valid && s1_flush) begin
+            // Only assert valid on flush: output the accumulated result
+            valid_out <= 1;
             if (s1_stat == 1'b0) begin
-                // Weight-Stationary: acc_out = s1_acc_in + product
-                if (s1_flush)
-                    acc_out <= s1_mul;
-                else
-                    acc_out <= s1_acc_in + s1_mul;
+                // Weight-Stationary / Output-Stationary: output accumulated sum
+                acc_out <= os_acc;
+                os_acc  <= s1_mul;   // seed next accumulation (if any)
             end else begin
-                // Output-Stationary: internal accumulator
-                if (s1_flush) begin
-                    acc_out <= os_acc;   // output accumulated result
-                    os_acc  <= s1_mul;   // start new accumulation
-                end else begin
-                    os_acc  <= os_acc + s1_mul;
-                    acc_out <= os_acc;   // pass previous value downstream
-                end
+                acc_out <= os_acc;
+                os_acc  <= s1_mul;
             end
+        end else if (s1_valid) begin
+            // Normal compute: accumulate, no output
+            os_acc <= os_acc + s1_mul;
         end
     end
 end

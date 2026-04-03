@@ -1,0 +1,21 @@
+# Tiny-FC-Net DRAM Layout
+# ===================================================
+# DRAM base address: 0x00001000
+
+# --- Weights ---
+W1  (8x16 INT8):   addr=0x00001000  (W_ADDR reg)
+W2  (4x8  INT8):    addr=0x00001100  (W_ADDR reg)
+W3  (4x4   INT8):    addr=0x00001140  (W_ADDR reg)
+# --- Activations ---
+X   (1x16  INT8):  addr=0x00001200  (A_ADDR reg)
+A1  (1x8   INT8):   addr=0x00001300  (A_ADDR reg for L2)
+A2  (1x4    INT8):   addr=0x00001380  (A_ADDR reg for L3)
+# --- Results ---
+R1  (1x8 INT32): addr=0x00001300  (R_ADDR reg, overwritten by ReLU+shift)
+R2  (1x4  INT32): addr=0x00001380
+R3  (1x4  INT32): addr=0x000013C0  (final logits)
+
+# --- NPU Register Config per Layer ---
+FC1: M=1 N=8 K=16  W_ADDR=0x00001000  A_ADDR=0x00001200  R_ADDR=0x00001300
+FC2: M=1 N=4 K=8   W_ADDR=0x00001100  A_ADDR=0x00001300  R_ADDR=0x00001380
+FC3: M=1 N=4 K=4   W_ADDR=0x00001140  A_ADDR=0x00001380  R_ADDR=0x000013C0

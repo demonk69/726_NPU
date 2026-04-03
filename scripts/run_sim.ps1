@@ -15,6 +15,7 @@ iverilog -g2012 `
     -I "$RtlPe" `
     -o "$SimOut\sim_pe.out" `
     "$RtlPe\fp16_mul.v" `
+    "$RtlPe\fp16_add.v" `
     "$RtlPe\pe_top.v"   `
     "$Tb\tb_pe_top.v"
 

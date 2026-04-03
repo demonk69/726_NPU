@@ -582,7 +582,7 @@ assign int8_prod = {{(ACC_W-16){int8_mul_16[15]}}, int8_mul_16};
 | 属性 | 说明 |
 |------|------|
 | **文件** | `rtl/pe/fp16_mul.v` |
-| **功能** | IEEE 754 半精度（FP16）乘法器，1 周期寄存器输出 |
+| **功能** | IEEE 754 半精度（FP16）乘法器，组合逻辑输出（寄存器延迟在 pe_top Stage-1） |
 
 #### 参数
 
@@ -594,12 +594,12 @@ assign int8_prod = {{(ACC_W-16){int8_mul_16[15]}}, int8_mul_16};
 
 | 端口名 | 方向 | 位宽 | 说明 |
 |--------|------|------|------|
-| clk | input | 1 | 时钟 |
-| rst_n | input | 1 | 复位 |
-| en | input | 1 | 使能 |
+| clk | input | 1 | 时钟（保留，未使用，用于接口兼容） |
+| rst_n | input | 1 | 复位（保留，未使用） |
+| en | input | 1 | 使能（保留，未使用） |
 | a | input | 16 | FP16 操作数 A |
 | b | input | 16 | FP16 操作数 B |
-| result | output | ACC_W | 乘积结果（FP16 零扩展到 ACC_W） |
+| result | output | ACC_W | 乘积结果（FP16 零扩展到 ACC_W，**不进行符号扩展**） |
 
 #### FP16 格式
 
@@ -614,11 +614,25 @@ assign int8_prod = {{(ACC_W-16){int8_mul_16[15]}}, int8_mul_16};
 
 1. **拆包**：从两个 16-bit 输入提取符号、指数、尾数
 2. **特殊情况检测**：NaN、Inf、Zero 及其组合（如 0×Inf=NaN）
-3. **乘法**：11-bit 尾数相乘（含隐式 1），结果 22-bit
-4. **归一化**：如果乘积 bit[21]=1 则右移、指数+1
-5. **指数处理**：原始指数和 - 偏移量（15），溢出钳位到最大指数
-6. **打包**：组合符号、指数、尾数为 FP16 结果
-7. **零扩展**：FP16 结果符号扩展到 ACC_W 位宽
+3. **次正规数输入支持**（动态隐式位）：
+   - 次正规数输入（exp=0, mant≠0）：隐式位=0，有效指数=1
+   - 正规数输入（exp≠0）：隐式位=1，有效指数=存储值
+4. **乘法**：11-bit 尾数相乘，结果 22-bit
+5. **完整 22-bit LZC**（前导零计数）：
+   - 范围 0..22（22=全零）
+   - 支持次正规数乘积的正确归一化
+6. **Barrel 右移归一化**：右移量 `RS = 11 - lzc`，归一化后隐式 1 在 bit[10]
+7. **指数计算**：`biased_exp = eff_ea + eff_eb - 14 - lzc`
+8. **正常路径**（biased_exp > 0）：
+   - Guard/Sticky 位提取 + RN 舍入（round-to-nearest-even）
+   - 溢出钳位到 Inf
+9. **次正规数输出路径**（biased_exp ≤ 0）——**渐进下溢**：
+   - 对归一化后的 11-bit mantissa 继续右移 `extra_shift = 1 - biased_exp` 位
+   - 使用独立的 barrel shifter + guard/sticky RN 舍入
+   - `biased_exp < -10`：结果过小，flush to zero
+   - 舍入导致 mantissa 溢出到 0x400 时，自动进位到最小正规数（exp=1, mant=0）
+10. **打包**：组合符号、指数、尾数为 FP16 结果
+11. **零扩展**：FP16 结果**零扩展**到 ACC_W 位宽（**禁止符号扩展**，避免破坏 IEEE 754 位模式）
 
 ---
 

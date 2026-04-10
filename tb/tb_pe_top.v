@@ -93,6 +93,7 @@ end
 endtask
 
 // Drive WS beat — weight is NOT sent (already latched)
+// Drives exactly one beat: en=1 for one cycle then drops to 0.
 task drive_ws_beat;
     input [DATA_W-1:0] a;
     input [ACC_W-1:0]  acc;
@@ -105,6 +106,9 @@ begin
     flush  = 0;
     load_w = 0;
     en     = 1;
+    @(posedge clk);
+    #1;
+    en     = 0;
 end
 endtask
 
@@ -152,33 +156,33 @@ initial begin
     reset_dut;
 
     // =======================================================================
-    // Test 1: INT8 WS — true weight-stationary with load_w
-    // Load weight once (w=3), then stream activations {1,2,3,4}
-    // Expected: 3*1 + 3*2 + 3*3 + 3*4 = 30
+    // Test 1: INT8 WS — internal accumulation with flush
+    // Load weight once (w=3), then stream activations {1,2,3,4}, flush to get sum
+    // Expected internal: 3*1 + 3*2 + 3*3 + 3*4 = 30
     // =======================================================================
-    $display("\n>>> Starting Test 1: INT8 Weight-Stationary (true WS) <<<");
+    $display("\n>>> Starting Test 1: INT8 Weight-Stationary (internal acc + flush) <<<");
     mode      = 0;
     stat_mode = 0;
     iw = 3;
 
-    // Load weight into PE
+    // Load weight into PE (first beat also computes): w=3, a=1
     @(posedge clk); #1;
-    w_in = {{8{iw[7]}}, iw}; a_in = 16'd0; acc_in = 32'd0;
+    w_in = {{8{iw[7]}}, iw}; a_in = 16'd1; acc_in = 32'd0;
     flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1;
+    en = 0; load_w = 0;          // drop en after exactly ONE cycle
+
+    // Stream remaining activations (internal accumulation)
+    drive_ws_beat(16'd2, 32'd0);      // w=3, a=2 => internal acc += 6
+    drive_ws_beat(16'd3, 32'd0);      // w=3, a=3 => internal acc += 9
+    drive_ws_beat(16'd4, 32'd0);      // w=3, a=4 => internal acc += 12
+
+    // Flush to get accumulated result (a_in=0: pure flush, no extra product)
+    @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
+    @(posedge clk); #1; flush = 0; en = 0;
     repeat(3) @(posedge clk); #1;
 
-    // Stream activations, chain acc_out -> acc_in
-    drive_ws_beat(16'd1, 32'd0);      // w=3, a=1 => prod=3, acc=0 => out=3
-    repeat(3) @(posedge clk); #1;
-    drive_ws_beat(16'd2, acc_out);    // w=3, a=2 => prod=6, acc=3 => out=9
-    repeat(3) @(posedge clk); #1;
-    drive_ws_beat(16'd3, acc_out);    // w=3, a=3 => prod=9, acc=9 => out=18
-    repeat(3) @(posedge clk); #1;
-    drive_ws_beat(16'd4, acc_out);    // w=3, a=4 => prod=12, acc=18 => out=30
-    repeat(3) @(posedge clk); #1;
-    en = 0;
-
-    $display("[TEST 1 RESULT] Info: w=3 loaded once, acts={1,2,3,4} accumulated");
+    $display("[TEST 1 RESULT] Info: w=3 loaded once, acts={1,2,3,4}, internal acc, flush");
     check_result(acc_out, 32'd30, 1);
 
     // =======================================================================
@@ -205,22 +209,28 @@ initial begin
     check_result(acc_out, 32'd20, 2);
 
     // =======================================================================
-    // Test 3: FP16 WS — single beat
-    // w=2.0 (0x4000) * a=1.5 (0x3E00) = 3.0 (0x4200)
+    // Test 3: FP16 WS — single beat with flush
+    // w=2.0 (0x4000) * a=1.5 (0x3E00) = 3.0 (0x40400000 in FP32)
     // =======================================================================
-    $display("\n>>> Starting Test 3: FP16 Weight-Stationary <<<");
+    $display("\n>>> Starting Test 3: FP16 Weight-Stationary (single beat + flush) <<<");
     reset_dut;
     mode      = 1;
     stat_mode = 0;
 
-    // Load weight
+    // Load weight and compute first product
     @(posedge clk); #1;
     w_in = 16'h4000; a_in = 16'h3E00; acc_in = 32'd0;
     flush = 0; load_w = 1; en = 1;
-    repeat(3) @(posedge clk); #1;
+    @(posedge clk); #1;
     en = 0;
+    @(posedge clk); #1;
 
-    $display("[TEST 3 RESULT] Info: w=2.0 (0x4000), a=1.5 (0x3E00)");
+    // Flush to get result (a_in=0 to avoid extra product)
+    @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
+    @(posedge clk); #1; flush = 0; en = 0;
+    repeat(3) @(posedge clk); #1;
+
+    $display("[TEST 3 RESULT] Info: w=2.0 (0x4000), a=1.5 (0x3E00), flush");
     check_result(acc_out, 32'h40400000, 3);
 
     // =======================================================================
@@ -264,7 +274,7 @@ initial begin
     check_result(acc_out, 32'd19, 5);
 
     // =======================================================================
-    // Test 6: FP16 Special Edge Cases (WS mode — drive_beat with load_w=1)
+    // Test 6: FP16 Special Edge Cases (WS mode with flush)
     // =======================================================================
     $display("\n>>> Starting Test 6: FP16 Edge Cases <<<");
     reset_dut;
@@ -275,6 +285,10 @@ initial begin
     @(posedge clk); #1;
     w_in = 16'h7C00; a_in = 16'h3C00; acc_in = 32'd0;
     flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1; en = 0; load_w = 0;
+    @(posedge clk); #1;
+    @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
+    @(posedge clk); #1; flush = 0; en = 0;
     repeat(3) @(posedge clk); #1;
     $display("[TEST 61 RESULT] Info: Inf (0x7C00) * 1.0 (0x3C00) -> Inf");
     check_result(acc_out, 32'h7F800000, 61);
@@ -283,6 +297,10 @@ initial begin
     @(posedge clk); #1;
     w_in = 16'h7C00; a_in = 16'h0000; acc_in = 32'd0;
     flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1; en = 0; load_w = 0;
+    @(posedge clk); #1;
+    @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
+    @(posedge clk); #1; flush = 0; en = 0;
     repeat(3) @(posedge clk); #1;
     $display("[TEST 62 RESULT] Info: Inf (0x7C00) * 0.0 (0x0000) -> NaN");
     check_result(acc_out, 32'hFFC00000, 62);
@@ -332,7 +350,7 @@ initial begin
     check_result(acc_out, 32'd0, 82);
 
     // =======================================================================
-    // Test 9: Dynamic Mode Switching (INT8 -> FP16) in WS mode
+    // Test 9: Dynamic Mode Switching (INT8 -> FP16) in WS mode with flush
     // =======================================================================
     $display("\n>>> Starting Test 9: Dynamic Mode Switching (INT8 -> FP16) <<<");
     reset_dut;
@@ -343,9 +361,12 @@ initial begin
     @(posedge clk); #1;
     w_in = 16'd2; a_in = 16'd3; acc_in = 32'd0;
     flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1; en = 0; load_w = 0;
+    @(posedge clk); #1;
+    @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
+    @(posedge clk); #1; flush = 0; en = 0;
     repeat(3) @(posedge clk); #1;
-    en = 0;
-    $display("[TEST 91 RESULT] Info: INT8 beat (w=2, a=3)");
+    $display("[TEST 91 RESULT] Info: INT8 beat (w=2, a=3) with flush");
     check_result(acc_out, 32'd6, 91);
 
     // FP16 beat: w=1.0, a=2.0 (load_w=1 since WS mode)
@@ -353,80 +374,76 @@ initial begin
     @(posedge clk); #1;
     w_in = 16'h3C00; a_in = 16'h4000; acc_in = 32'd0;
     flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1; en = 0; load_w = 0;
+    @(posedge clk); #1;
+    @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
+    @(posedge clk); #1; flush = 0; en = 0;
     repeat(3) @(posedge clk); #1;
-    en = 0;
-    $display("[TEST 92 RESULT] Info: FP16 beat (w=1.0, a=2.0)");
+    $display("[TEST 92 RESULT] Info: FP16 beat (w=1.0, a=2.0) with flush");
     check_result(acc_out, 32'h40000000, 92);
 
     // =======================================================================
-    // Test 10: FP16 WS multi-accumulation (true WS with fp16_add)
-    // Load weight w=2.0 once, then multiply with a={1.0, 2.0, 3.0}
-    // Beat 0 (load_w): w=2.0, a=1.0, acc=0 => out=2.0
-    // Beat 1 (ws):      w=2.0, a=2.0, acc=2.0 => out=6.0
-    // Beat 2 (ws):      w=2.0, a=3.0, acc=6.0 => out=12.0
-    // Expected: 12.0 = 0x4A00
+    // Test 10: FP16 WS internal accumulation with flush
+    // Load weight w=2.0 once, then multiply with a={1.0, 2.0, 3.0}, flush
+    // Internal: 2.0*1.0 + 2.0*2.0 + 2.0*3.0 = 2.0 + 4.0 + 6.0 = 12.0
+    // Expected: 12.0 = 0x41400000 (FP32)
     // =======================================================================
-    $display("\n>>> Starting Test 10: FP16 WS Multi-Accumulation <<<");
+    $display("\n>>> Starting Test 10: FP16 WS Internal Accumulation + Flush <<<");
     reset_dut;
     mode      = 1;
     stat_mode = 0;
 
-    // Beat 0: load weight and multiply
+    // Beat 0: load weight and multiply with a=1.0
     @(posedge clk); #1;
-    w_in = 16'h4000; a_in = 16'h3C00; acc_in = 32'd0;
+    w_in = 16'h4000; a_in = 16'h3C00; acc_in = 32'd0;  // w=2.0, a=1.0
     flush = 0; load_w = 1; en = 1;
-    repeat(3) @(posedge clk); #1;
-    // acc_out = 0 + fp16_mul(2.0, 1.0) = 0 + 2.0 = 2.0
+    @(posedge clk); #1; en = 0; load_w = 0;
+    // internal ws_acc = 2.0
 
-    // Beat 1: weight latched, stream activation
-    @(posedge clk); #1;
-    w_in = 16'd0; a_in = 16'h4000; acc_in = acc_out; // acc_in = 2.0
-    flush = 0; load_w = 0; en = 1;
-    repeat(3) @(posedge clk); #1;
-    // acc_out = fp16_add(2.0, 4.0) = 6.0
+    // Beat 1: a=2.0 (internal accumulation)
+    drive_ws_beat(16'h4000, 32'd0);  // a=2.0
+    // internal ws_acc = 2.0 + 4.0 = 6.0
 
-    // Beat 2: stream activation
-    @(posedge clk); #1;
-    w_in = 16'd0; a_in = 16'h4200; acc_in = acc_out; // acc_in = 6.0
-    flush = 0; load_w = 0; en = 1;
-    repeat(3) @(posedge clk); #1;
-    en = 0;
-    // acc_out = fp16_add(6.0, 6.0) = 12.0 = 0x4A00
+    // Beat 2: a=3.0 (internal accumulation)
+    drive_ws_beat(16'h4200, 32'd0);  // a=3.0
+    // internal ws_acc = 6.0 + 6.0 = 12.0
 
-    $display("[TEST 10 RESULT] Info: w=2.0 loaded once, a={1.0,2.0,3.0}, WS FP16 acc");
+    // Flush to get accumulated result (a_in=0: pure flush)
+    @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
+    @(posedge clk); #1; flush = 0; en = 0;
+    repeat(3) @(posedge clk); #1;
+
+    $display("[TEST 10 RESULT] Info: w=2.0 loaded once, a={1.0,2.0,3.0}, internal acc, flush");
     check_result(acc_out, 32'h41400000, 10);
 
     // =======================================================================
-    // Test 11: FP16 WS negative accumulation
+    // Test 11: FP16 WS negative internal accumulation with flush
     // Load weight w=-1.5 (0xBE00), a={2.0, 3.0}
-    // Beat 0 (load_w): -1.5*2.0 + 0 = -3.0
-    // Beat 1 (ws):      -1.5*3.0 + (-3.0) = -4.5 + (-3.0) = -7.5
-    // Expected: -7.5 = 0xC780
+    // Internal: -1.5*2.0 + (-1.5)*3.0 = -3.0 + (-4.5) = -7.5
+    // Expected: -7.5 = 0xC0F00000 (FP32)
     // =======================================================================
-    $display("\n>>> Starting Test 11: FP16 WS Negative Accumulation <<<");
+    $display("\n>>> Starting Test 11: FP16 WS Negative Internal Accumulation <<<");
     reset_dut;
     mode      = 1;
     stat_mode = 0;
 
-    // Beat 0: load weight = -1.5 (sign=1, exp=15, mant=1000000000 = 0xBE00)
+    // Beat 0: load weight = -1.5, a=2.0
     @(posedge clk); #1;
-    w_in = 16'hBE00; a_in = 16'h4000; acc_in = 32'd0;
+    w_in = 16'hBE00; a_in = 16'h4000; acc_in = 32'd0;  // w=-1.5, a=2.0
     flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1; en = 0; load_w = 0;
+    // internal ws_acc = -3.0
+
+    // Beat 1: a=3.0 (internal accumulation)
+    drive_ws_beat(16'h4200, 32'd0);  // a=3.0
+    // internal ws_acc = -3.0 + (-4.5) = -7.5
+
+    // Flush to get accumulated result (a_in=0: pure flush)
+    @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
+    @(posedge clk); #1; flush = 0; en = 0;
     repeat(3) @(posedge clk); #1;
-    // acc_out = fp16_add(0.0, -3.0) = -3.0
 
-    $display("[TEST 11 DEBUG] Beat 0 acc_out = 0x%08X", acc_out);
-
-    // Beat 1: a=3.0, acc=-3.0
-    @(posedge clk); #1;
-    w_in = 16'd0; a_in = 16'h4200; acc_in = acc_out;
-    flush = 0; load_w = 0; en = 1;
-    repeat(3) @(posedge clk); #1;
-    en = 0;
-    // acc_out = fp16_add(-3.0, -4.5) = -7.5 = 0xC780
-
-    $display("[TEST 11 DEBUG] Beat 1 acc_out = 0x%08X", acc_out);
-    $display("[TEST 11 RESULT] Info: w=-1.5, a={2.0,3.0}, WS FP16 acc => -7.5");
+    $display("[TEST 11 RESULT] Info: w=-1.5, a={2.0,3.0}, internal acc, flush => -7.5");
     check_result(acc_out, 32'hC0F00000, 11);
 
     // =======================================================================
@@ -474,42 +491,53 @@ initial begin
     check_result(acc_out, 32'h41204000, 13);
 
     // =======================================================================
-    // Test 14: True WS weight latch verification
-    // Load w=5 (INT8), send a={10} without load_w, verify w=5 is reused.
-    // Then load w=7 with load_w, send a={10}, verify w=7.
+    // Test 14: True WS weight latch verification with flush
+    // Load w=5 (INT8), send a={10}, flush, verify w=5 is latched.
+    // Then load w=7 with load_w, send a={4}, flush, verify w=7.
     // =======================================================================
     $display("\n>>> Starting Test 14: True WS Weight Latch Verification <<<");
     reset_dut;
     mode      = 0;
     stat_mode = 0;
 
-    // Load w=5
+    // Test 141: Load w=5, a=10, flush => 50
     iw = 5;
     @(posedge clk); #1;
     w_in = {{8{iw[7]}}, iw}; a_in = 16'd10; acc_in = 32'd0;
     flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1; en = 0; load_w = 0;
+    @(posedge clk); #1;
+    // Flush beat: a_in=0 to avoid extra product
+    @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
+    @(posedge clk); #1; flush = 0; en = 0;
     repeat(3) @(posedge clk); #1;
-    // First beat: w=5, a=10 => 50
-    $display("[TEST 141 RESULT] Info: load w=5, a=10 => 50");
+    $display("[TEST 141 RESULT] Info: load w=5, a=10, flush => 50");
     check_result(acc_out, 32'd50, 141);
 
-    // Second beat: w stays 5 (not loaded), a=3
+    // Test 142: w stays 5 (no load_w), a=3, flush => 15
+    // drive_ws_beat now internally lowers en after one cycle
     drive_ws_beat(16'd3, 32'd0);
+    // en is already 0 after drive_ws_beat completes
+    @(posedge clk); #1;
+    // Flush beat: a_in=0 to avoid extra product
+    @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
+    @(posedge clk); #1; flush = 0; en = 0;
     repeat(3) @(posedge clk); #1;
-    $display("[TEST 142 RESULT] Info: w still 5 (no load_w), a=3 => 15");
+    $display("[TEST 142 RESULT] Info: w still 5 (no load_w), a=3, flush => 15");
     check_result(acc_out, 32'd15, 142);
 
-    // Load w=7
+    // Test 143: Load w=7, a=4, flush => 28
     iw = 7;
     @(posedge clk); #1;
-    w_in = {{8{iw[7]}}, iw}; a_in = 16'd0; acc_in = 32'd0;
+    w_in = {{8{iw[7]}}, iw}; a_in = 16'd4; acc_in = 32'd0;
     flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1; en = 0; load_w = 0;
+    @(posedge clk); #1;
+    // Flush beat: a_in=0 to avoid extra product
+    @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
+    @(posedge clk); #1; flush = 0; en = 0;
     repeat(3) @(posedge clk); #1;
-
-    // Beat with new w=7
-    drive_ws_beat(16'd4, 32'd0);
-    repeat(3) @(posedge clk); #1;
-    $display("[TEST 143 RESULT] Info: load w=7, a=4 => 28");
+    $display("[TEST 143 RESULT] Info: load w=7, a=4, flush => 28");
     check_result(acc_out, 32'd28, 143);
 
     en = 0;

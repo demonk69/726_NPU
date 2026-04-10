@@ -293,6 +293,7 @@ op_counter #(.ROWS(ROWS), .COLS(COLS)) u_opcnt (
     .dma_r_done(u_npu.dma_r_done),
     .pe_valid(u_npu.pe_array_valid),
     .m_dim(u_npu.m_dim_r),
+
     .n_dim(u_npu.n_dim_r),
     .k_dim(u_npu.k_dim_r),
     .total_mac_ops(total_mac_ops),

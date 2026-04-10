@@ -38,6 +38,7 @@ module pe_array #(
     input  wire                          stat_mode,  // 0=WS, 1=OS
     input  wire                          en,
     input  wire                          flush,
+    input  wire                          load_w,     // WS mode: latch w_in into weight_reg this cycle
     // weight inputs: one per column, broadcast to all rows in that column
     input  wire [COLS*DATA_W-1:0]        w_in,       // [col*DATA_W +: DATA_W]
     // activation inputs: one per row, shifted along that row
@@ -90,6 +91,7 @@ generate
                 .stat_mode(stat_mode),
                 .en       (en),
                 .flush    (flush),
+                .load_w   (load_w),
                 // weight: broadcast per column
                 .w_in     (w_in[c*DATA_W +: DATA_W]),
                 // activation: systolic shift along row

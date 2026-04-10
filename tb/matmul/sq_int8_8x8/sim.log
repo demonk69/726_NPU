@@ -1,0 +1,81 @@
+
+################################################################
+  Matrix Multiplication OS Test: 8x8 x 8x8 = 8x8
+  Data type: INT8
+################################################################
+    M_DIM readback = 8
+    N_DIM readback = 8
+    K_DIM readback = 8
+    NPU ctrl state=0, tile_i=7, tile_j=7, tile_count=64/64
+    DMA state=0, r_pending=0
+    Checking 8x8 results...
+    C[0][0]: addr=0x00010280 got=0xfffff0a6 exp=0xfffff0a6
+    C[0][1]: addr=0x00010284 got=0xfffffb83 exp=0xfffffb83
+    C[0][2]: addr=0x00010288 got=0xfffff3fd exp=0xfffff3fd
+    C[0][3]: addr=0x0001028c got=0xfffff717 exp=0xfffff717
+    C[0][4]: addr=0x00010290 got=0x000014b6 exp=0x000014b6
+    C[0][5]: addr=0x00010294 got=0x00001799 exp=0x00001799
+    C[0][6]: addr=0x00010298 got=0xfffff365 exp=0xfffff365
+    C[0][7]: addr=0x0001029c got=0x00001f08 exp=0x00001f08
+    C[1][0]: addr=0x000102a0 got=0x000016e2 exp=0x000016e2
+    C[1][1]: addr=0x000102a4 got=0x000017eb exp=0x000017eb
+    C[1][2]: addr=0x000102a8 got=0xfffff6bf exp=0xfffff6bf
+    C[1][3]: addr=0x000102ac got=0x00000d04 exp=0x00000d04
+    C[1][4]: addr=0x000102b0 got=0xfffff733 exp=0xfffff733
+    C[1][5]: addr=0x000102b4 got=0x00000581 exp=0x00000581
+    C[1][6]: addr=0x000102b8 got=0xfffffc2d exp=0xfffffc2d
+    C[1][7]: addr=0x000102bc got=0xfffff08f exp=0xfffff08f
+    C[2][0]: addr=0x000102c0 got=0xffffdda0 exp=0xffffdda0
+    C[2][1]: addr=0x000102c4 got=0xfffff898 exp=0xfffff898
+    C[2][2]: addr=0x000102c8 got=0xfffff7b4 exp=0xfffff7b4
+    C[2][3]: addr=0x000102cc got=0x000016fe exp=0x000016fe
+    C[2][4]: addr=0x000102d0 got=0xffffef6a exp=0xffffef6a
+    C[2][5]: addr=0x000102d4 got=0x00001874 exp=0x00001874
+    C[2][6]: addr=0x000102d8 got=0x00000452 exp=0x00000452
+    C[2][7]: addr=0x000102dc got=0x00001938 exp=0x00001938
+    C[3][0]: addr=0x000102e0 got=0x00000604 exp=0x00000604
+    C[3][1]: addr=0x000102e4 got=0x00000048 exp=0x00000048
+    C[3][2]: addr=0x000102e8 got=0xffffeb76 exp=0xffffeb76
+    C[3][3]: addr=0x000102ec got=0x00001383 exp=0x00001383
+    C[3][4]: addr=0x000102f0 got=0xfffff69e exp=0xfffff69e
+    C[3][5]: addr=0x000102f4 got=0x00001297 exp=0x00001297
+    C[3][6]: addr=0x000102f8 got=0xfffff45a exp=0xfffff45a
+    C[3][7]: addr=0x000102fc got=0x000007ae exp=0x000007ae
+    C[4][0]: addr=0x00010300 got=0xfffffae2 exp=0xfffffae2
+    C[4][1]: addr=0x00010304 got=0x00001ac9 exp=0x00001ac9
+    C[4][2]: addr=0x00010308 got=0xffffeba0 exp=0xffffeba0
+    C[4][3]: addr=0x0001030c got=0x0000106f exp=0x0000106f
+    C[4][4]: addr=0x00010310 got=0x0000066b exp=0x0000066b
+    C[4][5]: addr=0x00010314 got=0x00000cc1 exp=0x00000cc1
+    C[4][6]: addr=0x00010318 got=0xffffe47b exp=0xffffe47b
+    C[4][7]: addr=0x0001031c got=0xfffff692 exp=0xfffff692
+    C[5][0]: addr=0x00010320 got=0x00001789 exp=0x00001789
+    C[5][1]: addr=0x00010324 got=0x000006f1 exp=0x000006f1
+    C[5][2]: addr=0x00010328 got=0xfffff854 exp=0xfffff854
+    C[5][3]: addr=0x0001032c got=0x00000c0c exp=0x00000c0c
+    C[5][4]: addr=0x00010330 got=0x00000a24 exp=0x00000a24
+    C[5][5]: addr=0x00010334 got=0x00000b4d exp=0x00000b4d
+    C[5][6]: addr=0x00010338 got=0x00000117 exp=0x00000117
+    C[5][7]: addr=0x0001033c got=0xfffffa7a exp=0xfffffa7a
+    C[6][0]: addr=0x00010340 got=0x00001b50 exp=0x00001b50
+    C[6][1]: addr=0x00010344 got=0xfffffb6a exp=0xfffffb6a
+    C[6][2]: addr=0x00010348 got=0xfffff330 exp=0xfffff330
+    C[6][3]: addr=0x0001034c got=0x000013d7 exp=0x000013d7
+    C[6][4]: addr=0x00010350 got=0xfffff5e8 exp=0xfffff5e8
+    C[6][5]: addr=0x00010354 got=0x00000b5e exp=0x00000b5e
+    C[6][6]: addr=0x00010358 got=0x00000bdf exp=0x00000bdf
+    C[6][7]: addr=0x0001035c got=0x00000641 exp=0x00000641
+    C[7][0]: addr=0x00010360 got=0x00001c4c exp=0x00001c4c
+    C[7][1]: addr=0x00010364 got=0x00000d37 exp=0x00000d37
+    C[7][2]: addr=0x00010368 got=0xfffff73b exp=0xfffff73b
+    C[7][3]: addr=0x0001036c got=0xffffee3a exp=0xffffee3a
+    C[7][4]: addr=0x00010370 got=0x0000133e exp=0x0000133e
+    C[7][5]: addr=0x00010374 got=0x00000413 exp=0x00000413
+    C[7][6]: addr=0x00010378 got=0xffffee26 exp=0xffffee26
+    C[7][7]: addr=0x0001037c got=0xfffffad3 exp=0xfffffad3
+    Results: 64 pass, 0 fail
+
+################################################################
+  ALL 64 CHECKS PASSED
+################################################################
+D:\NPU_prj\tb\matmul\tb_matmul_os.v:400: $finish called at 27405000 (1ps)

@@ -5,7 +5,8 @@
 //           - Two independent SRAM banks (BufA, BufB).
 //           - Writer (DMA) writes DATA_W words.
 //           - Reader (PE) reads OUT_WIDTH sub-words (OUT_WIDTH <= DATA_W).
-//           - Each DATA_W word is read SUBW sub-words (DATA_W/OUT_WIDTH).
+//           - Each DATA_W word is read in SUBW sub-words for INT8,
+//             or SUBW/2 sub-words for FP16 (fp16_mode=1).
 //           - "swap" toggles which bank each side accesses.
 //           - "clear" resets all pointers and fill counts.
 //
@@ -14,6 +15,11 @@
 //   DEPTH      - entries per bank (word count, must be power of 2)
 //   OUT_WIDTH  - read data width (PE side, e.g. 16); DATA_W/OUT_WIDTH must be int
 //   THRESHOLD  - how many words DMA must fill before buf_ready asserts
+//   SUBW       - max sub-words per word (4 for INT8; FP16 uses SUBW/2=2)
+//
+// fp16_mode port:
+//   0 (INT8): each 32-bit word yields SUBW=4 bytes; rd_data is sign-extended byte
+//   1 (FP16): each 32-bit word yields 2 half-words; rd_data is the 16-bit FP16 value
 // =============================================================================
 
 `timescale 1ns/1ps
@@ -23,7 +29,7 @@ module pingpong_buf #(
     parameter DEPTH     = 64,
     parameter OUT_WIDTH = 16,       // PE data width (output)
     parameter THRESHOLD = 16,
-    parameter SUBW      = 4          // sub-words per word (4 for INT8 in 32-bit)
+    parameter SUBW      = 4          // max sub-words per word (INT8 case)
 )(
     input  wire                      clk,
     input  wire                      rst_n,
@@ -39,6 +45,8 @@ module pingpong_buf #(
     // ---- Control ----
     input  wire                      swap,       // toggle active bank
     input  wire                      clear,      // reset read/write pointers
+    input  wire                      fp16_mode,  // 1=FP16: 16-bit half-word reads (2 per word)
+                                                 // 0=INT8: 8-bit byte reads (SUBW=4 per word)
 
     // ---- Status ----
     output wire                      buf_empty,  // no more sub-words to read
@@ -53,8 +61,16 @@ module pingpong_buf #(
 // ---------------------------------------------------------------------------
 localparam ADDR_W    = $clog2(DEPTH);
 localparam FILL_W    = ADDR_W + 1;
-localparam SUBW_W    = $clog2(SUBW);
-localparam RD_FILL_W = $clog2(DEPTH * SUBW) + 1;
+localparam SUBW_W    = $clog2(SUBW);             // 2 bits for SUBW=4 index
+localparam RD_FILL_W = $clog2(DEPTH * SUBW) + 1; // max fill: DEPTH*4 sub-words
+
+// Effective sub-words per word (runtime):
+//   INT8:  eff_subw = 4 (SUBW)
+//   FP16:  eff_subw = 2 (SUBW/2)
+wire [SUBW_W-1:0] eff_subw_last = fp16_mode ? { { (SUBW_W-1) {1'b0} }, 1'b1 } : { { (SUBW_W-2) {1'b0} }, 2'b11 };
+// eff_subw_last: the index of the LAST sub-word before advancing to next word
+//   INT8:  SUBW-1 = 3
+//   FP16:  1      (only 2 sub-words: index 0 and 1)
 
 // ---------------------------------------------------------------------------
 // Bank select: 0 = BufA, 1 = BufB
@@ -76,7 +92,7 @@ wire [FILL_W-1:0] cur_wr_fill = wr_sel ? wr_fill_b : wr_fill_a;
 // ---------------------------------------------------------------------------
 // Read pointer & sub-word counter (per bank)
 // rd_ptr: word-level pointer
-// rd_sub: sub-word index within current word (0 to SUBW-1)
+// rd_sub: sub-word index within current word (0 to eff_subw-1)
 // rd_fill: total sub-words remaining to read
 // ---------------------------------------------------------------------------
 reg [ADDR_W-1:0] rd_ptr_a, rd_ptr_b;
@@ -138,18 +154,26 @@ end
 // ---------------------------------------------------------------------------
 wire do_read = rd_en && !buf_empty;
 
-// Output: select sub-word from current word, sign-extend INT8 to DATA_W
+// Current memory word
 wire [DATA_W-1:0] rd_mem = (rd_sel == 1'b0)
     ? mem_a[rd_ptr]
     : mem_b[rd_ptr];
 
-wire [7:0] rd_byte = (rd_sub == 0) ? rd_mem[ 7:0] :
-                     (rd_sub == 1) ? rd_mem[15:8] :
+// ---- INT8 path: read one byte, sign-extend to OUT_WIDTH ----
+wire [7:0] rd_byte = (rd_sub == 0) ? rd_mem[ 7: 0] :
+                     (rd_sub == 1) ? rd_mem[15: 8] :
                      (rd_sub == 2) ? rd_mem[23:16] :
                                      rd_mem[31:24];
+wire [OUT_WIDTH-1:0] rd_int8 = {{(OUT_WIDTH-8){rd_byte[7]}}, rd_byte};
 
-// Sign-extend INT8 to OUT_WIDTH
-wire [OUT_WIDTH-1:0] rd_data_raw = {{(OUT_WIDTH-8){rd_byte[7]}}, rd_byte};
+// ---- FP16 path: read one 16-bit half-word, zero-extend to OUT_WIDTH ----
+// FP16 is always zero-extended (IEEE 754 bit pattern must NOT be sign-extended)
+wire [15:0] rd_fp16_hw = (rd_sub == 0) ? rd_mem[15: 0] :
+                                          rd_mem[31:16];
+wire [OUT_WIDTH-1:0] rd_fp16 = {{(OUT_WIDTH-16){1'b0}}, rd_fp16_hw};
+
+// Mux based on fp16_mode
+wire [OUT_WIDTH-1:0] rd_data_raw = fp16_mode ? rd_fp16 : rd_int8;
 
 // When buffer is empty, output 0 to avoid PE latching stale data
 assign rd_data = buf_empty ? {OUT_WIDTH{1'b0}} : rd_data_raw;
@@ -159,22 +183,24 @@ always @(posedge clk) begin
     if (!rst_n || clear) begin
         rd_ptr_a   <= 0;  rd_sub_a <= 0;  rd_fill_a <= 0;
         rd_ptr_b   <= 0;  rd_sub_b <= 0;  rd_fill_b <= 0;
-        if (clear) ; // silently clear
     end else if (swap) begin
         // New reader's bank = old writer's bank = wr_sel (before swap)
-        // Copy the write fill count as the read fill count (× SUBW)
+        // Copy the write fill count as the read fill count
+        //   INT8:  × SUBW (=4 sub-words per word)
+        //   FP16:  × 2    (=2 half-words per word)
         if (wr_sel == 1'b0) begin
             rd_ptr_a  <= 0;
             rd_sub_a  <= 0;
-            rd_fill_a <= wr_fill_a * SUBW;
+            rd_fill_a <= fp16_mode ? (wr_fill_a << 1) : (wr_fill_a * SUBW);
         end else begin
             rd_ptr_b  <= 0;
             rd_sub_b  <= 0;
-            rd_fill_b <= wr_fill_b * SUBW;
+            rd_fill_b <= fp16_mode ? (wr_fill_b << 1) : (wr_fill_b * SUBW);
         end
     end else if (do_read) begin
         if (rd_sel == 1'b0) begin
-            if (rd_sub_a == (SUBW-1)) begin
+            // Advance sub-word index; wrap at eff_subw_last
+            if (rd_sub_a == eff_subw_last) begin
                 rd_ptr_a  <= rd_ptr_a + 1'b1;
                 rd_sub_a  <= 0;
             end else begin
@@ -182,7 +208,7 @@ always @(posedge clk) begin
             end
             rd_fill_a <= rd_fill_a - 1'b1;
         end else begin
-            if (rd_sub_b == (SUBW-1)) begin
+            if (rd_sub_b == eff_subw_last) begin
                 rd_ptr_b  <= rd_ptr_b + 1'b1;
                 rd_sub_b  <= 0;
             end else begin

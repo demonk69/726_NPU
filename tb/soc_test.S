@@ -1,35 +1,41 @@
 # =============================================================================
-# soc_test.S - RISC-V test firmware for NPU SoC integration test
+# soc_test.S - RISC-V firmware for NPU SoC integration test
 #
-# This firmware:
-#   1. Configures NPU registers (matrix dims, DMA addresses, PE config)
-#   2. Starts NPU computation (4×4 INT8 matrix multiply)
-#   3. Polls NPU status register for completion
-#   4. Verifies result from DRAM
-#   5. Writes PASS (0xAA) or FAIL (0xFF) marker to DRAM[0x0F00]
+# Test: 2x2 INT8 matrix multiply in OS tile-loop mode
+#   C = A * B   where:
+#     A = [[1, 2],    B = [[5, 6],
+#          [3, 4]]         [7, 8]]
+#     C = [[19, 22],
+#          [43, 50]]
 #
-# Memory Map:
-#   0x0000_0000 - 0x0000_0FFF  SRAM (code + data)
-#   0x0000_1000 - 0x0000_FFFF  DRAM (NPU data area)
-#   0x0200_0000 - 0x0200_003F  NPU Registers
+# DRAM Layout (pre-loaded by tb_soc.v):
+#   W_ADDR 0x1000: B column-major, stride = K*1 bytes rounded to 4
+#     B[:,0] = [5, 7] -> word at 0x1000: 0x00000705
+#     B[:,1] = [6, 8] -> word at 0x1004: 0x00000806
+#   A_ADDR 0x1010: A row-major
+#     A[0,:] = [1, 2] -> word at 0x1010: 0x00000201
+#     A[1,:] = [3, 4] -> word at 0x1014: 0x00000403
+#   R_ADDR 0x1020: 4 x 32-bit result words (written by NPU DMA)
+#     C[0][0]=19, C[0][1]=22, C[1][0]=43, C[1][1]=50
+#   MARKER 0x2000: 0xAA (PASS) or 0xFF (FAIL)  -- DRAM space (>= 0x1000)
 #
-# NPU Register Map (offset from 0x0200_0000):
-#   0x00  CTRL      bit0=start, bit1=abort, [3:2]=mode, [5:4]=stat
-#   0x04  STATUS    bit0=busy, bit1=done
-#   0x08  INT_EN    interrupt enable
-#   0x10  M_DIM     matrix M dimension
-#   0x14  N_DIM     matrix N dimension
-#   0x18  K_DIM     matrix K dimension
-#   0x20  W_ADDR    weight base address in DRAM
-#   0x24  A_ADDR    activation base address in DRAM
-#   0x28  R_ADDR    result base address in DRAM
-#   0x30  ARR_CFG   [3:0]=rows, [7:4]=cols
+# NPU Register Map (NPU_BASE = 0x0200_0000):
+#   Offset 0x00: CTRL    bit0=start, bit1=abort, [3:2]=dtype, [5:4]=stat_mode
+#                         stat_mode: 00=WS, 01=OS
+#                         dtype:     00=INT8, 01=FP16
+#   Offset 0x04: STATUS  bit0=busy, bit1=done
+#   Offset 0x08: INT_EN
+#   Offset 0x0C: INT_CLR
+#   Offset 0x10: M_DIM
+#   Offset 0x14: N_DIM
+#   Offset 0x18: K_DIM
+#   Offset 0x20: W_ADDR
+#   Offset 0x24: A_ADDR
+#   Offset 0x28: R_ADDR
 #
-# DRAM Data Layout (pre-loaded by testbench):
-#   Weight:  @ 0x0000_1000  (4×4 INT8 identity matrix)
-#   Activ:   @ 0x0000_1200  (4×4 INT8, [[1..4],[5..8],[9..12],[13..16]])
-#   Result:  @ 0x0000_1400  (expected: same as activation for identity W)
-#   Marker:  @ 0x0000_0F00  (firmware writes PASS/FAIL here)
+# OS mode CTRL value:
+#   bit0=1 (start), bit1=0, [3:2]=00 (INT8), [5:4]=01 (OS)
+#   CTRL = 0x11
 # =============================================================================
 
     .section .text.init, "ax", @progbits
@@ -37,126 +43,99 @@
     .option norvc
 
 _start:
-    # ---- Save stack pointer ----
-    addi    sp, sp, -16
-    sw      ra, 12(sp)
+    # ---- Setup stack ----
+    li      sp, 0x00001000       # SRAM top (4KB)
 
     # ---- Load NPU base address ----
-    li      t0, 0x02000000          # NPU register base
+    li      t0, 0x02000000       # NPU register base
 
-    # ==== Configure NPU registers ====
-
-    # M_DIM = 4
-    li      t1, 4
+    # ==== Configure NPU dimensions ====
+    # M_DIM = 2 (rows of A, rows of C)
+    li      t1, 2
     sw      t1, 0x10(t0)
 
-    # N_DIM = 4
-    li      t1, 4
+    # N_DIM = 2 (cols of B, cols of C)
+    li      t1, 2
     sw      t1, 0x14(t0)
 
-    # K_DIM = 4
-    li      t1, 4
+    # K_DIM = 2 (cols of A = rows of B)
+    li      t1, 2
     sw      t1, 0x18(t0)
 
-    # W_ADDR = 0x0000_1000 (weight in DRAM)
+    # ==== Configure DMA addresses ====
+    # W_ADDR = 0x1000 (B matrix column-major)
     li      t1, 0x00001000
     sw      t1, 0x20(t0)
 
-    # A_ADDR = 0x0000_1200 (activation in DRAM)
-    li      t1, 0x00001200
+    # A_ADDR = 0x1010 (A matrix row-major)
+    li      t1, 0x00001010
     sw      t1, 0x24(t0)
 
-    # R_ADDR = 0x0000_1400 (result in DRAM)
-    li      t1, 0x00001400
+    # R_ADDR = 0x1020 (result area)
+    li      t1, 0x00001020
     sw      t1, 0x28(t0)
 
-    # ARR_CFG = 0x44 (4 rows × 4 cols)
-    li      t1, 0x44
-    sw      t1, 0x30(t0)
-
-    # Enable interrupt (optional, we'll poll instead)
-    li      t1, 1
-    sw      t1, 0x08(t0)
-
-    # ==== Start NPU ====
-    # CTRL = 0x01 (start=1, mode=INT8, stat=WS)
-    li      t1, 0x01
+    # ==== Start NPU (OS mode, INT8) ====
+    # CTRL = 0x11: start=1, dtype=INT8 (bits[3:2]=00), stat_mode=OS (bits[5:4]=01)
+    li      t1, 0x11
     sw      t1, 0x00(t0)
 
-    # ==== Poll for completion ====
+    # ==== Poll STATUS until done ====
 poll_loop:
-    lw      t1, 0x04(t0)           # Read STATUS register
-    andi    t1, t1, 0x02           # Check bit1 (done)
+    lw      t1, 0x04(t0)         # Read STATUS
+    andi    t1, t1, 0x02         # Check bit1 (done)
     beqz    t1, poll_loop
 
-    # ==== Clear interrupt flag ====
-    li      t1, 0x01
-    sw      t1, 0x0C(t0)           # Write INT_CLR
+    # ==== Verify results ====
+    # R_ADDR = 0x1020
+    # C[0][0] = 19 = 0x13
+    # C[0][1] = 22 = 0x16
+    # C[1][0] = 43 = 0x2B
+    # C[1][1] = 50 = 0x32
+    li      t2, 0x00001020       # result base address
+    li      t6, 0                # error flag
 
-    # ==== Verify result ====
-    # Result is at DRAM[0x1400..0x141F] (4×4 INT8 = 16 bytes = 4 words)
-    # Expected: C = A × I = A = [[1,2,3,4],[5,6,7,8],[9,10,11,12],[13,14,15,16]]
-    # Stored as 32-bit words: each word = 4 INT8 values
+    # Check C[0][0] == 19
+    lw      t1, 0(t2)
+    li      t3, 19
+    bne     t1, t3, verify_fail
 
-    li      t2, 0x00001400         # Result base address
-    li      t3, 0                  # row counter
-    li      t5, 4                  # max rows
-    li      t6, 0                  # error flag
+    # Check C[0][1] == 22
+    lw      t1, 4(t2)
+    li      t3, 22
+    bne     t1, t3, verify_fail
 
-verify_row:
-    beq     t3, t5, verify_done
+    # Check C[1][0] == 43
+    lw      t1, 8(t2)
+    li      t3, 43
+    bne     t1, t3, verify_fail
 
-    lw      t1, 0(t2)             # Load result word
-    # Compute expected value
-    # Row 0: 1,2,3,4 -> 0x04030201
-    # Row 1: 5,6,7,8 -> 0x08070605
-    # Row 2: 9,10,11,12 -> 0x0C0B0A09
-    # Row 3: 13,14,15,16 -> 0x100F0E0D
-    mv      t4, t3
-    slli    t4, t4, 2              # t4 = row * 4
-    add     t4, t4, t3             # t4 = row * 5... no, we need byte value
+    # Check C[1][1] == 50
+    lw      t1, 12(t2)
+    li      t3, 50
+    bne     t1, t3, verify_fail
 
-    # Simpler approach: compute expected packed word
-    # expected_byte = row*4 + col, for col in [0..3]
-    li      t4, 1
-    slli    t7, t3, 2              # t7 = row * 4
-    add     t4, t7, t4             # t4 = row*4 + 1 (first element of this row)
-    # Pack 4 bytes: t4, t4+1, t4+2, t4+3 into expected
-    li      t7, 0
-    slli    t7, t4, 24
-    addi    t8, t4, 1
-    slli    t8, t8, 16
-    or      t7, t7, t8
-    addi    t8, t4, 2
-    slli    t8, t8, 8
-    or      t7, t7, t8
-    or      t7, t7, t4             # t7 = expected packed word (little-endian: b3b2b1b0)
-
-    bne     t1, t7, verify_fail
-
-    addi    t2, t2, 4
-    addi    t3, t3, 1
-    j       verify_row
+    # All checks passed
+    j       write_pass
 
 verify_fail:
-    li      t6, 1                  # set error flag
+    li      t6, 1
 
-verify_done:
-    # ==== Write PASS/FAIL marker ====
-    li      t0, 0x00000F00         # marker address in DRAM
+write_marker:
+    li      t0, 0x00002000       # marker DRAM address
     beqz    t6, write_pass
 
 write_fail:
-    li      t1, 0x000000FF         # FAIL magic
+    li      t1, 0x000000FF       # FAIL magic
     sw      t1, 0(t0)
     j       end
 
 write_pass:
-    li      t1, 0x000000AA         # PASS magic
+    li      t0, 0x00002000
+    li      t1, 0x000000AA       # PASS magic
     sw      t1, 0(t0)
 
 end:
-    # Infinite loop (testbench will detect the marker and $finish)
-    j       end
+    j       end                  # infinite loop, testbench detects marker
 
     .option rvc

@@ -1,3 +1,7 @@
+`ifndef PICORV32_REGS
+  `define PICORV32_REGS picorv32_regs
+`endif
+
 // =============================================================================
 // Module  : soc_top
 // Project : NPU_prj

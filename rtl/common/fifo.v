@@ -16,6 +16,7 @@ module sync_fifo #(
 )(
     input  wire                  clk,
     input  wire                  rst_n,
+    input  wire                  clear,     // synchronous clear: reset pointers (no rst_n needed)
     // write port
     input  wire                  wr_en,
     input  wire [DATA_W-1:0]     wr_data,
@@ -46,7 +47,7 @@ reg [DATA_W-1:0] mem [0:DEPTH-1];
 // ---------------------------------------------------------------------------
 wire do_write = wr_en && !full;
 always @(posedge clk) begin
-    if (!rst_n)
+    if (!rst_n || clear)
         head_ptr <= 0;
     else if (do_write)
         head_ptr <= head_ptr + 1'b1;
@@ -64,7 +65,7 @@ wire do_read = rd_en && !empty;
 assign rd_data = mem[tail_ptr[ADDR_W-1:0]];
 
 always @(posedge clk) begin
-    if (!rst_n)
+    if (!rst_n || clear)
         tail_ptr <= 0;
     else if (do_read)
         tail_ptr <= tail_ptr + 1'b1;

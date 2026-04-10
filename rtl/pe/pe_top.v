@@ -153,15 +153,18 @@ end
 // Stage-2: Accumulate / output
 //
 // WS (Weight-Stationary):
-//   acc_out = acc_in + product. FP16 uses fp16_add; INT8 uses integer add.
-//   The external accumulator chain provides acc_in each cycle.
+//   Internal ws_acc accumulates products across K beats.
+//   flush=1 outputs the accumulated sum and clears ws_acc.
+//   This produces exactly ONE result per tile (the full dot-product).
+//   FP16 uses fp32_add (mixed-precision); INT8 uses signed integer add.
 //
 // OS (Output-Stationary):
 //   Internal os_acc accumulates products. flush=1 outputs and clears.
-//   FP16 uses fp16_add; INT8 uses signed integer add.
+//   FP16 uses fp32_add; INT8 uses signed integer add.
 // ---------------------------------------------------------------------------
 
 reg [ACC_W-1:0]  os_acc;      // Output-Stationary accumulator
+reg [ACC_W-1:0]  ws_acc;      // Weight-Stationary accumulator
 
 // --- FP16 to FP32 conversion (for mixed-precision accumulation) ---
 // Correctly re-maps exponent bias from 15 (FP16) to 127 (FP32)
@@ -193,8 +196,8 @@ endfunction
 
 // --- FP32 adder for FP16 mixed-precision accumulation ---
 // OS path: os_acc (already FP32) + FP16 mul product (converted to FP32)
-// WS path: s1_acc_in (already FP32 from upstream) + FP16 mul product (converted to FP32)
-wire [31:0] fp32_a = s1_stat ? os_acc : s1_acc_in;
+// WS flush path: ws_acc (already FP32 accumulated) + FP16 mul product (converted to FP32)
+wire [31:0] fp32_a = s1_stat ? os_acc : ws_acc;
 wire [31:0] fp32_b = fp16_to_fp32(s1_mul[15:0]);
 wire [31:0] fp32_sum;
 
@@ -204,9 +207,20 @@ fp32_add u_fp32_add (
     .result (fp32_sum)
 );
 
+// --- Additional FP32 adder for WS external accumulation (acc_in + product) ---
+// Note: s1_acc_in is already FP32 (passed from previous acc_out), no conversion needed
+wire [31:0] fp32_ws_ext_sum;
+
+fp32_add u_fp32_add_ws_ext (
+    .a      (s1_acc_in),
+    .b      (fp32_b),
+    .result (fp32_ws_ext_sum)
+);
+
 always @(posedge clk) begin
     if (!rst_n) begin
         os_acc    <= 0;
+        ws_acc    <= 0;
         acc_out   <= 0;
         valid_out <= 0;
     end else begin
@@ -215,15 +229,37 @@ always @(posedge clk) begin
         if (s1_valid) begin
             if (s1_stat == 1'b0) begin
                 // ----- Weight-Stationary -----
-                // acc_out = acc_in + product (one-cycle throughput, no internal acc)
-                if (s1_mode) begin
-                    // FP16: FP32 mixed-precision accumulation
-                    acc_out   <= fp32_sum;
+                // Internal ws_acc accumulates products across K beats.
+                // flush=1: output accumulated sum, clear ws_acc.
+                // flush=0: accumulate product silently (no output).
+                if (s1_flush) begin
+                    // Flush: output internal accumulated sum, then clear.
+                    // WS mode: flush is a PURE output operation.
+                    // The flush beat carries NO new data (a_in should be 0 in TB).
+                    // ws_acc already contains sum of all previous K products.
+                    if (s1_mode) begin
+                        // FP16: output ws_acc directly (no FP32 addition needed)
+                        acc_out <= ws_acc;
+                        ws_acc  <= 32'd0;
+                    end else begin
+                        // INT8: output ws_acc directly, then clear
+                        acc_out <= ws_acc;
+                        ws_acc  <= 32'd0;
+                    end
+                    valid_out <= 1'b1;
                 end else begin
-                    // INT8: signed integer accumulation
-                    acc_out   <= $signed(s1_acc_in) + $signed(s1_mul);
+                    // Normal beat: internal accumulation (no output)
+                    // ws_acc accumulates products across K beats
+                    if (s1_mode) begin
+                        // FP16: FP32 mixed-precision accumulation
+                        ws_acc <= fp32_sum;
+                    end else begin
+                        // INT8: signed integer accumulation
+                        ws_acc <= $signed(ws_acc) + $signed(s1_mul);
+                    end
+                    // No output during normal beats
+                    valid_out <= 1'b0;
                 end
-                valid_out <= 1'b1;
             end else begin
                 // ----- Output-Stationary -----
                 if (s1_flush) begin

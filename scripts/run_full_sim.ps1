@@ -26,7 +26,9 @@ $Sources = @(
     (Join-Path $RtlDir "common\fifo.v"),
     (Join-Path $RtlDir "common\axi_monitor.v"),
     (Join-Path $RtlDir "common\op_counter.v"),
+    (Join-Path $RtlDir "buf\pingpong_buf.v"),
     (Join-Path $RtlDir "array\pe_array.v"),
+
     (Join-Path $RtlDir "power\npu_power.v"),
     (Join-Path $RtlDir "ctrl\npu_ctrl.v"),
     (Join-Path $RtlDir "axi\npu_axi_lite.v"),

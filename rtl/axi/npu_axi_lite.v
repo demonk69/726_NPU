@@ -111,7 +111,12 @@ always @(posedge aclk) begin
         cg_en     <= 0;
     end else if (wr_en) begin
         case (awaddr_q)
-            32'h00: if (w_strb[0]) ctrl_reg  <= wdata;
+            32'h00: begin
+                if (w_strb[0]) begin
+                    // $display("[AXI-WR] addr=%h wdata=%h (prev ctrl=%h)", awaddr_q, wdata, ctrl_reg);
+                    ctrl_reg <= wdata;
+                end
+            end
             32'h08: if (w_strb[0]) int_en_reg <= wdata;
             32'h0C: int_clr_reg  <= wdata;  // W1C handled below
             32'h10: if (w_strb[0]) m_dim   <= wdata;

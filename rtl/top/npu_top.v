@@ -142,7 +142,9 @@ wire dma_w_done,  dma_a_done,  dma_r_done;
 wire [31:0] dma_w_addr, dma_a_addr, dma_r_addr;
 wire [15:0] dma_w_len,  dma_a_len,  dma_r_len;
 wire pe_en, pe_flush, pe_mode, pe_stat;
+wire pe_load_w;   // WS mode: latch weight into PE
 wire ctrl_w_ppb_swap, ctrl_a_ppb_swap, ctrl_w_ppb_clear, ctrl_a_ppb_clear;
+wire ctrl_r_fifo_clear;  // Result FIFO clear from controller
 
 npu_ctrl #(
     .ROWS  (ROWS),
@@ -178,6 +180,7 @@ npu_ctrl #(
     .pe_flush   (pe_flush),
     .pe_mode    (pe_mode),
     .pe_stat    (pe_stat),
+    .pe_load_w  (pe_load_w),
     .w_ppb_ready(u_w_ppb.buf_ready),
     .w_ppb_empty(u_w_ppb.buf_empty),
     .a_ppb_ready(u_a_ppb.buf_ready),
@@ -186,6 +189,7 @@ npu_ctrl #(
     .a_ppb_swap(ctrl_a_ppb_swap),
     .w_ppb_clear(ctrl_w_ppb_clear),
     .a_ppb_clear(ctrl_a_ppb_clear),
+    .r_fifo_clear(ctrl_r_fifo_clear),
     .irq        (irq_flag)
 );
 
@@ -202,8 +206,7 @@ wire [DATA_W-1:0] w_ppb_rd_data, a_ppb_rd_data;
 wire w_ppb_buf_ready_int, w_ppb_buf_empty_int;
 wire a_ppb_buf_ready_int, a_ppb_buf_empty_int;
 
-assign w_ppb_rd_en = pe_en && !w_ppb_buf_empty_int;
-assign a_ppb_rd_en = pe_en && !a_ppb_buf_empty_int;
+// Note: w_ppb_rd_en and a_ppb_rd_en are now defined in FP16 packer logic below
 
 // Weight Ping-Pong Buffer
 pingpong_buf #(
@@ -211,7 +214,7 @@ pingpong_buf #(
     .DEPTH     (PPB_DEPTH),   // 64 words per bank
     .OUT_WIDTH (DATA_W),      // 16-bit PE input
     .THRESHOLD (PPB_THRESH),
-    .SUBW      (4)            // 4 INT8 sub-words per 32-bit word
+    .SUBW      (4)            // max 4 INT8 sub-words per 32-bit word
 ) u_w_ppb (
     .clk       (sys_clk),
     .rst_n     (sys_rst_n),
@@ -221,6 +224,7 @@ pingpong_buf #(
     .rd_data   (w_ppb_rd_data),
     .swap      (ctrl_w_ppb_swap),
     .clear     (ctrl_w_ppb_clear),
+    .fp16_mode (pe_mode),        // pe_mode=1 → FP16: 16-bit reads (2/word)
     .buf_empty (w_ppb_buf_empty_int),
     .buf_full  (w_ppb_full),
     .buf_ready (w_ppb_buf_ready_int),
@@ -244,6 +248,7 @@ pingpong_buf #(
     .rd_data   (a_ppb_rd_data),
     .swap      (ctrl_a_ppb_swap),
     .clear     (ctrl_a_ppb_clear),
+    .fp16_mode (pe_mode),        // pe_mode=1 → FP16: 16-bit reads (2/word)
     .buf_empty (a_ppb_buf_empty_int),
     .buf_full  (a_ppb_full),
     .buf_ready (a_ppb_buf_ready_int),
@@ -293,6 +298,7 @@ npu_dma #(
     .r_base_addr    (dma_r_addr),
     .r_len_bytes    (dma_r_len),
     .r_done         (dma_r_done),
+    .r_fifo_clear   (ctrl_r_fifo_clear),
     .r_fifo_wr_en   (r_fifo_wr_en),
     .r_fifo_din     (r_fifo_din),
     .r_fifo_full    (r_fifo_full),
@@ -334,6 +340,33 @@ assign r_fifo_din  = pe_array_result;
 assign r_fifo_wr_en = pe_en && |pe_array_valid;  // any column valid
 
 // ---------------------------------------------------------------------------
+// FP16 Packer Logic
+// ---------------------------------------------------------------------------
+// For FP16 mode: PPBuf outputs complete 16-bit FP16 values directly.
+// Each 32-bit DRAM word contains 2 FP16 values (rd_sub=0: [15:0], rd_sub=1: [31:16]).
+// The PPBuf already handles reading the correct 16-bit half-word.
+//
+// For INT8 mode: PPBuf outputs sign-extended 8-bit values.
+//
+// pe_consume triggers when:
+//   - INT8: both buffers have data (simple ready check)
+//   - FP16: both buffers have data AND pe_en is active
+//
+// In both modes, w_ppb_rd_en and a_ppb_rd_en should assert when pe_consume
+// is active to advance the PPBuf read pointers.
+
+wire pe_data_ready = !w_ppb_buf_empty_int && !a_ppb_buf_empty_int;
+
+// pe_consume: pulse to consume one pair of weight+activation
+// Note: For FP16, we consume when data is ready (PPBuf already outputs 16-bit FP16)
+wire pe_consume = pe_en && (pe_data_ready || pe_flush);
+
+// Generate read enables for PPBuf
+// Both INT8 and FP16 use the same consume logic
+assign w_ppb_rd_en = pe_consume;
+assign a_ppb_rd_en = pe_consume;
+
+// ---------------------------------------------------------------------------
 // PE Array
 // ---------------------------------------------------------------------------
 wire [COLS*ACC_W-1:0] pe_array_result;
@@ -341,10 +374,16 @@ wire [COLS-1:0]       pe_array_valid;
 wire [COLS*DATA_W-1:0] pe_w_in, pe_a_in;
 wire [COLS*ACC_W-1:0]  pe_acc_in;
 
+// Data source: PPBuf outputs correct format for both INT8 and FP16
+// - INT8: sign-extended 8-bit value in [7:0], [15:8] is sign extension
+// - FP16: complete 16-bit FP16 value
+wire [DATA_W-1:0] pe_w_data = w_ppb_rd_data;
+wire [DATA_W-1:0] pe_a_data = a_ppb_rd_data;
+
 // Weight PPBuf output → PE array input (broadcast to all rows in each column)
-assign pe_w_in = {(COLS){w_ppb_rd_data}};
+assign pe_w_in = {(COLS){pe_w_data}};
 // Activation PPBuf output → PE array input (one per row)
-assign pe_a_in = {(ROWS){a_ppb_rd_data}};
+assign pe_a_in = {(ROWS){pe_a_data}};
 assign pe_acc_in = 0;
 
 pe_array #(
@@ -359,6 +398,7 @@ pe_array #(
     .stat_mode(pe_stat),
     .en       (pe_en),
     .flush    (pe_flush),
+    .load_w   (pe_load_w),
     .w_in     (pe_w_in),
     .act_in   (pe_a_in),
     .acc_in   (pe_acc_in),

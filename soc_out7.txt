@@ -1,0 +1,407 @@
+VCD info: dumpfile soc_sim.vcd opened for output.
+[DBG cy=x] mem_valid=1 addr=0x00000000 instr=1 wstrb=0000 wdata=0xxxxxxxxx rdata=0x020002b7
+[DBG cy=x] mem_valid=1 addr=0x00000004 instr=1 wstrb=0000 wdata=0xxxxxxxxx rdata=0x00200313
+[DBG cy=x] mem_valid=1 addr=0x00000008 instr=1 wstrb=0000 wdata=0xxxxxxxxx rdata=0x0062a823
+[DBG cy=x] mem_valid=1 addr=0x0000000c instr=1 wstrb=0000 wdata=0xxxxxxxxx rdata=0x00200313
+[DBG cy=x] mem_valid=1 addr=0x02000010 instr=0 wstrb=1111 wdata=0x00000002 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000010 instr=0 wstrb=1111 wdata=0x00000002 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000010 instr=0 wstrb=1111 wdata=0x00000002 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000010 instr=0 wstrb=1111 wdata=0x00000002 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x00000010 instr=1 wstrb=0000 wdata=0x00000002 rdata=0x0062aa23
+[DBG cy=x] mem_valid=1 addr=0x00000014 instr=1 wstrb=0000 wdata=0x00000002 rdata=0x00200313
+[DBG cy=x] mem_valid=1 addr=0x02000014 instr=0 wstrb=1111 wdata=0x00000002 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000014 instr=0 wstrb=1111 wdata=0x00000002 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000014 instr=0 wstrb=1111 wdata=0x00000002 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000014 instr=0 wstrb=1111 wdata=0x00000002 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x00000018 instr=1 wstrb=0000 wdata=0x00000002 rdata=0x0062ac23
+[DBG cy=x] mem_valid=1 addr=0x0000001c instr=1 wstrb=0000 wdata=0x00000002 rdata=0x00001337
+[DBG cy=x] mem_valid=1 addr=0x02000018 instr=0 wstrb=1111 wdata=0x00000002 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000018 instr=0 wstrb=1111 wdata=0x00000002 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000018 instr=0 wstrb=1111 wdata=0x00000002 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000018 instr=0 wstrb=1111 wdata=0x00000002 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x00000020 instr=1 wstrb=0000 wdata=0x00000002 rdata=0x0262a023
+[DBG cy=x] mem_valid=1 addr=0x00000024 instr=1 wstrb=0000 wdata=0x00000002 rdata=0x00001337
+[DBG cy=x] mem_valid=1 addr=0x02000020 instr=0 wstrb=1111 wdata=0x00001000 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000020 instr=0 wstrb=1111 wdata=0x00001000 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000020 instr=0 wstrb=1111 wdata=0x00001000 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000020 instr=0 wstrb=1111 wdata=0x00001000 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x00000028 instr=1 wstrb=0000 wdata=0x00001000 rdata=0x01030313
+[DBG cy=x] mem_valid=1 addr=0x0000002c instr=1 wstrb=0000 wdata=0x00001000 rdata=0x0262a223
+[DBG cy=x] mem_valid=1 addr=0x00000030 instr=1 wstrb=0000 wdata=0x00001000 rdata=0x00001337
+[DBG cy=x] mem_valid=1 addr=0x02000024 instr=0 wstrb=1111 wdata=0x00001010 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000024 instr=0 wstrb=1111 wdata=0x00001010 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000024 instr=0 wstrb=1111 wdata=0x00001010 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000024 instr=0 wstrb=1111 wdata=0x00001010 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x00000034 instr=1 wstrb=0000 wdata=0x00001010 rdata=0x02030313
+[DBG cy=x] mem_valid=1 addr=0x00000038 instr=1 wstrb=0000 wdata=0x00001010 rdata=0x0262a423
+[DBG cy=x] mem_valid=1 addr=0x0000003c instr=1 wstrb=0000 wdata=0x00001010 rdata=0x01100313
+[DBG cy=x] mem_valid=1 addr=0x02000028 instr=0 wstrb=1111 wdata=0x00001020 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000028 instr=0 wstrb=1111 wdata=0x00001020 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000028 instr=0 wstrb=1111 wdata=0x00001020 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000028 instr=0 wstrb=1111 wdata=0x00001020 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x00000040 instr=1 wstrb=0000 wdata=0x00001020 rdata=0x0062a023
+[DBG cy=x] mem_valid=1 addr=0x00000044 instr=1 wstrb=0000 wdata=0x00001020 rdata=0x0042a303
+[DBG cy=x] mem_valid=1 addr=0x02000000 instr=0 wstrb=1111 wdata=0x00000011 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000000 instr=0 wstrb=1111 wdata=0x00000011 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000000 instr=0 wstrb=1111 wdata=0x00000011 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000000 instr=0 wstrb=1111 wdata=0x00000011 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x00000048 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x00237313
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000000
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x0000004c instr=1 wstrb=0000 wdata=0x00000011 rdata=0xfe030ce3
+[DBG cy=x] mem_valid=1 addr=0x00000050 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x000013b7
+[DBG cy=x] mem_valid=1 addr=0x00000044 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x0042a303
+[DBG cy=x] mem_valid=1 addr=0x00000048 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x00237313
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x0000004c instr=1 wstrb=0000 wdata=0x00000011 rdata=0xfe030ce3
+[DBG cy=x] mem_valid=1 addr=0x00000050 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x000013b7
+[DBG cy=x] mem_valid=1 addr=0x00000044 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x0042a303
+[DBG cy=x] mem_valid=1 addr=0x00000048 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x00237313
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x0000004c instr=1 wstrb=0000 wdata=0x00000011 rdata=0xfe030ce3
+[DBG cy=x] mem_valid=1 addr=0x00000050 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x000013b7
+[DBG cy=x] mem_valid=1 addr=0x00000044 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x0042a303
+[DBG cy=x] mem_valid=1 addr=0x00000048 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x00237313
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x0000004c instr=1 wstrb=0000 wdata=0x00000011 rdata=0xfe030ce3
+[DBG cy=x] mem_valid=1 addr=0x00000050 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x000013b7
+[DBG cy=x] mem_valid=1 addr=0x00000044 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x0042a303
+[DBG cy=x] mem_valid=1 addr=0x00000048 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x00237313
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x0000004c instr=1 wstrb=0000 wdata=0x00000011 rdata=0xfe030ce3
+[DBG cy=x] mem_valid=1 addr=0x00000050 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x000013b7
+[DBG cy=x] mem_valid=1 addr=0x00000044 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x0042a303
+[DBG cy=x] mem_valid=1 addr=0x00000048 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x00237313
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x0000004c instr=1 wstrb=0000 wdata=0x00000011 rdata=0xfe030ce3
+[DBG cy=x] mem_valid=1 addr=0x00000050 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x000013b7
+[DBG cy=x] mem_valid=1 addr=0x00000044 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x0042a303
+[DBG cy=x] mem_valid=1 addr=0x00000048 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x00237313
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x0000004c instr=1 wstrb=0000 wdata=0x00000011 rdata=0xfe030ce3
+[DBG cy=x] mem_valid=1 addr=0x00000050 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x000013b7
+[DBG cy=x] mem_valid=1 addr=0x00000044 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x0042a303
+[DBG cy=x] mem_valid=1 addr=0x00000048 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x00237313
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000001
+[DBG cy=x] mem_valid=1 addr=0x02000004 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000002
+[DBG cy=x] mem_valid=1 addr=0x0000004c instr=1 wstrb=0000 wdata=0x00000011 rdata=0xfe030ce3
+[DBG cy=x] mem_valid=1 addr=0x00000050 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x000013b7
+[DBG cy=x] mem_valid=1 addr=0x00000054 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x02038393
+[DBG cy=x] mem_valid=1 addr=0x00000058 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x0003a303
+[DBG cy=x] mem_valid=1 addr=0x0000005c instr=1 wstrb=0000 wdata=0x00000011 rdata=0x01300e13
+[DBG cy=x] mem_valid=1 addr=0x00001020 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000013
+[DBG cy=x] mem_valid=1 addr=0x00000060 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x01c31463
+[DBG cy=x] mem_valid=1 addr=0x00000064 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x0043a303
+[DBG cy=x] mem_valid=1 addr=0x00000068 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x01600e13
+[DBG cy=x] mem_valid=1 addr=0x00001024 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000016
+[DBG cy=x] mem_valid=1 addr=0x0000006c instr=1 wstrb=0000 wdata=0x00000011 rdata=0x01c31263
+[DBG cy=x] mem_valid=1 addr=0x00000070 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x0083a303
+[DBG cy=x] mem_valid=1 addr=0x00000074 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x02b00e13
+[DBG cy=x] mem_valid=1 addr=0x00001028 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x0000002b
+[DBG cy=x] mem_valid=1 addr=0x00000078 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x01c31163
+[DBG cy=x] mem_valid=1 addr=0x0000007c instr=1 wstrb=0000 wdata=0x00000011 rdata=0x00c3a303
+[DBG cy=x] mem_valid=1 addr=0x00000080 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x03200e13
+[DBG cy=x] mem_valid=1 addr=0x0000102c instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000032
+[DBG cy=x] mem_valid=1 addr=0x00000084 instr=1 wstrb=0000 wdata=0x00000011 rdata=0xffc31fe3
+[DBG cy=x] mem_valid=1 addr=0x00000088 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x000013b7
+[DBG cy=x] mem_valid=1 addr=0x0000008c instr=1 wstrb=0000 wdata=0x00000011 rdata=0x02038393
+[DBG cy=x] mem_valid=1 addr=0x00000090 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x0003a303
+[DBG cy=x] mem_valid=1 addr=0x00000094 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x01300e13
+[DBG cy=x] mem_valid=1 addr=0x00001020 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000013
+[DBG cy=x] mem_valid=1 addr=0x00000098 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x05c31263
+[DBG cy=x] mem_valid=1 addr=0x0000009c instr=1 wstrb=0000 wdata=0x00000011 rdata=0x0043a303
+[DBG cy=x] mem_valid=1 addr=0x000000a0 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x01600e13
+[DBG cy=x] mem_valid=1 addr=0x00001024 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000016
+[DBG cy=x] mem_valid=1 addr=0x000000a4 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x03c31c63
+[DBG cy=x] mem_valid=1 addr=0x000000a8 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x0083a303
+[DBG cy=x] mem_valid=1 addr=0x000000ac instr=1 wstrb=0000 wdata=0x00000011 rdata=0x02b00e13
+[DBG cy=x] mem_valid=1 addr=0x00001028 instr=0 wstrb=0000 wdata=0x00000011 rdata=0x0000002b
+[DBG cy=x] mem_valid=1 addr=0x000000b0 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x03c31663
+[DBG cy=x] mem_valid=1 addr=0x000000b4 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x00c3a303
+[DBG cy=x] mem_valid=1 addr=0x000000b8 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x03200e13
+[DBG cy=x] mem_valid=1 addr=0x0000102c instr=0 wstrb=0000 wdata=0x00000011 rdata=0x00000032
+[DBG cy=x] mem_valid=1 addr=0x000000bc instr=1 wstrb=0000 wdata=0x00000011 rdata=0x03c31063
+[DBG cy=x] mem_valid=1 addr=0x000000c0 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x00000293
+[DBG cy=x] mem_valid=1 addr=0x000000c4 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x000002b7
+[DBG cy=x] mem_valid=1 addr=0x000000c8 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x000002b7
+[DBG cy=x] mem_valid=1 addr=0x000000cc instr=1 wstrb=0000 wdata=0x00000011 rdata=0xf0028293
+[DBG cy=x] mem_valid=1 addr=0x000000d0 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x0aa00313
+[DBG cy=x] mem_valid=1 addr=0x000000d4 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x0062a023
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x00000011 rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0xffffff00 instr=0 wstrb=1111 wdata=0x000000aa rdata=0x00000002
+[DBG cy=x] mem_valid=1 addr=0xffffff00 instr=0 wstrb=1111 wdata=0x000000aa rdata=0x00000002
+[DBG cy=x] mem_valid=1 addr=0xffffff00 instr=0 wstrb=1111 wdata=0x000000aa rdata=0x00000002
+[DBG cy=x] mem_valid=1 addr=0xffffff00 instr=0 wstrb=1111 wdata=0x000000aa rdata=0x00000002
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[DBG cy=x] mem_valid=1 addr=0x000000d8 instr=1 wstrb=0000 wdata=0x000000aa rdata=0x0000006f
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+
+========================================
+  [TIMEOUT] Simulation exceeded 200000 cycles
+  pass_seen=0, fail_seen=0
+========================================
+[NPU_MON cy=x] ctrl=0x00000011 status_busy=0 status_done=1
+tb\tb_soc.v:199: $finish called at 2000110000 (1ps)

@@ -3,10 +3,13 @@
 // Project : NPU_prj
 // Desc    : AXI4-Lite slave with register file for NPU configuration.
 //           Address map:
-//             0x00  CTRL      - bit0=start, bit1=abort, [3:2]=data_mode, [5:4]=stat_mode
+//             0x00  CTRL      - bit0=start, bit1=abort,
+//                               [3:2]=data_mode (00=INT8, 10=FP16),
+//                               [5:4]=stat_mode (00=WS,  01=OS),
+//                               bit6=irq_clr (W1C: write 1 to clear IRQ)
 //             0x04  STATUS    - bit0=busy, bit1=done
 //             0x08  INT_EN    - interrupt enable
-//             0x0C  INT_CLR   - interrupt clear (write-1-to-clear)
+//             0x0C  INT_CLR   - interrupt clear (write-1-to-clear, alt path)
 //             0x10  M_DIM     - matrix M dimension
 //             0x14  N_DIM     - matrix N dimension
 //             0x18  K_DIM     - matrix K dimension
@@ -16,6 +19,11 @@
 //             0x30  ARR_CFG   - [3:0]=act_rows, [7:4]=act_cols
 //             0x34  CLK_DIV   - [2:0]=div_sel
 //             0x38  CG_EN     - clock gating enable
+//
+//           IRQ Clear dual path:
+//             Path A: write 0x0C (INT_CLR) bit0 = 1  → clears int_pending
+//             Path B: write 0x00 (CTRL)    bit6 = 1  → also clears int_pending
+//                     (bit6 is W1C; subsequent reads return 0)
 // =============================================================================
 
 `timescale 1ns/1ps
@@ -113,8 +121,8 @@ always @(posedge aclk) begin
         case (awaddr_q)
             32'h00: begin
                 if (w_strb[0]) begin
-                    // $display("[AXI-WR] addr=%h wdata=%h (prev ctrl=%h)", awaddr_q, wdata, ctrl_reg);
-                    ctrl_reg <= wdata;
+                    // bit6 (irq_clr) is W1C: always reads back 0
+                    ctrl_reg <= {wdata[31:7], 1'b0, wdata[5:0]};
                 end
             end
             32'h08: if (w_strb[0]) int_en_reg <= wdata;
@@ -174,13 +182,21 @@ assign rdata = rdata_r;
 // ---------------------------------------------------------------------------
 // Interrupt logic
 // ---------------------------------------------------------------------------
+// IRQ is set when irq_flag arrives and INT_EN[0] is asserted.
+// IRQ can be cleared via TWO paths:
+//   Path A: write INT_CLR (0x0C) bit0 = 1
+//   Path B: write CTRL    (0x00) bit6 = 1  (W1C bit, see above)
 always @(posedge aclk) begin
     if (!aresetn)
         int_pending <= 0;
     else begin
         if (irq_flag && int_en_reg[0])
             int_pending <= 1'b1;
+        // Path A: INT_CLR register
         if (wr_en && awaddr_q == 32'h0C && int_clr_reg[0])
+            int_pending <= 1'b0;
+        // Path B: CTRL bit6 (irq_clr)
+        if (wr_en && awaddr_q == 32'h00 && wdata[6])
             int_pending <= 1'b0;
     end
 end

@@ -1,7 +1,7 @@
 # NPU RTL 模块说明文档
 
-> 最后更新：2026-04-08
-> 说明：本文件按当前仓库中的 RTL 实现同步，重点描述"真正接入并参与主流程"的行为。
+> 最后更新：2026-04-13
+> 说明：本文件按当前 RTL 实现同步（含真 Ping-Pong 重叠 FSM 升级），重点描述"真正接入并参与主流程"的行为。
 
 ---
 
@@ -245,55 +245,60 @@ INT8 模式：每拍一个 8-bit 直接送 PE（无需装配，`pe_data_ready = 
 
 ---
 
-## 4. `npu_ctrl` — tile-loop 控制器
+## 4. `npu_ctrl` — tile-loop 控制器（真 Ping-Pong 版）
 
 - **文件**：`rtl/ctrl/npu_ctrl.v`
-- **功能**：驱动矩阵乘法 tile-loop 调度。每次迭代计算 `C[i][j]` 的一个元素，控制 DMA 启动/结束、PE 工作状态、PPBuf 切换。
+- **功能**：驱动矩阵乘法 tile-loop 调度，实现 DMA 加载与 PE 计算的真正重叠（Ping-Pong Overlap）。每次迭代计算 `C[i][j]` 的一个元素，控制 DMA 启停、PPBuf swap/clear、PE en/flush，并管理中断清除和地址影子寄存器。
 
-### 4.1 核心概念：Tile-Based 调度
+> **架构升级记录（2026-04-13）**：原串行 FSM（IDLE→LOAD→PRELOAD→COMPUTE→DRAIN→WB→NEXT_TILE）已替换为真 Ping-Pong 重叠 FSM，DMA 加载下一 tile 与 PE 计算当前 tile 同步进行。
+
+### 4.1 核心概念：Tile-Based 调度 + Ping-Pong 重叠
 
 **Tile 定义**：一个 tile 代表一个输出元素 `C[i][j]` 的完整计算任务。
 
-**Tile 循环**：控制器按以下顺序处理所有 tile：
+**执行管线三阶段**：
 ```
-for i = 0 to M-1:
-    for j = 0 to N-1:
-        // 处理一个 tile
-        启动 DMA 读 B[:,j]
-        启动 DMA 读 A[i,:]
-        PE 计算 K 个元素对
-        结果写入 FIFO
-        DMA 写结果到 C[i][j]
+Phase 0 — Warm-up（暖机）：
+    加载 tile(0,0) 到 Pong Bank → swap 到 Ping Bank
+    发起 tile(0,1) 预取到 Pong Bank
+
+Phase 1 — Overlap 稳态（每个非末 tile）：
+    Ping Bank → PE 计算 tile(i,j)
+    Pong Bank → DMA 同时加载 tile(i,j+1)
+    WB 完成后：swap，Pong→Ping，发下一预取
+
+Phase 2 — Drain（末 tile）：
+    PE 计算最后一个 tile，DMA 写回，无新预取
+    完成后 irq 拉高，进 S_DONE
 ```
 
-**Tile 状态**：控制器维护：
-- `tile_i`：当前输出行索引（0 ≤ tile_i < M）
-- `tile_j`：当前输出列索引（0 ≤ tile_j < N）
-- `target_col`：OS 模式下的权重目标列（`tile_j % COLS`）
+**Tile 状态寄存器**：
+- `tile_i`：当前输出行索引（0 ≤ tile_i < M，使用影子 `lk_m_dim`）
+- `tile_j`：当前输出列索引（0 ≤ tile_j < N，使用影子 `lk_n_dim`）
 
-**Tile 地址计算**：
+**地址公式**：
 ```
-权重地址 = W_ADDR + tile_j × K × 元素字节数
-激活地址 = A_ADDR + tile_i × K × 元素字节数
-结果地址 = R_ADDR + (tile_i×N + tile_j) × 4
+权重地址 = lk_w_addr + tile_j × tile_len     (tile_len = K × 元素字节数)
+激活地址 = lk_a_addr + tile_i × tile_len
+结果地址 = lk_r_addr + (tile_i × N + tile_j) × 4
 ```
 
 ### 4.2 模块参数
 
 | 参数 | 默认值 | 说明 |
 |------|-------:|------|
-| `ROWS` | 4 | PE 行数（当前控制器不区分行，统一广播） |
-| `COLS` | 4 | PE 列数（OS 模式下的 target_col 范围） |
+| `ROWS` | 4 | PE 行数 |
+| `COLS` | 4 | PE 列数（OS 模式 target_col 范围） |
 | `DATA_W` | 16 | PE 数据位宽（用于计算 DMA 字节数） |
-| `ACC_W` | 32 | 结果宽度（用于 `dma_r_len = ACC_W/8`） |
+| `ACC_W` | 32 | 结果宽度（`dma_r_len = 4 bytes`） |
 
-### 4.2 接口信号
+### 4.3 接口信号
 
-#### 配置输入（来自 npu_axi_lite）
+#### 配置输入（来自 npu_axi_lite，Live 信号，仅在 start 时采样）
 
 | 信号 | 位宽 | 说明 |
 |------|-----:|------|
-| `ctrl_reg` | 32 | 控制寄存器（start/abort/mode/stat_mode） |
+| `ctrl_reg` | 32 | `[0]`=start, `[1]`=abort, `[3:2]`=mode, `[5:4]`=stat, `[6]`=irq_clr |
 | `m_dim` | 32 | 矩阵 M 维度 |
 | `n_dim` | 32 | 矩阵 N 维度 |
 | `k_dim` | 32 | 矩阵 K 维度 |
@@ -302,20 +307,33 @@ for i = 0 to M-1:
 | `r_addr` | 32 | 结果基地址 |
 | `arr_cfg` | 8 | 阵列配置（当前未消费） |
 
+#### 影子寄存器（FSM 运行期间使用的锁存副本）
+
+| 影子寄存器 | 对应 Live 信号 | 锁存时机 |
+|-----------|------------|---------|
+| `lk_m_dim` | `m_dim` | `cfg_start_rise` |
+| `lk_n_dim` | `n_dim` | `cfg_start_rise` |
+| `lk_k_dim` | `k_dim` | `cfg_start_rise` |
+| `lk_w_addr` | `w_addr` | `cfg_start_rise` |
+| `lk_a_addr` | `a_addr` | `cfg_start_rise` |
+| `lk_r_addr` | `r_addr` | `cfg_start_rise` |
+| `lk_mode` | `ctrl_reg[3:2]` | `cfg_start_rise` |
+| `lk_stat` | `ctrl_reg[5:4]` | `cfg_start_rise` |
+
 #### 状态输出（到 npu_axi_lite）
 
 | 信号 | 位宽 | 说明 |
 |------|-----:|------|
-| `busy` | 1 | 运算进行中（S_IDLE 以外均为高） |
-| `done` | 1 | sticky 完成信号 |
-| `irq` | 1 | 单拍完成中断脉冲 |
+| `busy` | 1 | 运算进行中（非 S_IDLE 均为高） |
+| `done` | 1 | sticky 完成信号（CPU 清 start=0 后回零） |
+| `irq` | 1 | 层完成中断，CPU 写 INT_CLR bit0=1 或 CTRL bit6=1 清除 |
 
 #### DMA 控制接口
 
 | 信号 | 方向 | 位宽 | 说明 |
 |------|------|-----:|------|
-| `dma_w_start` | output | 1 | 权重 DMA 启动脉冲（单拍高） |
-| `dma_w_done` | input | 1 | 权重 DMA 完成（被 `dma_w_done_r` 锁存） |
+| `dma_w_start` | output | 1 | 权重 DMA 启动脉冲（单拍高）|
+| `dma_w_done` | input | 1 | 权重 DMA 完成（锁存到 `dma_w_done_r`） |
 | `dma_w_addr` | output | 32 | 权重 DRAM 地址 |
 | `dma_w_len` | output | 16 | 权重 DMA 字节数 |
 | `dma_a_start` | output | 1 | 激活 DMA 启动脉冲 |
@@ -324,88 +342,120 @@ for i = 0 to M-1:
 | `dma_a_len` | output | 16 | 激活 DMA 字节数 |
 | `dma_r_start` | output | 1 | 结果 DMA 启动脉冲 |
 | `dma_r_done` | input | 1 | 结果 DMA 完成 |
-| `dma_r_addr` | output | 32 | 结果 DRAM 地址 |
-| `dma_r_len` | output | 16 | 结果 DMA 字节数（固定 `ACC_W/8 = 4`） |
+| `dma_r_addr` | output | 32 | 结果 DRAM 地址（`comp_r_addr`） |
+| `dma_r_len` | output | 16 | 结果 DMA 字节数（固定 `4`） |
 
 #### PE 控制接口
 
 | 信号 | 方向 | 位宽 | 说明 |
 |------|------|-----:|------|
-| `pe_en` | output | 1 | PE 工作使能 |
-| `pe_flush` | output | 1 | 累加器 flush 脉冲（持续 `PIPELINE_DEPTH` 拍） |
-| `pe_mode` | output | 1 | `0=INT8, 1=FP16` |
-| `pe_stat` | output | 1 | `0=WS, 1=OS` |
-| `target_col` | output | `$clog2(COLS)` | OS 模式权重路由目标列（已扩展位宽，2026-04-08） |
+| `pe_en` | output | 1 | PE 流水线使能 |
+| `pe_flush` | output | 1 | 累加器 flush（OS: 带末 beat 数据；WS: 纯触发输出 ws_acc） |
+| `pe_mode` | output | 1 | `0=INT8, 1=FP16`（来自 lk_mode） |
+| `pe_stat` | output | 1 | `0=WS, 1=OS`（来自 lk_stat） |
+| `pe_load_w` | output | 1 | WS 模式：weight_reg 锁存脉冲（ws_consume_cnt < K 时持续高） |
 
 #### PPBuf 控制接口
 
 | 信号 | 方向 | 位宽 | 说明 |
 |------|------|-----:|------|
-| `w_ppb_ready` | input | 1 | 权重 PPBuf 已达阈值 |
+| `w_ppb_ready` | input | 1 | 权重 PPBuf 读侧已达阈值 |
 | `w_ppb_empty` | input | 1 | 权重 PPBuf 读侧为空 |
-| `a_ppb_ready` | input | 1 | 激活 PPBuf 已达阈值 |
+| `a_ppb_ready` | input | 1 | 激活 PPBuf 读侧已达阈值 |
 | `a_ppb_empty` | input | 1 | 激活 PPBuf 读侧为空 |
-| `w_ppb_swap` | output | 1 | 权重 PPBuf bank 切换脉冲 |
+| `w_ppb_swap` | output | 1 | 权重 PPBuf bank 切换脉冲（单拍高）|
 | `a_ppb_swap` | output | 1 | 激活 PPBuf bank 切换脉冲 |
-| `w_ppb_clear` | output | 1 | 权重 PPBuf 复位脉冲 |
-| `a_ppb_clear` | output | 1 | 激活 PPBuf 复位脉冲 |
+| `w_ppb_clear` | output | 1 | 权重 PPBuf 全部指针复位（单拍高） |
+| `a_ppb_clear` | output | 1 | 激活 PPBuf 全部指针复位 |
+| `r_fifo_clear` | output | 1 | 结果 FIFO 复位脉冲 |
 
-### 4.3 FSM 状态与转移
+### 4.4 FSM 状态与转移（真 Ping-Pong 版）
 
-```
-                  cfg_start_rise
-  S_IDLE ─────────────────────────────────────────────► S_LOAD
-    ▲                                                        │ dma_w_done_r && dma_a_done_r
-    │                                                        ▼
-  S_DONE ◄──── tile_count+1 >= tile_total ──────── S_PRELOAD
-    │                                                        │ (下拍)
-    │                                                        ▼
-    │                                                   S_COMPUTE
-    │                                                        │ ppb_empty && dma_all_done
-    │                                                        ▼
-    │                                                    S_DRAIN
-    │                                                        │ drain_cnt >= PIPELINE_DEPTH
-    │                                                        ▼
-    │                                                  S_WRITE_BACK
-    │                                                        │ dma_r_start 脉冲
-    │                                                        ▼
-    │                                                   S_WB_WAIT
-    │                                                        │ dma_r_done_r
-    │                                                        ▼
-    └──────── tile_count+1 < tile_total ──────────── S_NEXT_TILE
-```
+#### 状态编码
 
-| 状态 | pe_en | pe_flush | 动作 |
-|------|-------|----------|------|
-| S_IDLE | 0 | 0 | 等待 `cfg_start_rise`；发出第 0 tile DMA，清 PPBuf |
-| S_LOAD | 0 | 0 | 等待 W+A DMA 双完成；`swap` PPBuf |
-| S_PRELOAD | 1 | 0 | 拉高 `pe_en` 一拍，锁存 DMA 长度 |
-| S_COMPUTE | 1 | 0 | PE 持续消费 PPBuf；检测 PPBuf 双空 |
-| S_DRAIN | 1 | 1 | 拉高 `pe_flush` 持续 `PIPELINE_DEPTH`（3）拍，排空流水线 |
-| S_WRITE_BACK | 1 | 0 | 发出 `dma_r_start` 单拍脉冲 |
-| S_WB_WAIT | 1 | 0 | 等待结果写回完成 |
-| S_NEXT_TILE | 0 | 0 | 推进 tile_i/j，计算下一 tile DMA 地址，发出 DMA start |
-| S_DONE | 0 | 0 | 拉高 `done`、`irq`，回 S_IDLE |
+| 宏名 | 编码 | 说明 |
+|------|-----:|------|
+| `S_IDLE` | 4'd0 | 空闲，等待 start |
+| `S_WARMUP_LOAD` | 4'd1 | 暖机：等待 tile(0,0) DMA 完成 |
+| `S_WARMUP_WAIT` | 4'd2 | swap 传播 + 发 tile(0,1) 预取 |
+| `S_PRELOAD` | 4'd9 | PPBuf swap 时序稳定等待（1 拍） |
+| `S_OVERLAP_COMPUTE` | 4'd3 | PE 计算 + DMA 后台预取 |
+| `S_DRAIN` | 4'd4 | pe_flush=1，第 1 拍 |
+| `S_DRAIN2` | 4'd5 | pe_flush=0，第 2 拍（valid_out 在此出现） |
+| `S_WRITE_BACK` | 4'd6 | 发 dma_r_start |
+| `S_WB_WAIT` | 4'd7 | 等 dma_r_done，判断下跳 |
+| `S_WAIT_PREFETCH` | 4'd10 | 等预取 DMA 到位（PE 快于 DMA 时） |
+| `S_DONE` | 4'd8 | irq 拉高，回 S_IDLE |
 
-### 4.4 时序图：单 Tile 完整流程
+#### 状态转移图
 
 ```
-  CLK   _/‾\_/‾\_/‾\_/‾\_/‾\_/‾\_/‾\_/‾\_/‾\_/‾\_/‾\_/‾\_...
-  state [IDLE][LOAD ...........][PRELOAD][COMPUTE .....][DRAIN...][WB][WAIT][NEXT]
-  pe_en  0    0                  1        1              1         1   1     0
-  flush  0    0                  0        0              1  1  1   0   0     0
-  w_start  1                                                           1(next)
-  a_start  1                                                           1(next)
-  r_start                                                    1
+                     cfg_start_rise
+  S_IDLE  ──────────────────────────────────────────► S_WARMUP_LOAD
+    ▲                                                       │
+    │   S_DONE → S_IDLE（同拍）                            │ dma_load_done → swap
+    │                                                       ▼
+  S_DONE ◄─── is_last_tile ───── S_WB_WAIT ◄─── S_WRITE_BACK ◄── S_DRAIN2 ◄── S_DRAIN
+                                      │                              ▲
+                      dma_load_done ──┤──────────────────────────────┤
+                      (预取已完成)    │swap+prefetch  S_OVERLAP_COMPUTE
+                                      │                    ▲
+                  !dma_load_done ──►  S_WAIT_PREFETCH      │ (下拍)
+                                      │                    │
+                                      └──dma_done──► S_PRELOAD ◄── S_WARMUP_WAIT
+                                                          (来自 S_WB_WAIT / S_WAIT_PREFETCH)
 ```
 
-### 4.5 关键实现说明
+#### 各状态行为表
 
-- **`cfg_start` 边沿检测**：`cfg_start_rise = cfg_start && !cfg_start_d1`，防止软件保持 start=1 时重复触发。
-- **`done` sticky**：`done` 在 S_DONE 置高后保持，直到软件将 `CTRL[0]` 清零（`if (!cfg_start) done <= 0`）。
-- **`dma_xxx_done_r`**：`done` 信号被立即锁存为 sticky 寄存器，防止多拍状态丢失。
-- **`k_dma_len_w`**：组合逻辑，按 INT8 或 FP16 动态计算 DMA 字节数（4B 对齐）。
-- **`target_col`**：OS 模式下等于 `(tile_j % COLS)`，已扩展为 `$clog2(COLS)` 位，COLS=4 时无截断。
+| 状态 | pe_en | pe_flush | 核心动作 |
+|------|:-----:|:--------:|---------|
+| S_IDLE | 0 | 0 | 等 `cfg_start_rise`；锁存 shadow reg；清 PPBuf/FIFO；发 tile(0,0) DMA start（`dma_w_addr=w_addr`, `dma_a_addr=a_addr`） |
+| S_WARMUP_LOAD | 0 | 0 | 等 `dma_load_done`（W+A 双完成）；swap PPBuf（Pong→Ping）；清 `dma_*_done_r` |
+| S_WARMUP_WAIT | 0 | 0 | 设 `pe_stat`/`pe_load_w`；若 `!is_last_tile`：发 tile(0,1) 预取 DMA |
+| S_PRELOAD | 0 | 0 | 等 1 拍，让 `rd_fill` 在 swap 后稳定 |
+| S_OVERLAP_COMPUTE | 1 | 0 | PE 消费 Ping Bank；OS：等 `w_ppb_empty && a_ppb_empty`；WS：`ws_consume_cnt < K+2` 时持续计数 |
+| S_DRAIN | 1 | 1 | `pe_flush=1`（触发 Stage-2 输出）|
+| S_DRAIN2 | 1 | 0 | `pe_flush=0`（`valid_out` 在此拍出现，结果进 FIFO）|
+| S_WRITE_BACK | 1 | 0 | 发 `dma_r_start` 脉冲，锁存 `comp_r_addr`，清 `dma_r_done_r` |
+| S_WB_WAIT | 1→0 | 0 | 等 `dma_r_done_r`；末 tile→S_DONE；非末 tile+预取完成→swap+发下一预取+S_PRELOAD；预取未完→S_WAIT_PREFETCH |
+| S_WAIT_PREFETCH | 0 | 0 | 等 `dma_load_done`；完成后 swap+发下一预取+S_PRELOAD |
+| S_DONE | 0 | 0 | `irq=1`，`done=1`，`busy=0`；清 PPBuf/FIFO；回 S_IDLE |
+
+### 4.5 时序图：稳态 Ping-Pong 重叠
+
+```
+时钟周期：  T0     T1         T2~T(K)     T(K+1)   T(K+2)   T(K+3)   T(K+4)
+状态：     [WU_WAIT][PRELOAD][OVERLAP...] [DRAIN]  [DRAIN2] [WB]     [WB_WAIT]
+pe_en：      0       0        1            1        1         1        1→0
+pe_flush：   0       0        0            1        0         0        0
+DMA(Pong)： prefetch → Pong Bank（tile i,j+1）----完成----|
+PPBuf：    Ping=tile(i,j) → PE读取         Pong=tile(i,j+1) 就绪
+结果 FIFO：                              写入      valid
+DRAM 写：                                                   dma_r_start  → 写回 C[i][j]
+```
+
+### 4.6 IRQ 机制
+
+```
+S_DONE：irq <= 1'b1;
+
+CPU 清除方法：
+  Path A: 写 0x0C（INT_CLR） bit0=1  → npu_axi_lite 清 int_pending
+  Path B: 写 0x00（CTRL）    bit6=1  → cfg_irq_clr=1 → npu_ctrl: irq <= 1'b0
+
+done sticky：仅当 CPU 写 CTRL[0]=0 时回零
+  if (!cfg_start) done <= 1'b0;
+```
+
+### 4.7 关键实现说明
+
+- **`cfg_start_rise`**：`cfg_start && !cfg_start_d1`，防止 start 保持为 1 时重复触发。
+- **`dma_load_done`**：`dma_w_done_r && dma_a_done_r`，W 和 A 通道均完成时才为真。
+- **`is_last_tile`**：`(tile_i == lk_m_dim-1) && (tile_j == lk_n_dim-1)`，决定是否还需要预取。
+- **`ws_consume_cnt`**：WS 模式下计数 PE 消费拍数，`>= K+2` 时退出 `S_OVERLAP_COMPUTE`（K 拍数据 + 2 拍流水线排空）。
+- **`S_PRELOAD`**：swap 是时序电路，swap 脉冲后需 1 拍才能让 rd_sel 和 rd_fill 稳定，`pe_en` 在此拍保持低。
+- **`target_col`**：OS 模式下等于 `tile_j % COLS`，位宽为 `$clog2(COLS)`（COLS=4 时 2-bit），在 npu_top 中路由权重到目标列。
 
 ---
 

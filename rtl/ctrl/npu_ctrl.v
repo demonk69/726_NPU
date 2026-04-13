@@ -1,29 +1,48 @@
 // =============================================================================
 // Module  : npu_ctrl
 // Project : NPU_prj
-// Desc    : NPU top-level controller FSM with M×N Tile-Loop support.
+// Desc    : NPU top-level controller FSM — True Ping-Pong Overlap Edition
 //
-//           Orchestrates M×N tile iterations:
-//             for i in 0..M-1:
-//               for j in 0..N-1:
-//                 Load W[:,j] (K weights) → PPBuf_W
-//                 Load A[i,:] (K activations) → PPBuf_A
-//                 Compute: PE OS/WS for K elements
-//                 Drain PE flush
-//                 Write back C[i][j] → DRAM at R_BASE + (i*N+j)*4
+// ── Architecture ──────────────────────────────────────────────────────────
 //
-//           When M=1, N=1: degenerates to original single-tile behavior.
+//   This controller implements a TRUE PIPELINE between DMA Load and PE Compute,
+//   eliminating the serial "Load → Compute → WB" stall.
 //
-//   States:
-//     S_IDLE       - Wait for CPU start command
-//     S_TILE_LOAD  - Load one tile's W and A into PPBufs
-//     S_PRELOAD    - Wait 1 cycle for PPBuf swap to propagate
-//     S_COMPUTE    - PE computing
-//     S_DRAIN      - Assert pe_flush to drain accumulator
-//     S_DRAIN2     - Wait for flush to propagate through pipeline
-//     S_WRITE_BACK - Initiate DMA write-back for this tile's result
-//     S_WB_WAIT    - Wait for DMA write-back to complete
-//     S_DONE       - Assert done + IRQ, return to IDLE
+//   Tile execution pipeline (steady-state):
+//
+//     Cycle:  T0           T1           T2           T3
+//             LOAD(0,0)    COMPUTE(0,0) COMPUTE(0,0) ...
+//                          LOAD(0,1)    LOAD(0,1)    COMPUTE(0,1)
+//                                                    LOAD(0,2)
+//
+//   Three execution phases:
+//     Phase 0 – Warm-up  : Load tile(0,0) only. PE idle.
+//     Phase 1 – Overlap  : PE computes tile(i,j) from Ping bank WHILE
+//                          DMA loads tile(next_i, next_j) into Pong bank.
+//     Phase 2 – Drain    : Final tile: compute + WB, no new load.
+//
+// ── FSM States ────────────────────────────────────────────────────────────
+//
+//   S_IDLE            - Wait for CPU start; latch all config registers.
+//   S_WARMUP_LOAD     - Phase 0: wait for tile(0,0) DMA load to finish.
+//   S_WARMUP_WAIT     - 1-cycle PPBuf swap propagation; launch prefetch.
+//   S_OVERLAP_COMPUTE - Compute tile(i,j) while DMA prefetches next tile.
+//   S_DRAIN           - Assert pe_flush 1 cycle.
+//   S_DRAIN2          - Drain pipeline 2nd cycle.
+//   S_WRITE_BACK      - Initiate DMA write-back.
+//   S_WB_WAIT         - Wait DMA WB done; swap banks; launch next prefetch.
+//   S_DONE            - Assert IRQ, reset counters, enter S_IDLE.
+//
+// ── IRQ Clear ─────────────────────────────────────────────────────────────
+//
+//   CPU clears IRQ by writing 1 to ctrl_reg[2] (IRQ_CLR bit).
+//   npu_ctrl samples and immediately de-asserts irq. Bit is self-clearing.
+//
+// ── Address Latch ─────────────────────────────────────────────────────────
+//
+//   All config registers (m/n/k_dim, w/a/r_addr, mode, stat) are latched
+//   on cfg_start_rise into shadow regs. FSM uses shadows only.
+//
 // =============================================================================
 
 `timescale 1ns/1ps
@@ -36,7 +55,7 @@ module npu_ctrl #(
 )(
     input  wire              clk,
     input  wire              rst_n,
-    // Config from register file
+    // Config from AXI-Lite register file (live, may change during run)
     input  wire [31:0]       ctrl_reg,
     input  wire [31:0]       m_dim,
     input  wire [31:0]       n_dim,
@@ -65,7 +84,7 @@ module npu_ctrl #(
     output reg               pe_en,
     output reg               pe_flush,
     output reg               pe_mode,     // 0=INT8, 1=FP16
-    output reg               pe_stat,     // 0=WS, 1=OS
+    output reg               pe_stat,     // 0=WS,  1=OS
     output reg               pe_load_w,   // WS mode: latch weight into PE
     // Ping-Pong Buffer status
     input  wire              w_ppb_ready,
@@ -84,87 +103,118 @@ module npu_ctrl #(
 );
 
 // ---------------------------------------------------------------------------
-// FSM states
+// FSM state encoding
 // ---------------------------------------------------------------------------
-localparam S_IDLE       = 4'd0;
-localparam S_TILE_LOAD  = 4'd1;   // Load W[:,j] and A[i,:] for one tile
-localparam S_PRELOAD    = 4'd2;   // Wait 1 cycle for PPBuf swap
-localparam S_COMPUTE    = 4'd3;   // PE computing
-localparam S_DRAIN      = 4'd4;   // PE flush accumulators
-localparam S_WRITE_BACK = 4'd5;   // Start DMA write-back
-localparam S_WB_WAIT    = 4'd6;   // Wait for DMA write-back
-localparam S_DONE       = 4'd7;
-localparam S_DRAIN2     = 4'd9;   // Pipeline drain
+localparam S_IDLE            = 4'd0;
+localparam S_WARMUP_LOAD     = 4'd1;
+localparam S_WARMUP_WAIT     = 4'd2;
+localparam S_PRELOAD         = 4'd9;   // 1-cycle swap propagation before compute
+localparam S_OVERLAP_COMPUTE = 4'd3;
+localparam S_DRAIN           = 4'd4;
+localparam S_DRAIN2          = 4'd5;
+localparam S_WRITE_BACK      = 4'd6;
+localparam S_WB_WAIT         = 4'd7;
+localparam S_WAIT_PREFETCH   = 4'd10;  // Wait for prefetch DMA before swap+compute
+localparam S_DONE            = 4'd8;
 
 reg [3:0] state;
 
-wire cfg_start  = ctrl_reg[0];
-wire cfg_abort  = ctrl_reg[1];
-wire [1:0] cfg_mode   = ctrl_reg[3:2];   // 00=INT8, 10=FP16
-wire [1:0] cfg_stat   = ctrl_reg[5:4];   // 0=WS, 1=OS
+// ---------------------------------------------------------------------------
+// ctrl_reg bit decode  (live, from AXI-Lite)
+//   Address 0x00 CTRL register bit layout:
+//     bit[0]   = start
+//     bit[1]   = abort
+//     bit[3:2] = data_mode (00=INT8, 10=FP16)
+//     bit[5:4] = stat_mode (00=WS,   01=OS)
+//     bit[6]   = irq_clr   (CPU writes 1 to acknowledge/clear IRQ; self-clearing)
+// ---------------------------------------------------------------------------
+wire        cfg_start   = ctrl_reg[0];
+wire        cfg_abort   = ctrl_reg[1];
+wire [1:0]  cfg_mode    = ctrl_reg[3:2]; // 00=INT8  10=FP16
+wire [1:0]  cfg_stat    = ctrl_reg[5:4]; // 00=WS    01=OS
+wire        cfg_irq_clr = ctrl_reg[6];   // CPU writes 1 → clear IRQ
 
-// Edge detect for start
+// Rising-edge detect for start
 reg cfg_start_d1;
 always @(posedge clk) begin
-    if (!rst_n) cfg_start_d1 <= 0;
-    else cfg_start_d1 <= cfg_start;
+    if (!rst_n) cfg_start_d1 <= 1'b0;
+    else        cfg_start_d1 <= cfg_start;
 end
 wire cfg_start_rise = cfg_start && !cfg_start_d1;
 
 // ---------------------------------------------------------------------------
-// Mode decode (combinational)
+// Shadow (latched) configuration registers
+// Latched once on cfg_start_rise; FSM exclusively uses these.
 // ---------------------------------------------------------------------------
-always @(*) begin
-    case (cfg_mode)
-        2'b00: pe_mode = 1'b0;   // INT8
-        2'b01: pe_mode = 1'b1;   // INT16
-        2'b10: pe_mode = 1'b1;   // FP16
-        default: pe_mode = 1'b0;
-    endcase
+reg [31:0] lk_m_dim, lk_n_dim, lk_k_dim;
+reg [31:0] lk_w_addr, lk_a_addr, lk_r_addr;
+reg [1:0]  lk_mode, lk_stat;
+
+always @(posedge clk) begin
+    if (!rst_n) begin
+        lk_m_dim  <= 32'd1; lk_n_dim  <= 32'd1; lk_k_dim  <= 32'd1;
+        lk_w_addr <= 32'd0; lk_a_addr <= 32'd0; lk_r_addr <= 32'd0;
+        lk_mode   <= 2'b10;                      // default FP16
+        lk_stat   <= 2'b01;                      // default OS
+    end else if (cfg_start_rise) begin
+        lk_m_dim  <= m_dim;
+        lk_n_dim  <= n_dim;
+        lk_k_dim  <= k_dim;
+        lk_w_addr <= w_addr;
+        lk_a_addr <= a_addr;
+        lk_r_addr <= r_addr;
+        lk_mode   <= cfg_mode;
+        lk_stat   <= cfg_stat;
+    end
 end
 
 // ---------------------------------------------------------------------------
-// Data size (bytes per element)
+// Mode decode (combinational, uses shadow regs)
 // ---------------------------------------------------------------------------
-wire [1:0] data_bytes = (cfg_mode == 2'b00) ? 2'd1 : 2'd2;
+always @(*) begin
+    case (lk_mode)
+        2'b00:   pe_mode = 1'b0;   // INT8
+        2'b10:   pe_mode = 1'b1;   // FP16
+        default: pe_mode = 1'b1;
+    endcase
+end
+
+// Bytes per element (from shadow)
+wire [1:0] data_bytes = (lk_mode == 2'b00) ? 2'd1 : 2'd2;
 
 // ---------------------------------------------------------------------------
 // Tile-loop counters: i ∈ [0, M-1], j ∈ [0, N-1]
 // ---------------------------------------------------------------------------
-reg [31:0] tile_i;  // current row tile index
-reg [31:0] tile_j;  // current column tile index
+reg [31:0] tile_i;
+reg [31:0] tile_j;
 
-// One tile's weight length = K * data_bytes
-// One tile's activation length = K * data_bytes  (one row of A)
-wire [15:0] tile_w_len = k_dim[15:0] * {14'b0, data_bytes};
-wire [15:0] tile_a_len = k_dim[15:0] * {14'b0, data_bytes};
+// One-tile DMA byte length
+wire [15:0] tile_len = lk_k_dim[15:0] * {14'b0, data_bytes};
 
-// Byte address for W[:,j] = W_BASE + j * K * data_bytes
-// Byte address for A[i,:] = A_BASE + i * K * data_bytes
-wire [31:0] cur_w_addr = w_addr + tile_j * {16'b0, tile_w_len};
-wire [31:0] cur_a_addr = a_addr + tile_i * {16'b0, tile_a_len};
+// Current-tile addresses (used for write-back address calc)
+wire [31:0] comp_r_addr = lk_r_addr + (tile_i * lk_n_dim + tile_j) * (ACC_W/8);
 
-// Byte address for result C[i][j] = R_BASE + (i*N + j) * ACC_BYTES
-wire [31:0] cur_r_addr = r_addr + (tile_i * n_dim + tile_j) * (ACC_W/8);
+// ── Last-tile flag ──
+wire is_last_tile = (tile_i == lk_m_dim - 1) && (tile_j == lk_n_dim - 1);
 
-// Result DMA: always 1 word (one FP32/INT32 result per tile)
-wire [15:0] tile_r_len = 16'd4;  // ACC_W/8 bytes
+// Result DMA: 1 word (4 bytes) per tile
+localparam [15:0] TILE_R_LEN = 16'd4;
 
 // ---------------------------------------------------------------------------
-// Track DMA completion (latched)
+// DMA completion latches
 // ---------------------------------------------------------------------------
 reg dma_w_done_r, dma_a_done_r, dma_r_done_r;
-wire dma_all_load_done = dma_w_done_r && dma_a_done_r;
+wire dma_load_done = dma_w_done_r && dma_a_done_r;
 
 always @(posedge clk) begin
     if (!rst_n) begin
-        dma_w_done_r <= 0;
-        dma_a_done_r <= 0;
-        dma_r_done_r <= 0;
+        dma_w_done_r <= 1'b0;
+        dma_a_done_r <= 1'b0;
+        dma_r_done_r <= 1'b0;
     end else begin
-        if (dma_w_done) dma_w_done_r <= 1;
-        if (dma_a_done) dma_a_done_r <= 1;
-        if (dma_r_done) dma_r_done_r <= 1;
+        if (dma_w_done) dma_w_done_r <= 1'b1;
+        if (dma_a_done) dma_a_done_r <= 1'b1;
+        if (dma_r_done) dma_r_done_r <= 1'b1;
     end
 end
 
@@ -174,238 +224,356 @@ end
 reg [15:0] ws_consume_cnt;
 
 // ---------------------------------------------------------------------------
+// Combinational: next-tile coordinates (after advancing current tile)
+// These are the coordinates of the tile whose prefetch we need to issue.
+// ---------------------------------------------------------------------------
+wire [31:0] next_j_after_cur;   // j coord of tile AFTER current
+wire [31:0] next_i_after_cur;   // i coord of tile AFTER current
+assign next_j_after_cur = (tile_j + 1 < lk_n_dim) ? (tile_j + 1) : 32'd0;
+assign next_i_after_cur = (tile_j + 1 < lk_n_dim) ? tile_i       : (tile_i + 1);
+
+// "The tile after the next tile" — this is what we prefetch when sitting
+// in S_WARMUP_WAIT (we've swapped tile(0,0) to Ping; we want to load tile(0,1))
+// Since we're currently computing tile(0,0), next = tile(0,1):
+//   pf_j = (0+1 < N) ? 1 : 0  etc.  →  already covered by next_j_after_cur/next_i_after_cur
+//   at state entry tile_i=0, tile_j=0.
+
+// Prefetch DMA addresses (next tile)
+wire [31:0] pfetch_w_addr = lk_w_addr + next_j_after_cur * {16'b0, tile_len};
+wire [31:0] pfetch_a_addr = lk_a_addr + next_i_after_cur * {16'b0, tile_len};
+
+// Is the next tile the last tile?
+wire next_is_last = (next_i_after_cur == lk_m_dim - 1) &&
+                    (next_j_after_cur == lk_n_dim - 1);
+
+// ---------------------------------------------------------------------------
 // Main FSM
 // ---------------------------------------------------------------------------
 always @(posedge clk) begin
     if (!rst_n) begin
-        state       <= S_IDLE;
-        busy        <= 0;
-        done        <= 0;
-        irq         <= 0;
-        pe_en       <= 0;
-        pe_flush    <= 0;
-        pe_stat     <= 0;
-        dma_w_start <= 0;
-        dma_a_start <= 0;
-        dma_r_start <= 0;
-        dma_w_addr  <= 0;
-        dma_a_addr  <= 0;
-        dma_r_addr  <= 0;
-        dma_w_len   <= 0;
-        dma_a_len   <= 0;
-        dma_r_len   <= 0;
-        dma_w_done_r <= 0;
-        dma_a_done_r <= 0;
-        dma_r_done_r <= 0;
-        w_ppb_swap  <= 0;
-        a_ppb_swap  <= 0;
-        w_ppb_clear <= 0;
-        a_ppb_clear <= 0;
-        r_fifo_clear <= 0;
-        pe_load_w   <= 0;
-        ws_consume_cnt <= 0;
-        tile_i      <= 0;
-        tile_j      <= 0;
+        state          <= S_IDLE;
+        busy           <= 1'b0;
+        done           <= 1'b0;
+        irq            <= 1'b0;
+        pe_en          <= 1'b0;
+        pe_flush       <= 1'b0;
+        pe_stat        <= 1'b1;
+        pe_load_w      <= 1'b0;
+        dma_w_start    <= 1'b0;
+        dma_a_start    <= 1'b0;
+        dma_r_start    <= 1'b0;
+        dma_w_addr     <= 32'd0;
+        dma_a_addr     <= 32'd0;
+        dma_r_addr     <= 32'd0;
+        dma_w_len      <= 16'd0;
+        dma_a_len      <= 16'd0;
+        dma_r_len      <= 16'd0;
+        dma_w_done_r   <= 1'b0;
+        dma_a_done_r   <= 1'b0;
+        dma_r_done_r   <= 1'b0;
+        w_ppb_swap     <= 1'b0;
+        a_ppb_swap     <= 1'b0;
+        w_ppb_clear    <= 1'b0;
+        a_ppb_clear    <= 1'b0;
+        r_fifo_clear   <= 1'b0;
+        ws_consume_cnt <= 16'd0;
+        tile_i         <= 32'd0;
+        tile_j         <= 32'd0;
     end else begin
-        // Default: deassert pulse signals
-        dma_w_start <= 0;
-        dma_a_start <= 0;
-        dma_r_start <= 0;
-        w_ppb_swap  <= 0;
-        a_ppb_swap  <= 0;
-        w_ppb_clear <= 0;
-        a_ppb_clear <= 0;
-        r_fifo_clear <= 0;
-        // done is cleared when CPU writes ctrl_reg=0
-        if (!cfg_start) done <= 0;
+        // ── Default: de-assert all one-cycle pulse signals ──
+        dma_w_start  <= 1'b0;
+        dma_a_start  <= 1'b0;
+        dma_r_start  <= 1'b0;
+        w_ppb_swap   <= 1'b0;
+        a_ppb_swap   <= 1'b0;
+        w_ppb_clear  <= 1'b0;
+        a_ppb_clear  <= 1'b0;
+        r_fifo_clear <= 1'b0;
+
+        // ── IRQ Clear: CPU writes ctrl_reg[2] = 1 to acknowledge IRQ ──
+        if (cfg_irq_clr) irq <= 1'b0;
+
+        // ── done auto-clear when CPU de-asserts start ──
+        if (!cfg_start) done <= 1'b0;
 
         case (state)
-            // ---------------------------------------------------------------
+
+            // =================================================================
+            // S_IDLE
+            // =================================================================
             S_IDLE: begin
-                pe_en <= 0;
-                pe_flush <= 0;
-                pe_load_w <= 0;
-                dma_w_done_r <= 0;
-                dma_a_done_r <= 0;
-                dma_r_done_r <= 0;
+                pe_en    <= 1'b0;
+                pe_flush <= 1'b0;
+                pe_load_w <= 1'b0;
+                dma_w_done_r <= 1'b0;
+                dma_a_done_r <= 1'b0;
+                dma_r_done_r <= 1'b0;
 
                 if (cfg_start_rise) begin
-                    busy    <= 1;
-                    tile_i  <= 0;
-                    tile_j  <= 0;
-                    state   <= S_TILE_LOAD;
-                    // Clear PPBufs and Result FIFO for first tile
-                    w_ppb_clear  <= 1;
-                    a_ppb_clear  <= 1;
-                    r_fifo_clear <= 1;
-                    // Launch DMA for tile (0,0)
-                    dma_w_addr  <= w_addr;                    // B[:,0] start
-                    dma_w_len   <= k_dim[15:0] * {14'b0, data_bytes};
-                    dma_a_addr  <= a_addr;                    // A[0,:] start
-                    dma_a_len   <= k_dim[15:0] * {14'b0, data_bytes};
-                    dma_w_start <= 1;
-                    dma_a_start <= 1;
+                    busy           <= 1'b1;
+                    tile_i         <= 32'd0;
+                    tile_j         <= 32'd0;
+                    ws_consume_cnt <= 16'd0;
+
+                    // Clear all buffers for fresh layer start
+                    w_ppb_clear  <= 1'b1;
+                    a_ppb_clear  <= 1'b1;
+                    r_fifo_clear <= 1'b1;
+
+                    // Phase-0: launch warm-up load of tile(0,0)
+                    // Use live cfg (shadow latched this same cycle)
+                    dma_w_addr  <= w_addr;
+                    dma_w_len   <= k_dim[15:0] * {14'b0, (cfg_mode == 2'b00) ? 2'd1 : 2'd2};
+                    dma_a_addr  <= a_addr;
+                    dma_a_len   <= k_dim[15:0] * {14'b0, (cfg_mode == 2'b00) ? 2'd1 : 2'd2};
+                    dma_w_start <= 1'b1;
+                    dma_a_start <= 1'b1;
+
+                    state <= S_WARMUP_LOAD;
                 end
             end
 
-            // ---------------------------------------------------------------
-            // S_TILE_LOAD: wait for DMA to finish loading tile (i,j)
-            // ---------------------------------------------------------------
-            S_TILE_LOAD: begin
-                if (dma_all_load_done) begin
-                    // Swap PPBufs: make DMA-filled bank available to PE
-                    w_ppb_swap <= 1;
-                    a_ppb_swap <= 1;
-                    // pe_en remains 0 here; S_COMPUTE first cycle will set pe_en=1.
-                    // This avoids a spurious Stage-0 sample with stale weight_reg
-                    // while pe_mode has already switched to the new dtype (e.g. FP16).
-                    pe_stat <= cfg_stat[0];
-                    state   <= S_PRELOAD;
-                end
+            // =================================================================
+            // S_WARMUP_LOAD – wait for tile(0,0) DMA load done.
+            // =================================================================
+            S_WARMUP_LOAD: begin
+                pe_en    <= 1'b0;
+                pe_flush <= 1'b0;
+
                 if (cfg_abort) begin
-                    state <= S_IDLE;
-                    busy  <= 0;
-                    pe_en <= 0;
+                    state <= S_IDLE; busy <= 1'b0;
+                end else if (dma_load_done) begin
+                    // Swap PPBuf Pong→Ping so PE can read tile(0,0)
+                    w_ppb_swap   <= 1'b1;
+                    a_ppb_swap   <= 1'b1;
+                    dma_w_done_r <= 1'b0;
+                    dma_a_done_r <= 1'b0;
+                    state        <= S_WARMUP_WAIT;
                 end
             end
 
-            // ---------------------------------------------------------------
-            // S_PRELOAD: 1-cycle wait for PPBuf swap + WS setup
-            // ---------------------------------------------------------------
+            // =================================================================
+            // S_WARMUP_WAIT – 1-cycle swap propagation.
+            // Launch prefetch for tile(0,1) unless tile(0,0) is the last tile.
+            // =================================================================
+            S_WARMUP_WAIT: begin
+                pe_stat        <= lk_stat[0];
+                pe_load_w      <= (lk_stat[0] == 1'b0) ? 1'b1 : 1'b0;
+                ws_consume_cnt <= 16'd0;
+
+                if (is_last_tile) begin
+                    // Only one tile in the whole layer; no prefetch needed.
+                    state <= S_PRELOAD;
+                end else begin
+                    // Prefetch next tile into Pong bank
+                    dma_w_addr  <= pfetch_w_addr;
+                    dma_w_len   <= tile_len;
+                    dma_a_addr  <= pfetch_a_addr;
+                    dma_a_len   <= tile_len;
+                    dma_w_start <= 1'b1;
+                    dma_a_start <= 1'b1;
+                    dma_w_done_r <= 1'b0;
+                    dma_a_done_r <= 1'b0;
+                    state <= S_PRELOAD;
+                end
+            end
+
+            // =================================================================
+            // S_PRELOAD – 1-cycle wait for PPBuf swap to propagate.
+            // After this cycle, rd_sel/wr_sel/rd_fill are stable for PE.
+            // =================================================================
             S_PRELOAD: begin
-                pe_en    <= 0;  // defer pe_en until data ready
-                pe_flush <= 0;
-                pe_load_w <= (cfg_stat[0] == 1'b0) ? 1'b1 : 1'b0;
-                ws_consume_cnt <= 0;
-                state    <= S_COMPUTE;
+                pe_en    <= 1'b0;
+                pe_flush <= 1'b0;
+                // pe_stat and pe_load_w are already set by previous state
+                state <= S_OVERLAP_COMPUTE;
             end
 
-            // ---------------------------------------------------------------
-            // S_COMPUTE
-            // ---------------------------------------------------------------
-            S_COMPUTE: begin
-                pe_flush <= 0;
+            // =================================================================
+            // S_OVERLAP_COMPUTE
+            //
+            //   Ping bank   → PE is computing tile(tile_i, tile_j)
+            //   Pong bank   → DMA is loading next tile (already launched)
+            //
+            //   Exit when all Ping data consumed (OS) or K+2 beats (WS).
+            //   Then go to S_DRAIN.
+            // =================================================================
+            S_OVERLAP_COMPUTE: begin
+                pe_flush <= 1'b0;
 
                 if (cfg_abort) begin
-                    state <= S_IDLE;
-                    busy  <= 0;
-                    pe_en <= 0;
-                    pe_load_w <= 0;
-                end else if (cfg_stat[0] == 1'b0) begin
-                    // ----- WS mode -----
-                    // Feed K beats of weight+activation, then drain via S_DRAIN
-                    pe_load_w <= (ws_consume_cnt < k_dim[15:0]) ? 1'b1 : 1'b0;
-                    if (ws_consume_cnt < k_dim[15:0] + 16'd2) begin
-                        pe_en <= 1;
+                    state <= S_IDLE; busy <= 1'b0;
+                    pe_en <= 1'b0; pe_load_w <= 1'b0;
+
+                end else if (lk_stat[0] == 1'b0) begin
+                    // ─── WS mode ───
+                    pe_load_w <= (ws_consume_cnt < lk_k_dim[15:0]) ? 1'b1 : 1'b0;
+                    if (ws_consume_cnt < lk_k_dim[15:0] + 16'd2) begin
+                        pe_en <= 1'b1;
                         ws_consume_cnt <= ws_consume_cnt + 1;
                     end else begin
-                        pe_en <= 0;
-                        pe_load_w <= 0;
-                        state <= S_DRAIN;   // WS also uses flush path (same as OS)
+                        pe_en     <= 1'b0;
+                        pe_load_w <= 1'b0;
+                        state     <= S_DRAIN;
                     end
+
                 end else begin
-                    // ----- OS mode -----
-                    pe_en <= 1;
-                    pe_load_w <= 0;
-                    if (dma_all_load_done && w_ppb_empty && a_ppb_empty) begin
+                    // ─── OS mode ───
+                    pe_en     <= 1'b1;
+                    pe_load_w <= 1'b0;
+                    if (w_ppb_empty && a_ppb_empty) begin
                         state <= S_DRAIN;
                     end
                 end
             end
 
-            // ---------------------------------------------------------------
+            // =================================================================
+            // S_DRAIN – Assert pe_flush for 1 cycle.
+            // =================================================================
             S_DRAIN: begin
-                pe_en    <= 1;
-                pe_flush <= 1;
+                pe_en    <= 1'b1;
+                pe_flush <= 1'b1;
                 state    <= S_DRAIN2;
             end
 
+            // =================================================================
+            // S_DRAIN2 – Flush pipeline 2nd cycle.
+            // =================================================================
             S_DRAIN2: begin
-                pe_en    <= 1;
-                pe_flush <= 0;
+                pe_en    <= 1'b1;
+                pe_flush <= 1'b0;
                 state    <= S_WRITE_BACK;
             end
 
-            // ---------------------------------------------------------------
-            // S_WRITE_BACK: initiate write-back for current tile result
-            // ---------------------------------------------------------------
+            // =================================================================
+            // S_WRITE_BACK – Initiate DMA result write-back.
+            // =================================================================
             S_WRITE_BACK: begin
-                pe_en       <= 1;
-                pe_flush    <= 0;
-                dma_r_addr  <= cur_r_addr;
-                dma_r_len   <= tile_r_len;
-                dma_r_start <= 1;
-                state       <= S_WB_WAIT;
+                pe_en        <= 1'b1;
+                pe_flush     <= 1'b0;
+                dma_r_addr   <= comp_r_addr;
+                dma_r_len    <= TILE_R_LEN;
+                dma_r_start  <= 1'b1;
+                dma_r_done_r <= 1'b0;
+                state        <= S_WB_WAIT;
             end
 
-            // ---------------------------------------------------------------
-            // S_WB_WAIT: wait for DMA write-back, then advance tile
-            // ---------------------------------------------------------------
+            // =================================================================
+            // S_WB_WAIT – Wait DMA WB done; then check prefetch status.
+            //
+            //   After WB completes:
+            //     - If IS last tile → go to S_DONE.
+            //     - If NOT last tile:
+            //         If prefetch DMA ALREADY done → swap + S_PRELOAD → compute.
+            //         Else → go to S_WAIT_PREFETCH to wait for it.
+            // =================================================================
             S_WB_WAIT: begin
-                pe_en <= 1;
-                dma_r_start <= 1;  // keep arming until DMA picks up
+                pe_en <= 1'b1;
+                dma_r_start <= 1'b1;   // keep arming until DMA latches
                 if (dma_r_done_r) begin
-                    dma_r_start <= 0;
-                    pe_en <= 0;
+                    dma_r_start  <= 1'b0;
+                    dma_r_done_r <= 1'b0;
+                    pe_en        <= 1'b0;
 
-                    // Advance to next tile
-                    // Tile order: j increments first (row i fixed), then i increments
-                    if (tile_j + 1 < n_dim) begin
-                        // Move to next column in same row
-                        tile_j <= tile_j + 1;
-                        state  <= S_TILE_LOAD;
-                        // Clear done flags and buffers for next tile
-                        dma_w_done_r <= 0;
-                        dma_a_done_r <= 0;
-                        dma_r_done_r <= 0;
-                        w_ppb_clear  <= 1;
-                        a_ppb_clear  <= 1;
-                        r_fifo_clear <= 1;
-                        // Launch DMA for next tile: B[:,j+1], A[i,:] (same row)
-                        dma_w_addr  <= w_addr + (tile_j + 1) * {16'b0, k_dim[15:0] * {14'b0, data_bytes}};
-                        dma_w_len   <= k_dim[15:0] * {14'b0, data_bytes};
-                        dma_a_addr  <= a_addr + tile_i * {16'b0, k_dim[15:0] * {14'b0, data_bytes}};
-                        dma_a_len   <= k_dim[15:0] * {14'b0, data_bytes};
-                        dma_w_start <= 1;
-                        dma_a_start <= 1;
-                    end else if (tile_i + 1 < m_dim) begin
-                        // Move to next row, reset column to 0
-                        tile_i <= tile_i + 1;
-                        tile_j <= 0;
-                        state  <= S_TILE_LOAD;
-                        dma_w_done_r <= 0;
-                        dma_a_done_r <= 0;
-                        dma_r_done_r <= 0;
-                        w_ppb_clear  <= 1;
-                        a_ppb_clear  <= 1;
-                        r_fifo_clear <= 1;
-                        // Launch DMA for tile (i+1, 0): B[:,0], A[i+1,:]
-                        dma_w_addr  <= w_addr;
-                        dma_w_len   <= k_dim[15:0] * {14'b0, data_bytes};
-                        dma_a_addr  <= a_addr + (tile_i + 1) * {16'b0, k_dim[15:0] * {14'b0, data_bytes}};
-                        dma_a_len   <= k_dim[15:0] * {14'b0, data_bytes};
-                        dma_w_start <= 1;
-                        dma_a_start <= 1;
-                    end else begin
-                        // All tiles done
+                    if (is_last_tile) begin
                         state <= S_DONE;
+                    end else begin
+                        // Compute next tile coordinates
+                        if (tile_j + 1 < lk_n_dim) begin
+                            tile_j <= tile_j + 1;
+                        end else begin
+                            tile_i <= tile_i + 1;
+                            tile_j <= 32'd0;
+                        end
+
+                        // Decide what to do based on prefetch status
+                        if (dma_load_done) begin
+                            // Prefetch already finished — swap banks
+                            w_ppb_swap   <= 1'b1;
+                            a_ppb_swap   <= 1'b1;
+                            r_fifo_clear <= 1'b1;
+                            pe_stat        <= lk_stat[0];
+                            pe_load_w      <= (lk_stat[0] == 1'b0) ? 1'b1 : 1'b0;
+                            ws_consume_cnt <= 16'd0;
+                            dma_w_done_r   <= 1'b0;
+                            dma_a_done_r   <= 1'b0;
+                            // Launch prefetch for the tile two steps ahead
+                            if (!next_is_last) begin
+                                dma_w_addr <= lk_w_addr +
+                                    ( (next_j_after_cur + 1 < lk_n_dim) ? (next_j_after_cur + 1) : 32'd0 )
+                                    * {16'b0, tile_len};
+                                dma_a_addr <= lk_a_addr +
+                                    ( (next_j_after_cur + 1 < lk_n_dim) ? next_i_after_cur : (next_i_after_cur + 1) )
+                                    * {16'b0, tile_len};
+                                dma_w_len  <= tile_len;
+                                dma_a_len  <= tile_len;
+                                dma_w_start <= 1'b1;
+                                dma_a_start <= 1'b1;
+                            end
+                            state <= S_PRELOAD;  // 1-cycle swap propagation
+                        end else begin
+                            // Prefetch not yet done — wait in S_WAIT_PREFETCH
+                            state <= S_WAIT_PREFETCH;
+                        end
                     end
                 end
             end
 
-            // ---------------------------------------------------------------
+            // =================================================================
+            // S_WAIT_PREFETCH – Wait for the in-flight prefetch DMA to finish,
+            // then swap banks, wait S_PRELOAD, and enter compute.
+            // =================================================================
+            S_WAIT_PREFETCH: begin
+                pe_en <= 1'b0;
+                if (cfg_abort) begin
+                    state <= S_IDLE; busy <= 1'b0;
+                end else if (dma_load_done) begin
+                    // Prefetch finished — swap and start compute
+                    w_ppb_swap   <= 1'b1;
+                    a_ppb_swap   <= 1'b1;
+                    r_fifo_clear <= 1'b1;
+                    pe_stat        <= lk_stat[0];
+                    pe_load_w      <= (lk_stat[0] == 1'b0) ? 1'b1 : 1'b0;
+                    ws_consume_cnt <= 16'd0;
+                    dma_w_done_r   <= 1'b0;
+                    dma_a_done_r   <= 1'b0;
+                    // Launch prefetch for tile two steps ahead (from current new tile)
+                    if (!next_is_last) begin
+                        dma_w_addr <= lk_w_addr +
+                            ( (next_j_after_cur + 1 < lk_n_dim) ? (next_j_after_cur + 1) : 32'd0 )
+                            * {16'b0, tile_len};
+                        dma_a_addr <= lk_a_addr +
+                            ( (next_j_after_cur + 1 < lk_n_dim) ? next_i_after_cur : (next_i_after_cur + 1) )
+                            * {16'b0, tile_len};
+                        dma_w_len  <= tile_len;
+                        dma_a_len  <= tile_len;
+                        dma_w_start <= 1'b1;
+                        dma_a_start <= 1'b1;
+                    end
+                    state <= S_PRELOAD;  // 1-cycle swap propagation
+                end
+            end
+
+            // =================================================================
+            // S_DONE – Layer complete. Assert IRQ. Return to S_IDLE.
+            // =================================================================
             S_DONE: begin
-                pe_en  <= 0;
-                busy   <= 0;
-                done   <= 1;
-                irq    <= 1;
-                state  <= S_IDLE;
-                ws_consume_cnt <= 0;
-                tile_i <= 0;
-                tile_j <= 0;
+                pe_en  <= 1'b0;
+                busy   <= 1'b0;
+                done   <= 1'b1;
+                irq    <= 1'b1;
+                // Reset counters; clear buffers for next layer
+                ws_consume_cnt <= 16'd0;
+                tile_i         <= 32'd0;
+                tile_j         <= 32'd0;
+                w_ppb_clear    <= 1'b1;
+                a_ppb_clear    <= 1'b1;
+                r_fifo_clear   <= 1'b1;
+                state          <= S_IDLE;
             end
 
             default: state <= S_IDLE;
+
         endcase
     end
 end

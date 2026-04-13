@@ -135,8 +135,10 @@ always @(posedge clk) begin
         // New writer's bank = next_wr_sel (after swap)
         if (next_wr_sel == 1'b0) begin
             wr_ptr_a  <= 0;
+            wr_fill_a <= 0;  // Reset fill count for new writer's bank
         end else begin
             wr_ptr_b  <= 0;
+            wr_fill_b <= 0;  // Reset fill count for new writer's bank
         end
     end else if (do_write) begin
         if (wr_sel == 1'b0) begin

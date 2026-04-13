@@ -1,7 +1,22 @@
 # NPU_prj — 系统架构文档
 
-> 最后更新：2026-04-10  
-> 文档状态：已按当前 RTL 与 SoC 联调结果同步
+> 最后更新：2026-04-13
+> 文档状态：已按真 Ping-Pong 重叠 FSM 架构（2026-04-13）与全量回归结果同步
+
+---
+
+## 目录
+
+1. [项目概览](#1-项目概览)
+2. [顶层系统结构](#2-顶层系统结构)
+3. [NPU 内部结构详解](#3-npu-内部结构详解)
+4. [数据流与 DRAM 布局](#4-数据流与-dram-布局)
+5. [控制寄存器映射](#5-控制寄存器映射)
+6. [控制器状态机](#6-控制器状态机真-ping-pong-版)
+7. [地址锁存与层间切换](#7-地址锁存与层间切换)
+8. [SoC 地址空间与关键时序约束](#8-soc-地址空间与关键时序约束)
+9. [能力矩阵与性能估算](#9-能力矩阵与性能估算)
+10. [配套文档阅读顺序](#10-配套文档阅读顺序)
 
 ---
 
@@ -9,263 +24,242 @@
 
 NPU_prj 是一个面向 SoC 集成的 Verilog NPU 原型，实现了：
 
-- **4×4 可参数化 PE 阵列**
+- **4×4 可参数化 PE 阵列**（默认 ROWS=4, COLS=4）
 - **INT8 / FP16** 两条已验证数据通路
 - **AXI4-Lite 配置接口** + **AXI4 DMA 数据通路**
 - **WS（Weight-Stationary）/ OS（Output-Stationary）** 两种计算模式
-- **PicoRV32 + SRAM + DRAM + NPU** 的 SoC 集成验证
+- **真 Ping-Pong 重叠执行**：DMA 搬运与 PE 计算并行（2026-04-13 升级）
+- **PicoRV32 + SRAM + DRAM + NPU** 的完整 SoC 集成验证
 
-### 核心设计概念：Tile-Based 计算
+### 1.1 核心设计概念：Tile-Based 计算
 
-本 NPU 采用 **tile-based 计算模型**，这是理解其行为的关键：
+本 NPU 采用 **tile-based 计算模型**，每个 tile 对应矩阵乘法 `C[M×N] = A[M×K] × B[K×N]` 中的一个输出元素 `C[i][j]`。
 
-1. **什么是 Tile？**
-   - 在矩阵乘法 `C[M×N] = A[M×K] × B[K×N]` 中，每个 **tile** 对应一个输出元素 `C[i][j]` 的计算
-   - 每个 tile 需要完成完整的 K 维点积累加
-   - 这种设计将大矩阵分解为**微小的计算单元**，逐个处理
+| 概念 | 说明 |
+|------|------|
+| **Tile** | 一个输出元素 `C[i][j]` 的完整计算任务 |
+| **Tile 数据** | 需要 B 的第 j 列 `B[:,j]` 和 A 的第 i 行 `A[i,:]` |
+| **Tile 内积** | K 次乘累加（MAC），产生 1 个 32-bit 结果 |
+| **Tile 循环** | 控制器按 `M×N` 次外层循环逐一处理 |
 
-2. **Tile 的物理意义：**
-   - 物理 PE 阵列是 4×4，但**每个 tile 只使用部分 PE**
-   - OS 模式：`target_col = j % COLS`，权重只送到目标列
-   - WS 模式：权重广播到整个列，部分和沿列传递
-   - 一个 tile ≠ 一个 PE，而是一个完整的 K 维累加任务
+**重要**：当前 NPU 不是"一次吐出整块 4×4 输出矩阵"的并行架构，而是按 `C[i][j]` 单点推进的 tile-loop 架构。每个 tile 只使用 PE 阵列的一部分资源。
 
-3. **Tile-Loop 调度：**
-   - 控制器按 `M×N` 次循环推进，每次计算一个 `C[i][j]`
-   - 每完成一个 tile，更新 `i` 和 `j`，计算新的地址
+### 1.2 当前验证状态
 
-这种设计实现了**资源复用与内存友好**，但不同于传统"一次吐出整块输出矩阵"的并行架构。
+| 测试套件 | 状态 | 通过/总数 |
+|---------|------|---------|
+| array_scale（K 深度验证） | ✅ PASS | 16/16 |
+| FP16 端到端 | ✅ PASS | 9/9 |
+| 多行多列综合 | ✅ PASS | 13/13 |
+| PE 单元测试 | ✅ PASS | 19/19 |
+| SoC 集成 | ✅ PASS | 1/1 |
+| Comprehensive（含复杂 FP16） | ✅ PASS | 28/28 |
 
-### 当前实现边界
+**总计：86/86 测试通过（2026-04-13）**
 
-这份文档描述的是**当前代码实际行为**，不是早期设计目标：
+### 1.3 WS flush 语义说明
 
-- 当前 RTL **实际稳定支持 INT8 与 FP16**。
-- `CTRL[3:2]` 在硬件内部只区分"INT8"与"非 INT8"。软件上建议：
-  - `00`：INT8
-  - `10`：FP16
-- `ARR_CFG`、`CLK_DIV`、`CG_EN` 已有寄存器接口，但**尚未完整闭环到阵列规模裁剪/真实门控时钟路径**，更多属于保留能力与观测接口。
-- 当前 NPU 的主工作流是 **tile-loop 矩阵乘法**：每次 tile 计算一个 `C[i][j]`，而不是一次性在 4×4 阵列上直接吐出整块 4×4 输出矩阵。
-
-### 当前验证状态
-
-| 项目 | 状态 |
-|---|---|
-| PE 单元 | ✅ 19/19 PASS |
-| FP16 乘法 | ✅ 44/44 PASS |
-| FP16 加法 | ✅ 20/20 PASS |
-| NPU 综合测试 | ✅ 8/8 PASS |
-| 阵列规模验证 | ✅ 16/16 PASS |
-| 多行多列综合 | ✅ 13/13 PASS |
-| FP16 端到端 | ✅ 9/9 PASS |
-| SoC 集成 | ✅ 287 cycles PASS |
-| 全量回归 | ✅ 903 PASS / 0 FAIL |
-
-### WS flush 语义说明（2026-04-10 确立）
-
-WS 模式下，`flush` 信号采用**纯触发输出**语义：
+WS 模式下 `flush` 信号采用**纯触发输出**语义：
 - flush beat 本身**不参与累加计算**，直接将 `ws_acc` 输出并清零
-- 驱动 flush beat 时，`a_in` 和 `w_in` 必须设为 0（纯 flush 标记，无实际数据）
-- 这与 OS 模式不同：OS 模式的 flush beat 是最后一个数据 beat，携带真实计算数据
-
-此语义确保：K 个数据 beat 完整累加后，第 K+1 个 flush beat 无副作用地触发输出。
+- 驱动 flush beat 时，`a_in` 和 `w_in` 必须设为 0（纯标记，无实际数据）
+- 这与 OS 模式不同：OS 模式的 flush beat 携带最后一个真实计算数据
 
 ---
 
 ## 2. 顶层系统结构
 
-```text
-                +--------------------------------------+
-                |              soc_top                 |
-                |                                      |
-                |  +-----------+                       |
-CPU firmware -->|  | PicoRV32  |                       |
-                |  +-----+-----+                       |
-                |        | mem_if                      |
-                |        v                             |
-                |  +-----------+   +---------------+  |
-                |  |  soc_mem  |   |  dram_model   |  |
-                |  |  SRAM 4KB |   |  dual-port    |  |
-                |  +-----------+   +-------+-------+  |
-                |                      ^     ^         |
-                |                      |     |         |
-                |  +-------------------+     |         |
-                |  | axi_lite_bridge         |         |
-                |  +-----------+-------------+         |
-                |              | AXI4-Lite             |
-                |              v                       |
-                |         +----------+                 |
-                |         | npu_top  |                 |
-                |         +----+-----+                 |
-                |              | AXI4 Master           |
-                +--------------+-----------------------+
-                               |
-                               v
-                            DRAM data
+```
+                +--------------------------------------------------+
+                |                    soc_top                       |
+                |                                                  |
+                |  +------------+                                  |
+CPU firmware -->|  | PicoRV32   |  RISC-V 软核，执行固件           |
+                |  +------+-----+                                  |
+                |         | mem_valid/mem_ready (native bus)       |
+                |         v                                        |
+                |  +------+-----+   +------------------+          |
+                |  |  soc_mem   |   |   dram_model     |          |
+                |  |  SRAM 4KB  |   |  dual-port DRAM  |          |
+                |  | 组合读     |   |  CPU端 组合读     |          |
+                |  +------------+   +---------+--------+          |
+                |                             ^                    |
+                |         +-------------------+                    |
+                |         | AXI4-Lite                              |
+                |  +------+----------+                             |
+                |  | axi_lite_bridge |  mem_if → AXI4-Lite         |
+                |  +------+----------+  (3拍写: AW→W→B)           |
+                |         | AXI4-Lite (slave)                      |
+                |         v                                        |
+                |  +------+----------+                             |
+                |  |    npu_top      |                             |
+                |  +------+----------+                             |
+                |         | AXI4 Master (DMA 数据搬运)             |
+                +---------+-----------------------------------------+
+                          |
+                          v (到 dram_model AXI4 端口)
+                       DRAM 数据
 ```
 
-### 分层职责
+### 2.1 各层职责
 
-- **PicoRV32**：负责固件执行、初始化 DRAM、配置 NPU、轮询 done/处理中断。
-- **soc_mem**：CPU 指令与数据 SRAM。
-- **dram_model**：CPU 与 NPU DMA 共享的行为级 DRAM。
-- **axi_lite_bridge**：把 PicoRV32 的 `mem_valid/mem_ready` 风格访存转换成 AXI4-Lite。
-- **npu_top**：NPU 顶层，内部集成寄存器、控制器、DMA、PPBuf、PE 阵列、结果 FIFO、电源管理占位模块。
+| 模块 | 职责 |
+|------|------|
+| **PicoRV32** | 执行固件：初始化 DRAM、配置 NPU 寄存器、轮询 done/处理中断、校验结果 |
+| **soc_mem** | CPU 指令 + 数据 SRAM，组合读（异步读口，与 PicoRV32 同周期返回数据） |
+| **dram_model** | CPU 与 NPU DMA 共享的行为级 DRAM，CPU 端组合读，AXI4 端支持 burst |
+| **axi_lite_bridge** | 将 PicoRV32 原生 mem 总线转换为 AXI4-Lite，3拍写：`S_WRITE_AW → S_WRITE_W → done` |
+| **npu_top** | NPU 顶层：集成寄存器文件、控制器、DMA、双 PPBuf、PE 阵列、结果 FIFO、电源管理 |
 
 ---
 
-## 3. NPU 内部结构
+## 3. NPU 内部结构详解
 
-```text
-AXI4-Lite
-   |
-   v
-+--------------+
-| npu_axi_lite |
-+------+-------+
-       |
-       v
-+--------------+        +-------------+
-|   npu_ctrl   |------->|  npu_dma    |---- AXI4 ----> DRAM
-+------+-------+        +------+------+ 
-       |                         |
-       | swap/clear              | write 32-bit words
-       v                         v
-+-------------+          +-------------+
-| pingpong_buf|          | pingpong_buf|
-|   (Weight)  |          | (Activation)|
-+------+------+          +------+------+
-       |                        |
-       +-----------+------------+
+```
+                AXI4-Lite (CPU 配置)
+                     |
+                     v
+          +-------------------+
+          |   npu_axi_lite    |   寄存器文件，AXI4-Lite 从机
+          |  CTRL/STATUS/DIM  |   暴露所有配置与状态给 CPU
+          +--------+----------+
+                   |  ctrl_reg, m/n/k_dim, w/a/r_addr, mode, stat
                    v
-               +-------+
-               |pe_array|
-               +---+---+
-                   |
-                   v
-               +-------+
-               | FIFO  |
-               +-------+
+          +--------+----------+
+          |     npu_ctrl      |   tile-loop 控制器 + 真 Ping-Pong FSM
+          |  (Shadow Regs)    |   所有配置在 start 脉冲时锁存
+          +----+----+----+----+
+               |    |    |
+        DMA控制|    |IRQ |PE 控制
+               |    |    |     pe_en/flush/mode/stat/load_w/target_col
+               v    v    v
+          +----+----+  +-+------------+       +------------------+
+          |  npu_dma |  |             |       |    pe_array      |
+          | 三通道   |  |  （中断到   |       |   4×4 PE 网格    |
+          | AXI4 主机|  |  npu_axi_lite)      |                  |
+          +---+---+--+  |             |       |  +---------+     |
+              |   |     +-------------+       |  |  pe_top |×16  |
+    W读  A读  |   | R写                       |  +---------+     |
+              |   |                           |  FP16/INT8 MAC   |
+              |   |                           |  3级流水线        |
+              v   v                           +---------+--------+
+          +---+---+--+                                  |
+          | PPBuf_W  |  权重双 Bank                      | valid_out/acc_out
+          | (BufA/B) |  DMA 写 Pong，PE 读 Ping          v
+          +----------+                        +---------+---------+
+          +----------+                        |    sync_fifo      |
+          | PPBuf_A  |  激活双 Bank             |   结果 FIFO       |
+          | (BufA/B) |  DMA 写 Pong，PE 读 Ping |  PE → DMA 缓冲   |
+          +----------+                        +---------+---------+
+                  |  swap/clear (来自 npu_ctrl)          |
+                  +----------------------------------------+
+                  |  rd_en (ppb_rd_active = pe_en)         |
+                  |                                        |
+                  | PPBuf 读侧输出 8-bit 子字              |
+                  v                                        |
+          +-------+--------+                              |
+          |   npu_top       |   FP16 子字节装配             |
+          |  (拼 FP16)      |   2 拍 → 1 个 16-bit FP16   |
+          +-------+--------+                              |
+                  | pe_data 送入 pe_array                  | r_start
+                  v                                        v
+             pe_array                               npu_dma R_WRITE → DRAM
 ```
 
-### 关键点
+### 3.1 关键子模块功能总结
 
-1. **配置与状态**由 `npu_axi_lite` 暴露给 CPU。
-2. **npu_ctrl** 负责 tile-loop 调度、DMA 启动、PE flush、下一 tile 地址计算。
-   - 维护 `tile_i` 和 `tile_j` 计数器（0≤i<M, 0≤j<N）
-   - 计算每个 tile 的 DRAM 地址：`W_ADDR + j×K×元素字节数`，`A_ADDR + i×K×元素字节数`
-   - OS 模式：计算 `target_col = j % COLS`，用于权重路由
-3. **npu_dma** 负责：
-   - 从 DRAM 读权重（B 矩阵的第 j 列）
-   - 从 DRAM 读激活（A 矩阵的第 i 行）
-   - 从结果 FIFO 取结果写回 DRAM（C[i][j]）
-4. **pingpong_buf** 把"DMA 读入"和"PE 消费"解耦，支持 INT8（4 元素/字）和 FP16（2 元素/字）两种打包格式。
-5. **pe_array** 是参数化阵列，但当前 tile-loop 调度按单个输出元素推进，每个 tile 只激活部分 PE：
-   - OS 模式：激活整行，权重只送到 `target_col` 列
-   - WS 模式：权重广播到整列，激活按行广播
+#### `npu_ctrl`（控制核心）
+- 维护 `tile_i`、`tile_j` 循环计数器（0≤i<M, 0≤j<N）
+- 在 `cfg_start_rise` 时**一次性锁存**所有影子寄存器（Shadow Regs）
+- 驱动 DMA 启停、PPBuf swap/clear、PE en/flush
+- 实现真 Ping-Pong 重叠：PE 计算 tile(i,j) 时，DMA 同步加载 tile(i,j+1)
+
+#### `npu_dma`（三通道 AXI4 主机）
+- **W 通道**：从 DRAM 读权重 B[:,j] → 写入 PPBuf_W 的 Pong Bank
+- **A 通道**：从 DRAM 读激活 A[i,:] → 写入 PPBuf_A 的 Pong Bank
+- **R 通道**：从结果 FIFO 读结果 → 写回 DRAM C[i][j]
+- 三通道**共用一条 AXI4 总线**（时分复用），支持多拍 INCR burst
+
+#### `pingpong_buf`（双 Bank 乒乓缓冲）
+- **Bank A / Bank B** 交替切换：一侧供 DMA 写入，另一侧供 PE 读取
+- 写侧：32-bit 宽（来自 DMA AXI4 读数据）
+- 读侧：8-bit 子字宽（逐字节拆解给 PE，INT8=4子字/字，FP16=2×2字节/字）
+- `swap` 脉冲（来自 `npu_ctrl`）：切换 wr_sel / rd_sel，本质是时序电路，需等 1 拍稳定
+
+#### `pe_array` / `pe_top`（计算核心）
+- 4×4 阵列，16 个 `pe_top` 实例
+- 每个 PE 有独立的 3 级流水线：Stage-0（输入寄存器）→ Stage-1（乘法）→ Stage-2（累加/输出）
+- OS 模式：权重只路由到 `target_col` 列，激活行广播，PE 内部各自累加 `os_acc`
+- WS 模式：权重锁存在 PE 内（`load_w` 脉冲），K 个激活流入，PE 内部累加 `ws_acc`，flush 触发输出
+
+#### `npu_axi_lite`（寄存器文件）
+- AXI4-Lite 从机，接收 CPU 写操作，维护所有配置寄存器
+- 向 `npu_ctrl` 输出 `ctrl_reg`、维度、地址等信号
+- 管理 `int_pending`，在 `irq_flag` 上升沿置位，CPU 写 `INT_CLR` 或 `CTRL[6]` 清除
+- **写时序**：AW→W 两阶段（不是同拍），与 `axi_lite_bridge` 匹配
 
 ---
 
-## 4. 当前数据流约定
+## 4. 数据流与 DRAM 布局
 
-## 4.1 DRAM 布局
+### 4.1 DRAM 内存布局
 
-当前代码与测试默认使用如下布局：
+| 符号 | 矩阵 | 存储序 | DRAM 地址 |
+|------|------|------|-----------|
+| `W_ADDR` | `B[K×N]`（权重） | **列主序**：`B[0][j]..B[K-1][j]` 连续存放 | 基地址 |
+| `A_ADDR` | `A[M×K]`（激活） | **行主序**：`A[i][0]..A[i][K-1]` 连续存放 | 基地址 |
+| `R_ADDR` | `C[M×N]`（结果） | **行主序**：`C[i][j]` 在 `R_ADDR + (i×N+j)×4` | 基地址 |
 
-- **`W_ADDR`**：矩阵 `B[K×N]`，**列主序**
-- **`A_ADDR`**：矩阵 `A[M×K]`，**行主序**
-- **`R_ADDR`**：矩阵 `C[M×N]`，**行主序**
+### 4.2 元素打包规则
 
-### 元素打包规则
+| 模式 | DRAM 32-bit 字内容 | PPBuf 拆解 | PE 输入 |
+|------|------|------|------|
+| INT8 | `[b3 b2 b1 b0]`，4 个 8-bit 元素 | 逐字节，`SUBW=4` | 低 8 位有效 |
+| FP16 | `[f1_hi f1_lo f0_hi f0_lo]`，2 个 FP16 | `SUBW=4`（按字节），npu_top 再拼回 16-bit | 16-bit FP16 |
+| Result | 1 个 32-bit（INT8: 有符号整数；FP16: FP32） | — | 直接写回 DRAM |
 
-| 模式 | DRAM 中每个 32-bit 字包含 | 备注 |
-|---|---|---|
-| INT8 | 4 个 8-bit 元素 | PPBuf 以 `OUT_WIDTH=8, SUBW=4` 拆出 |
-| FP16 | 2 个 16-bit 元素 | 在 `npu_top` 中按低字节/高字节重新拼成 16-bit FP16 |
-| Result | 1 个 32-bit 结果 | INT8 为 32-bit 整数累加；FP16 路径输出 32-bit 累加结果 |
+**FP16 子字节装配**（在 `npu_top` 中完成）：
 
-## 4.2 Tile-loop 调度
-
-### 4.2.1 Tile 的生命周期
-
-一个 tile 代表一个输出元素 `C[i][j]` 的完整计算过程。当前控制器的外层循环是：
-
-```text
-for i in [0 .. M-1]
-  for j in [0 .. N-1]
-    // 开始一个 tile 的计算
-    启动 W/A DMA，读入 B[:,j] 和 A[i,:]
-    PE 消费 K 个元素对
-    flush → 结果写入 FIFO
-    DMA 读 FIFO，写回 DRAM
-    更新 i/j 地址，准备下一个 tile
+```
+PPBuf 输出 8-bit/拍：
+  拍 2k  : FP16[7:0]  → 存入 w_fp16_shift[7:0]
+  拍 2k+1: FP16[15:8] → 存入 w_fp16_shift[15:8]，w_ppb_phase 1→0
+                          ↓
+                        pe_data_ready = 1 → pe_consume 触发
 ```
 
-### 4.2.2 Tile 的内部阶段
+INT8 模式：每拍一个 8-bit 直接送 PE，`pe_data_ready = w_int8_ready_d && a_int8_ready_d`。
 
-每个 tile 经历以下阶段：
+### 4.3 Tile-Loop 调度
 
-| 阶段 | 控制器状态 | 作用 | 时长 |
-|---|---|---|---|
-| **准备** | S_LOAD | 启动 W/A DMA，填充 PPBuf | ~K 拍 + DMA 延迟 |
-| **对齐** | S_PRELOAD | 给 PE 流水线对齐一拍 | 1 拍 |
-| **计算** | S_COMPUTE | PE 流水线全速运行，完成 K 次 MAC | K-1 拍 |
-| **排空** | S_DRAIN | 保持 flush，等待流水线清空 | 3 拍（PE 流水线深度） |
-| **回写** | S_WRITE_BACK → S_WB_WAIT | 结果 FIFO → DMA → DRAM | ~1 + DMA 延迟 |
-| **切换** | S_NEXT_TILE | 计算下一个 tile 的 i/j 和地址 | 1 拍 |
+#### 地址公式（元素字节数：INT8=1，FP16=2）
 
-### 4.2.3 Tile 的物理映射
-
-虽然 PE 阵列是 4×4，但**每个 tile 只使用部分资源**：
-
-**OS 模式（每个 tile 计算一个输出元素）：**
 ```
-Tile C[i][j]:
-  - 激活广播：整行 PE (PE[i][*]) 接收 A[i,:]
-  - 权重路由：只送到 target_col = j % COLS 列
-  - 有效 PE：仅第 i 行 × 第 target_col 列的一个 PE 产生有效累加
+权重地址：dma_w_addr = W_ADDR + tile_j × K × 元素字节数
+激活地址：dma_a_addr = A_ADDR + tile_i × K × 元素字节数
+结果地址：dma_r_addr = R_ADDR + (tile_i × N + tile_j) × 4
 ```
 
-**WS 模式（每个 tile 计算一列的部分和）：**
-```
-Tile C[i][j]:
-  - 权重广播：整列 PE (PE[*][j%COLS]) 接收 B[:,j]
-  - 激活路由：按行广播 A[i,:]
-  - 部分和：沿列方向传递累加，最后一个 PE 产生最终结果
-```
+#### Tile 物理映射
 
-### 4.2.4 Tile 地址计算
-
-控制器维护：
-- `tile_i` (0≤i<M)：当前输出的行索引
-- `tile_j` (0≤j<N)：当前输出的列索引
-
-每个 tile 的 DRAM 地址：
+**OS 模式（每个 tile 计算 `C[i][j]`，一个输出元素）：**
 ```
-权重地址 = W_ADDR + j × K × 元素字节数
-激活地址 = A_ADDR + i × K × 元素字节数
-结果地址 = R_ADDR + (i×N + j) × 4
+target_col = tile_j % COLS
+
+权重路由：B[:,j] 只送到 target_col 列（其余列 w_in=0）
+激活广播：A[i,:] 广播到所有行
+有效 PE：PE[i][target_col] 产生有效累加（os_acc）
+输出：PE[i][target_col].acc_out → FIFO → DRAM
 ```
 
-其中**元素字节数**：
-- INT8：1 字节（但 DRAM 打包为 4 元素/32-bit 字）
-- FP16：2 字节（DRAM 打包为 2 元素/32-bit 字）
+**WS 模式（每个 tile 计算 `C[i][j]`，一个输出元素）：**
+```
+target_col = tile_j % COLS
 
-### OS 模式（Output-Stationary）
-
-- **激活广播**：`A[i,:]` 在行内广播，所有 `PE[i][*]` 接收相同激活
-- **权重路由**：`B[:,j]` 只送到 `target_col = j % COLS` 列
-- **累加位置**：每个 PE 内部累加自己的 `os_acc`，只有 `target_col` 列的 PE 产生有效累加
-- **Tile 输出**：每个 tile 对应一个输出元素 `C[i][j]`，由 `PE[i][target_col]` 产生
-- **物理资源利用率**：低（每 tile 只激活一行中的一列 PE）
-
-### WS 模式（Weight-Stationary）
-
-- **权重广播**：`B[:,j]` 在列内广播，所有 `PE[*][target_col]` 接收相同权重
-- **激活路由**：`A[i,:]` 按行广播
-- **部分和传递**：累加值沿列方向传递（`pe_col_sum`），最终由最下方 PE 产生结果
-- **Tile 输出**：每个 tile 对应一个输出元素 `C[i][j]`，由最下方 `PE[ROWS-1][target_col]` 产生
-- **物理资源利用率**：中（每 tile 激活一整列 PE，但只有底部 PE 产生最终输出）
+权重广播：B[:,j] 广播到整列 PE[*][target_col]（load_w 脉冲锁存 weight_reg）
+激活路由：A[i,:] 按行广播（行错位 1 拍，形成脉动流）
+累加：K 拍内 ws_acc += s1_mul
+输出：flush 触发，ws_acc 输出到 FIFO（flush beat 自身 w_in=a_in=0）
+```
 
 ---
 
@@ -273,217 +267,285 @@ Tile C[i][j]:
 
 基地址：**`0x0200_0000`**
 
-| 偏移 | 名称 | R/W | 位定义 / 说明 |
-|---:|---|:---:|---|
-| 0x00 | CTRL | RW | `[0] start`, `[1] abort`, `[3:2] mode`, `[5:4] stat_mode` |
-| 0x04 | STATUS | RO | `[0] busy`, `[1] done` |
+| 偏移 | 名称 | R/W | 位定义 |
+|-----:|------|:---:|--------|
+| 0x00 | CTRL | RW | `[0]` start（上升沿触发）<br>`[1]` abort（中止运算）<br>`[3:2]` data_mode：`00`=INT8，`10`=FP16<br>`[5:4]` stat_mode：`00`=WS，`01`=OS<br>`[6]` irq_clr（**W1C**，写 1 清 IRQ，读回 0） |
+| 0x04 | STATUS | RO | `[0]` busy，`[1]` done（sticky，清 start 后回零） |
 | 0x08 | INT_EN | RW | `[0]` 中断使能 |
-| 0x0C | INT_CLR / PENDING | W1C / RO | 写 `1` 清 pending；读回当前 `int_pending` |
-| 0x10 | M_DIM | RW | M 维度 |
-| 0x14 | N_DIM | RW | N 维度 |
-| 0x18 | K_DIM | RW | K 维度 |
-| 0x20 | W_ADDR | RW | 权重基地址 |
-| 0x24 | A_ADDR | RW | 激活基地址 |
-| 0x28 | R_ADDR | RW | 结果基地址 |
-| 0x30 | ARR_CFG | RW | `[3:0] rows, [7:4] cols`，当前主要作为保留配置 |
-| 0x34 | CLK_DIV | RW | `[2:0]` 分频选择，当前主要接到 `npu_power` 观测路径 |
-| 0x38 | CG_EN | RW | 时钟门控使能位，当前未完整反馈到主数据通路 |
+| 0x0C | INT_CLR | W1C | `[0]` 写 1 清 int_pending；读回 pending 状态 |
+| 0x10 | M_DIM | RW | 矩阵 M 维度 |
+| 0x14 | N_DIM | RW | 矩阵 N 维度 |
+| 0x18 | K_DIM | RW | 矩阵 K 维度（内积长度） |
+| 0x20 | W_ADDR | RW | 权重 DRAM 基地址（字节对齐） |
+| 0x24 | A_ADDR | RW | 激活 DRAM 基地址 |
+| 0x28 | R_ADDR | RW | 结果 DRAM 基地址 |
+| 0x30 | ARR_CFG | RW | `[3:0]` rows，`[7:4]` cols（保留，未接入主流程） |
+| 0x34 | CLK_DIV | RW | `[2:0]` DFS 分频选择（接 `npu_power`） |
+| 0x38 | CG_EN | RW | 时钟门控使能（保留） |
 
-### 软件推荐编码
+### 5.1 IRQ Clear 双路径
 
-| 功能 | CTRL 值 | 含义 |
-|---|---:|---|
-| INT8 + WS 启动 | `0x01` | `start=1, mode=00, stat=00` |
-| INT8 + OS 启动 | `0x11` | `start=1, mode=00, stat=01` |
-| FP16 + WS 启动 | `0x09` | 建议软件使用 `mode=10` 表示 FP16 |
-| FP16 + OS 启动 | `0x19` | 建议软件使用 `mode=10, stat=01` |
-| 清零 CTRL | `0x00` | 计算结束后建议显式清零 |
+| 路径 | 方法 | 说明 |
+|------|------|------|
+| **Path A** | 写 `0x0C` (INT_CLR) bit0=1 | 传统独立清除寄存器 |
+| **Path B** | 写 `0x00` (CTRL) bit6=1 | W1C 位，读回始终为 0；适合和 CTRL 写在同一次 AXI 事务 |
 
-> 注意：当前硬件内部 `mode != 00` 都会走 FP16 通路，因此软件不要依赖 `01/10/11` 的细粒度区分。
+两条路径都清除 `npu_ctrl.irq` 输出（`npu_ctrl` 监测 `cfg_irq_clr = ctrl_reg[6]`）。
+
+### 5.2 软件推荐编码
+
+| 功能 | CTRL 值 | 位解码 |
+|------|--------:|--------|
+| INT8 + WS 启动 | `0x01` | start=1, mode=00, stat=00 |
+| INT8 + OS 启动 | `0x11` | start=1, mode=00, stat=01 |
+| FP16 + WS 启动 | `0x09` | start=1, mode=10, stat=00 |
+| FP16 + OS 启动 | `0x19` | start=1, mode=10, stat=01 |
+| IRQ 确认（兼 CTRL 清零） | `0x40` | irq_clr=1 |
+| 完全清零 CTRL | `0x00` | 计算结束后建议显式清零 |
 
 ---
 
 ## 6. 控制器状态机
 
-当前 `npu_ctrl` 的 FSM 为：
+### 6.1 状态总览
 
-```text
+```
 S_IDLE
-  -> S_LOAD
-  -> S_PRELOAD
-  -> S_COMPUTE
-  -> S_DRAIN
-  -> S_WRITE_BACK
-  -> S_WB_WAIT
-  -> S_NEXT_TILE
-  -> (S_LOAD for next tile / S_DONE)
-  -> S_IDLE
+  │  cfg_start_rise：锁存 shadow regs，清 PPBuf，发 tile(0,0) DMA 启动
+  ▼
+S_WARMUP_LOAD
+  │  等待 tile(0,0) W+A DMA 双完成（dma_load_done）
+  │  swap PPBuf：Pong→Ping（tile(0,0) 切换到 PE 可读侧）
+  ▼
+S_WARMUP_WAIT
+  │  1 拍 swap 传播；配置 pe_stat / pe_load_w
+  │  若非末 tile：发 tile(0,1) 预取 DMA（向 Pong Bank 写下一个 tile）
+  ▼
+S_PRELOAD
+  │  1 拍等待 PPBuf rd_fill 稳定（swap 是时序电路）
+  │  pe_en 保持低
+  ▼
+S_OVERLAP_COMPUTE   ◄──────────────────────────────────────────┐
+  │  pe_en=1，PE 从 Ping Bank 计算 tile(i,j)                   │
+  │  DMA 同时向 Pong Bank 加载 tile(i,j+1)（预取，已在后台进行）  │
+  │  OS 模式：等 w_ppb_empty && a_ppb_empty                    │
+  │  WS 模式：等 ws_consume_cnt >= K+2                         │
+  ▼
+S_DRAIN
+  │  pe_flush=1（1 拍），触发 PE 流水线第 1 级排空
+  ▼
+S_DRAIN2
+  │  pe_flush=0（1 拍），流水线第 2 级传播（valid_out 在此拍出现）
+  ▼
+S_WRITE_BACK
+  │  发 dma_r_start 脉冲，将 comp_r_addr 写给 DMA
+  │  DMA R 通道从结果 FIFO 取数，发起 AXI4 写事务
+  ▼
+S_WB_WAIT
+  │  等 dma_r_done_r
+  │  WB 完成后：
+  │    ├─ 若 is_last_tile → S_DONE
+  │    ├─ 若预取 DMA 已完成 → swap PPBuf + 发下下一个预取 → S_PRELOAD ──►（上方循环）
+  │    └─ 若预取 DMA 未完成 → S_WAIT_PREFETCH
+  ▼
+S_WAIT_PREFETCH（可选）
+  │  等预取 DMA 完成（dma_load_done）
+  │  完成后 swap PPBuf + 发下下一个预取 → S_PRELOAD ──►（上方循环）
+  ▼
+S_DONE
+     irq=1，busy=0，done=1，清 PPBuf/FIFO，回到 S_IDLE
 ```
 
-### 各状态作用（按 Tile 生命周期）
+### 6.2 各状态详细说明
 
-| 状态 | 作用 | 对应 Tile 阶段 |
-|---|---|---|
-| S_IDLE | 等待 `cfg_start` 上升沿 | 空闲 |
-| S_LOAD | 启动 W/A DMA，把本 tile 数据装入 PPBuf | 准备阶段 |
-| S_PRELOAD | 给 PE 输入一个对齐周期 | 对齐阶段 |
-| S_COMPUTE | PE 正常消费 K 个元素 | 计算阶段 |
-| S_DRAIN | 保持 `flush` 若干拍，等待流水线结果完全推出 | 排空阶段 |
-| S_WRITE_BACK | 脉冲 `dma_r_start` | 回写阶段 |
-| S_WB_WAIT | 等待结果 DMA 完成 | 回写等待 |
-| S_NEXT_TILE | 计算下一 tile 的 `i/j`、DMA 地址与 `target_col` | 切换阶段 |
-| S_DONE | 置位 `done` / `irq` | 完成所有 tile |
+| 状态 | pe_en | pe_flush | 关键动作 |
+|------|:-----:|:--------:|---------|
+| **S_IDLE** | 0 | 0 | 等待 `cfg_start_rise`；一次性锁存所有 shadow reg；发 tile(0,0) DMA 启动；清 PPBuf/FIFO |
+| **S_WARMUP_LOAD** | 0 | 0 | 等 W+A DMA 双完成（`dma_load_done`）；swap PPBuf（Pong→Ping，tile(0,0) 数据移到 PE 可读侧） |
+| **S_WARMUP_WAIT** | 0 | 0 | 1 拍 swap 传播；设置 `pe_stat`/`pe_load_w`；若非末 tile 则发 tile(0,1) 预取 DMA |
+| **S_PRELOAD** | 0 | 0 | 等 PPBuf `rd_fill` 稳定（swap 时序电路）；1 拍后 PE 才能正确读到数据 |
+| **S_OVERLAP_COMPUTE** | 1 | 0 | PE 消费 Ping Bank；DMA 同时向 Pong Bank 写下一 tile；OS=等 PPBuf 双空；WS=计数 K+2 拍 |
+| **S_DRAIN** | 1 | 1 | 发 `pe_flush=1`（1 拍）；触发 Stage-2 输出+清零 |
+| **S_DRAIN2** | 1 | 0 | flush 传播第 2 拍；`valid_out` 在此拍高；结果写入 result FIFO |
+| **S_WRITE_BACK** | 1 | 0 | 发 `dma_r_start` 脉冲；锁存 `comp_r_addr`；DMA 开始 AXI4 写 |
+| **S_WB_WAIT** | 1→0 | 0 | 等 `dma_r_done_r`；判断末 tile / 预取状态，决定下一跳 |
+| **S_WAIT_PREFETCH** | 0 | 0 | （仅 PE 比 DMA 快时出现）等预取 DMA 完成，再 swap + 预取下一个 + S_PRELOAD |
+| **S_DONE** | 0 | 0 | `irq=1`，`done=1`，`busy=0`；清 PPBuf/FIFO；回 S_IDLE |
 
-### Tile 状态转移细节
+### 6.3 真 Ping-Pong 重叠时序图（稳态）
 
-1. **S_LOAD → S_PRELOAD**：当两个 PPBuf 都非空时切换，表示数据已准备好
-2. **S_COMPUTE**：持续 K 个周期，每个周期消费一对 W/A 元素
-3. **S_DRAIN**：固定 3 拍，对应 PE 3-stage 流水线深度
-4. **S_NEXT_TILE**：关键逻辑：
-   - `tile_j++`，如果 `tile_j == N` 则 `tile_j=0, tile_i++`
-   - 计算新地址：`W_ADDR += K×元素字节数`（列步进）
-   - 计算 `target_col = tile_j % COLS`（OS 模式）
-   - 如果 `tile_i == M`，进入 S_DONE，否则回到 S_LOAD
+```
+时钟周期： T0          T1~TX          TX+1    TX+2    TX+3    TX+4
+状态：     WU_WAIT     PRELOAD
+           OVERLAP_COMPUTE(0,0)        DRAIN  DRAIN2   WB     WB_WAIT
+                       OVERLAP         ...    ...
+DMA W/A：  prefetch    → Pong bank                     ← tile(0,1) done
+PPBuf：    Ping=tile(0,0) → PE读                Pong=tile(0,1) → swap → Ping
+PE 计算：              ← tile(0,0) K 拍 →      flush  valid
+FIFO：                                                  ← 写入结果
+DRAM R：                                                         → 写回 C[0][0]
+                                       ↑ WB_WAIT: swap + 发 tile(0,2) 预取
+                                                       ↑ S_PRELOAD
+                                                              ↑ OVERLAP_COMPUTE(0,1)
+```
 
-### 关键实现细节
+### 6.4 首个/末个 Tile 的特殊处理
 
-- `cfg_start` 使用**上升沿检测**，避免 CTRL 保持为 1 时重复触发。
-- `done` 是**sticky** 信号；当软件把 `CTRL.start` 清零后才回落。
-- `target_col` 仅在 **OS 模式**下更新，用于把权重路由到正确列。
-- `k_dma_len_w` 会根据 INT8 / FP16 自动算 DMA 字节数。
-
-> ✅ **已修复（2026-04-08）**：`target_col` 已由 1-bit 扩展为 `$clog2(COLS > 1 ? COLS : 2)` 位，`npu_top.v` 中 `ctrl_target_col` 同步扩宽，COLS=4 时不再截断。
+| 场景 | 特殊处理 |
+|------|---------|
+| **首个 Tile（暖机）** | S_WARMUP_LOAD 等待 DMA 完成后 swap；S_WARMUP_WAIT 发 tile(0,1) 预取 |
+| **末个 Tile** | WB 完成后直接进 S_DONE，不发新预取 DMA |
+| **单 Tile 层（M=N=1）** | S_WARMUP_WAIT 检测 `is_last_tile` 为真，跳过预取，直接 S_PRELOAD |
+| **PE 比 DMA 快** | 计算结束+WB 完成，但预取未到，进 S_WAIT_PREFETCH 等待 |
 
 ---
 
-## 7. SoC 地址空间与时序约束
+## 7. 地址锁存与层间切换
 
-## 7.1 地址空间
+### 7.1 Shadow Register 机制
 
-以默认参数 `MEM_WORDS=1024`、`DRAM_WORDS=15360` 为例：
+在 `cfg_start_rise` 的**同一个时钟周期**，以下寄存器被锁存到影子寄存器中：
 
-| 地址范围 | 区域 | 说明 |
-|---|---|---|
-| `0x0000_0000` ~ `0x0000_0FFF` | SRAM | 4KB，CPU 指令 + 数据 |
-| `0x0000_1000` ~ `0x0000_FFFF` | DRAM | 约 60KB，CPU 与 NPU DMA 共用 |
-| `0x0200_0000` ~ `0x0200_0038` | NPU Reg | AXI4-Lite 配置空间 |
-
-> `0x0F00 < 0x1000`，因此它属于 **SRAM**，不是 DRAM。这是 SoC 联调时已踩过的坑。
-
-## 7.2 PicoRV32 读时序要求
-
-PicoRV32 要求：
-
-- `mem_ready` 与 `mem_rdata` **同周期有效**
-
-因此当前 RTL 中：
-
-- `soc_mem.rdata` 是**组合读**
-- `dram_model.cpu_rdata` 也是**组合读**
-
-如果把它们改成同步寄存器读，CPU 会读到上一拍 stale data，导致：
-
-- 指令执行错乱
-- 寄存器值错误
-- NPU 配置地址写偏
-- poll_loop 永不结束
-
-## 7.3 AXI-Lite 桥接时序
-
-`npu_axi_lite` 的写通道不是 AW/W 同拍接受，而是：
-
-1. 先接收 AW
-2. 下一拍再接收 W
-
-因此 `axi_lite_bridge` 采用两段式写 FSM：
-
-```text
-S_IDLE -> S_WRITE_AW -> S_WRITE_W -> S_IDLE
+```verilog
+// npu_ctrl.v 中的锁存逻辑
+if (cfg_start_rise) begin
+    lk_m_dim  <= m_dim;
+    lk_n_dim  <= n_dim;
+    lk_k_dim  <= k_dim;
+    lk_w_addr <= w_addr;
+    lk_a_addr <= a_addr;
+    lk_r_addr <= r_addr;
+    lk_mode   <= cfg_mode;   // ctrl_reg[3:2]
+    lk_stat   <= cfg_stat;   // ctrl_reg[5:4]
+end
 ```
 
-这也是 SoC 配置路径正确工作的前提。
+FSM 运行期间**只使用影子寄存器**（`lk_*`）计算地址和模式。这意味着：
+- CPU 可以在 NPU 运行时安全地预配置下一层的寄存器
+- 不会出现中途地址错乱
+
+### 7.2 层间切换流程
+
+```
+第 n 层运行中：
+  CPU 可安全写 M_DIM/N_DIM/K_DIM/W_ADDR/A_ADDR/R_ADDR（这些是"活寄存器"，影子寄存器已锁住）
+
+第 n 层完成（S_DONE）：
+  irq 拉高 → CPU 中断处理（或轮询 STATUS.done）
+  CPU 写 INT_CLR bit0=1 或 CTRL bit6=1 清中断
+  CPU 写 CTRL[0]=0（清 start，done sticky 回零）
+
+配置第 n+1 层：
+  CPU 写 M_DIM/N_DIM/K_DIM（如果维度变化）
+  CPU 写 W_ADDR/A_ADDR/R_ADDR（新层数据地址）
+  CPU 写 CTRL = 新 mode/stat | 0x01（start 脉冲）
+  → 触发 cfg_start_rise → 新的影子寄存器锁存 → 新层开始
+```
+
+### 7.3 abort 机制
+
+任意时刻写 `CTRL[1]=1` 可中止当前运算，FSM 跳回 S_IDLE，`busy=0`。
 
 ---
 
-## 8. 当前实现中"已接入"与"未完全接入"的能力
+## 8. SoC 地址空间与关键时序约束
+
+### 8.1 地址空间
+
+以默认参数 `MEM_WORDS=1024`（4KB SRAM）、`DRAM_WORDS=15360` 为例：
+
+| 地址范围 | 区域 | 容量 | 说明 |
+|---------|------|-----:|------|
+| `0x0000_0000 – 0x0000_0FFF` | SRAM | 4 KB | CPU 指令 + 数据，`addr < 0x1000` |
+| `0x0000_1000 – 0x0001_FFFF` | DRAM | ~124 KB | CPU + NPU DMA 共用 |
+| `0x0200_0000 – 0x0200_003F` | NPU Reg | 64 B | AXI4-Lite 配置空间 |
+
+> ⚠️ **重要边界**：`addr_is_ram = mem_addr < 32'h1000`。`0x0F00` 属于 **SRAM**，不是 DRAM。SoC 测试使用 `0x2000` 作为 PASS 标记地址。
+
+### 8.2 PicoRV32 读时序要求
+
+PicoRV32 要求 **`mem_ready` 与 `mem_rdata` 同周期有效**。因此：
+
+- `soc_mem.rdata`：**组合读**（`assign rdata = mem[addr]`）
+- `dram_model.cpu_rdata`：**组合读**（`assign cpu_rdata = mem[cpu_addr>>2]`）
+
+若改为同步寄存器读，CPU 每次访存都读到 stale data，导致指令错乱、NPU 配置偏移、轮询死循环。
+
+### 8.3 AXI-Lite 桥接写时序
+
+`npu_axi_lite` 的写通道为两段式（AW→W 非同拍）：
+
+```
+S_IDLE ──awvalid──► S_WRITE_AW ──wvalid──► S_WRITE_W ──► S_IDLE
+  (锁存 awaddr)                    (写入寄存器，发 bvalid)
+```
+
+- `awready = !aw_q`（只有 AW 未锁存时接收新地址）
+- `wready = aw_q`（AW 已锁存后接收数据）
+
+`axi_lite_bridge` 采用匹配的 3-cycle 写 FSM：`S_WRITE_AW → S_WRITE_W → done`。
+
+---
+
+## 9. 能力矩阵与性能估算
+
+### 9.1 当前接入状态
 
 | 能力 | 状态 | 说明 |
-|---|---|---|
-| INT8 数据通路 | ✅ 已接入 | 已完整验证 |
-| FP16 数据通路 | ✅ 已接入 | 已完整验证 |
-| WS / OS 模式 | ✅ 已接入 | 已验证 |
-| tile-loop 地址调度 | ✅ 已接入 | 当前核心执行模型 |
+|------|------|------|
+| INT8 数据通路 | ✅ 已接入 | 完整验证 |
+| FP16 数据通路 | ✅ 已接入 | FP32 混合精度累加，完整验证 |
+| WS / OS 模式 | ✅ 已接入 | 均已验证 |
+| 真 Ping-Pong 重叠 | ✅ 已接入 | 2026-04-13 升级 |
+| 地址影子寄存器 | ✅ 已接入 | start 脉冲时锁存，防层间污染 |
+| IRQ W1C 清除（CTRL[6]） | ✅ 已接入 | 双路径清中断 |
 | SoC 集成 | ✅ 已接入 | PicoRV32 固件驱动通过 |
-| 阵列尺寸动态裁剪 | ⚠️ 部分保留 | `ARR_CFG` 已暴露，但当前主流程未完整消费 |
-| DFS / 时钟门控 | ❌ 接口存在，输出悬空 | `npu_power` 已实例化，但 `npu_clk`、`row_clk_gated`、`col_clk_gated` 三路输出在 `npu_top` 中全部悬空（`.npu_clk()` 等）。PE 阵列使用 `sys_clk` 直连，电源管理未实际生效 |
-| 经典整块矩阵阵列并行出块 | ❌ 当前非主路径 | 当前以 tile-loop 单输出元素推进 |
-| AXI 多拍 burst | ✅ 读/写均已支持 | 读通道升级为多拍 INCR burst（`calc_arlen()` 动态计算 `arlen`，2026-04-08），写通道 `awlen` 按结果字数计算，两路均已生效 |
+| tile-loop 地址调度 | ✅ 已接入 | 核心执行模型 |
+| AXI 多拍 INCR burst | ✅ 已接入 | `calc_arlen()` 动态计算，读写均支持 |
+| 阵列尺寸动态裁剪 | ⚠️ 部分保留 | `ARR_CFG` 已暴露，主流程未消费 |
+| DFS / 时钟门控 | ⚠️ 接口存在 | `npu_power` 已实例化，`div_sel=0` bypass；DFS 使用时需 CDC 同步器 |
 
-### 实际吞吐估算
+### 9.2 性能分析
 
-### 8.1 Tile 的性能分析
-
-当前 tile-loop 架构下，单次 `C[i][j]`（一个 tile）的计算路径为：
-
+**串行时代（旧 FSM）**单 tile 周期：
 ```
-S_LOAD (~K 拍 DMA) + S_PRELOAD (1拍) + S_COMPUTE (K-1拍) + S_DRAIN (3拍) + S_WRITE_BACK/WB_WAIT (~2拍) + S_NEXT_TILE (1拍)
+~K（DMA 读）+ K（计算）+ 固定开销（~7 拍）≈ 2K + 7 拍
 ```
 
-总周期数 ≈ K（DMA读） + K（计算） + 固定开销（~7拍）
+**真 Ping-Pong（新 FSM）**稳态每 tile 周期（DMA 与 PE 重叠）：
+```
+max(K_DMA_cycles, K_PE_cycles) + WB_cycles
+```
+DMA 搬运 K 个元素（INT8: K/4 字，FP16: K/2 字）与 PE 计算 K 拍同时进行，写回（约 2~3 拍）是串行的。带宽受限时实际增益取决于 burst 长度和 DRAM 延迟。
 
-#### 性能瓶颈分析
-
-**计算密度低的原因：**
-1. **Tile 粒度太小**：每个 tile 只计算一个输出元素，但需要完整的 K 维数据
-2. **PE 利用率低**：
-   - OS 模式：每 tile 只激活一行中的一列 PE（1/COLS 利用率）
-   - WS 模式：每 tile 激活一整列 PE，但只有底部 PE 产生输出
-3. **DMA 开销大**：每个 tile 都需要重新发起 DMA 读取
-
-#### 示例计算
-
-以 INT8，K=4，4×4 矩阵（M=N=4）为例：
-- **总 MAC 次数** = M×N×K = 4×4×4 = 64 次（不是 128 次）
-- **总周期数** ≈ M×N×(2K+7) = 16×(8+7) = 240 周期
-- **有效 MAC/cycle** = 64/240 ≈ 0.27
-- **理论峰值**（4×4 阵列每拍 16 MAC）：16 GOPS @ 500 MHz
-- **实际吞吐** ≈ 0.27×16 = 4.3 GOPS（理论峰值的 27%）
-
-#### 与并行架构对比
-
-| 架构 | 特点 | 适用场景 |
-|---|---|---|
-| **Tile-Loop**（当前） | 逐个输出元素计算，资源复用，内存友好 | 小矩阵，内存带宽受限 |
-| **全并行** | 一次性计算整块输出矩阵，资源消耗大 | 大矩阵，计算密集 |
-| **混合并行** | 多个 tile 并发，平衡资源与带宽 | 通用场景 |
-
-当前实现偏向**内存友好**而非**计算密集**，适合嵌入式 SoC 场景。
-
-### 8.2 优化方向
-
-1. **增大 Tile 粒度**：每个 tile 计算多个输出元素（如 4×4 块）
-2. **并发多个 Tile**：流水线化 DMA 与计算，重叠不同 tile 的阶段
-3. **数据重用**：在 PPBuf 中缓存可复用的数据（如权重共享）
-4. **DMA 优化**：使用更大的 burst 长度，减少 DMA 启动开销
+**以 INT8，K=8，4×4 矩阵（M=N=4）为例（新 FSM）：**
+- 总 tile 数 = M×N = 16
+- PE 计算：K=8 拍/tile
+- DMA 读：K/4 = 2 字，多拍 burst 约 3~4 拍
+- WB：~3 拍
+- 稳态每 tile ≈ max(8, 4) + 3 = 11 拍（旧 FSM: 2×8+7=23 拍）
+- **提升约 2×**
 
 ---
 
-## 9. 与文档配套阅读顺序
+## 10. 配套文档阅读顺序
 
-建议按下面顺序阅读：
-
-1. **`README.md`**：项目总览与快速入口
-2. **`doc/user_manual.md`**：如何使用、如何跑仿真、如何写固件
-3. **`doc/simulation_guide.md`**：仿真脚本与测试项说明
-4. **`doc/module_reference.md`**：模块级细节
-5. **`doc/npu_debug_checklist.md`**：定位 BUG 与排障
+| 顺序 | 文档 | 内容 |
+|:----:|------|------|
+| 1 | `README.md` | 项目总览与快速入口 |
+| 2 | `doc/user_manual.md` | 使用指南、固件编程、端到端推理调度流程 |
+| 3 | `doc/simulation_guide.md` | 仿真脚本与测试项说明 |
+| 4 | `doc/module_reference.md` | 模块级信号与时序细节 |
+| 5 | `doc/npu_debug_checklist.md` | Bug 定位与历史修复记录 |
+| 6 | `doc/architecture_fix_plan.md` | 架构演进历史 |
 
 ---
 
-## 10. 总结
+## 11. 总结
 
-当前 NPU_prj 已从"早期目标架构描述"收敛为一个**可回归、可联调、可由 PicoRV32 固件驱动的 tile-loop NPU 实现**；理解它时，最重要的是把握三件事：
+理解本工程最关键的四件事：
 
-1. **数据布局固定：B 列主序，A 行主序，C 行主序**
-2. **控制模型是按 `C[i][j]` 单点推进的 tile-loop**
-3. **SoC 侧 CPU 读口必须是组合读，AXI-Lite 写必须按 AW→W 两拍完成**
+1. **数据布局**：B 列主序（`W_ADDR`），A 行主序（`A_ADDR`），C 行主序（`R_ADDR`）
+2. **计算模型**：tile-loop 按 `C[i][j]` 单点推进，每 tile = 一个 K 维点积
+3. **执行重叠**：真 Ping-Pong FSM，PE 计算 tile(i,j) 的同时 DMA 加载 tile(i,j+1)；start 时锁存 shadow reg，防层间地址污染
+4. **SoC 约束**：CPU 读口必须是组合读，AXI-Lite 写必须按 AW→W 两拍完成

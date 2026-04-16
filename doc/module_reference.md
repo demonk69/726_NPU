@@ -1,7 +1,7 @@
 # NPU RTL 模块说明文档
 
-> 最后更新：2026-04-13
-> 说明：本文件按当前 RTL 实现同步（含真 Ping-Pong 重叠 FSM 升级），重点描述"真正接入并参与主流程"的行为。
+> 最后更新：2026-04-14
+> 说明：本文件按当前 RTL 实现同步（含可重配置 PE 阵列、双权重寄存器预取升级），重点描述"真正接入并参与主流程"的行为。
 
 ---
 
@@ -13,12 +13,13 @@
 4. [npu_ctrl — tile-loop 控制器](#4-npu_ctrl--tile-loop-控制器)
 5. [npu_dma — 三通道 DMA](#5-npu_dma--三通道-dma)
 6. [pingpong_buf — 双 Bank Ping-Pong 缓冲](#6-pingpong_buf--双-bank-ping-pong-缓冲)
-7. [pe_array — PE 阵列封装](#7-pe_array--pe-阵列封装)
-8. [pe_top — 单个处理单元](#8-pe_top--单个处理单元)
-9. [npu_power — 电源与时钟管理](#9-npu_power--电源与时钟管理)
-10. [SoC 模块](#10-soc-模块)
-11. [废弃与保留模块](#11-废弃与保留模块)
-12. [模块关系速查](#12-模块关系速查)
+7. [reconfig_pe_array — 可重配置 PE 阵列](#7-reconfig_pe_array--可重配置-pe-阵列)
+8. [pe_top — 单个处理单元（双权重寄存器版）](#8-pe_top--单个处理单元双权重寄存器版)
+9. [pe_array — 旧版 PE 阵列封装](#9-pe_array--旧版-pe-阵列封装)
+10. [npu_power — 电源与时钟管理](#10-npu_power--电源与时钟管理)
+11. [SoC 模块](#11-soc-模块)
+12. [废弃与保留模块](#12-废弃与保留模块)
+13. [模块关系速查](#13-模块关系速查)
 
 ---
 
@@ -57,12 +58,14 @@
 
 | 参数 | 默认值 | 说明 |
 |------|-------:|------|
-| `ROWS` | 4 | PE 阵列行数 |
-| `COLS` | 4 | PE 阵列列数 |
+| `PHY_ROWS` | 16 | PE 阵列物理行数 |
+| `PHY_COLS` | 16 | PE 阵列物理列数 |
 | `DATA_W` | 16 | PE 输入位宽（INT8/FP16 均用 16-bit 接口） |
 | `ACC_W` | 32 | 累加结果位宽 |
 | `PPB_DEPTH` | 64 | Ping-Pong 每 Bank 32-bit 字深度 |
 | `PPB_THRESH` | 16 | PPBuf 早启动阈值（字数） |
+
+> **2026-04-14 升级**：参数名从 `ROWS/COLS`（逻辑尺寸）改为 `PHY_ROWS/PHY_COLS`（物理尺寸），实际工作区域由 `cfg_shape` 运行时控制。
 
 ### 2.2 接口信号
 
@@ -169,6 +172,7 @@ INT8 模式：每拍一个 8-bit 直接送 PE（无需装配，`pe_data_ready = 
 | 信号 | 方向 | 位宽 | 说明 |
 |------|------|-----:|------|
 | `ctrl_reg` | output | 32 | CTRL 寄存器（`[0]=start, [1]=abort, [3:2]=mode, [5:4]=stat_mode`） |
+| `cfg_shape` | output | 2 | PE 阵列形状配置（见第 7 节 reconfig_pe_array） |
 | `m_dim` | output | 32 | 矩阵 M 维度 |
 | `n_dim` | output | 32 | 矩阵 N 维度 |
 | `k_dim` | output | 32 | 矩阵 K 维度 |
@@ -208,6 +212,8 @@ INT8 模式：每拍一个 8-bit 直接送 PE（无需装配，`pe_data_ready = 
 | 0x28 | R_ADDR | `[31:0]` | R/W | 结果基地址 |
 | 0x30 | ARR_CFG | `[7:0]` | R/W | 阵列配置（保留，未接入主流程） |
 | 0x34 | CLK_DIV | `[2:0]` | R/W | DFS 分频选择（接 npu_power） |
+| 0x38 | CG_EN | `[0]` | R/W | 门控使能（保留） |
+| **0x3C** | **CFG_SHAPE** | **`[1:0]`** | **R/W** | **PE 阵列形状配置：`00`=4×4, `01`=8×8, `10`=16×16, `11`=8×32（折叠模式）** |
 | 0x38 | CG_EN | `[0]` | R/W | 门控使能（保留） |
 
 > 未定义地址读回 `0xDEADBEEF`。
@@ -287,8 +293,8 @@ Phase 2 — Drain（末 tile）：
 
 | 参数 | 默认值 | 说明 |
 |------|-------:|------|
-| `ROWS` | 4 | PE 行数 |
-| `COLS` | 4 | PE 列数（OS 模式 target_col 范围） |
+| `ROWS` | 4 | 逻辑 PE 行数（tile-loop 循环使用） |
+| `COLS` | 4 | 逻辑 PE 列数（OS 模式 target_col 范围） |
 | `DATA_W` | 16 | PE 数据位宽（用于计算 DMA 字节数） |
 | `ACC_W` | 32 | 结果宽度（`dma_r_len = 4 bytes`） |
 
@@ -298,6 +304,7 @@ Phase 2 — Drain（末 tile）：
 
 | 信号 | 位宽 | 说明 |
 |------|-----:|------|
+| `cfg_shape_in` | 2 | PE 阵列形状（`00`=4×4, `01`=8×8, `10`=16×16, `11`=8×32），在 start 时锁存为 `lk_shape` |
 | `ctrl_reg` | 32 | `[0]`=start, `[1]`=abort, `[3:2]`=mode, `[5:4]`=stat, `[6]`=irq_clr |
 | `m_dim` | 32 | 矩阵 M 维度 |
 | `n_dim` | 32 | 矩阵 N 维度 |
@@ -311,6 +318,7 @@ Phase 2 — Drain（末 tile）：
 
 | 影子寄存器 | 对应 Live 信号 | 锁存时机 |
 |-----------|------------|---------|
+| `lk_shape` | `cfg_shape_in` | `cfg_start_rise` |
 | `lk_m_dim` | `m_dim` | `cfg_start_rise` |
 | `lk_n_dim` | `n_dim` | `cfg_start_rise` |
 | `lk_k_dim` | `k_dim` | `cfg_start_rise` |
@@ -354,6 +362,7 @@ Phase 2 — Drain（末 tile）：
 | `pe_mode` | output | 1 | `0=INT8, 1=FP16`（来自 lk_mode） |
 | `pe_stat` | output | 1 | `0=WS, 1=OS`（来自 lk_stat） |
 | `pe_load_w` | output | 1 | WS 模式：weight_reg 锁存脉冲（ws_consume_cnt < K 时持续高） |
+| `pe_swap_w` | output | 1 | WS 模式：双权重寄存器原子交换脉冲（预取隐藏用） |
 
 #### PPBuf 控制接口
 
@@ -620,17 +629,23 @@ done sticky：仅当 CPU 写 CTRL[0]=0 时回零
 
 ---
 
-## 7. `pe_array` — PE 阵列封装
+## 7. `reconfig_pe_array` — 可重配置 PE 阵列
 
-- **文件**：`rtl/array/pe_array.v`
-- **功能**：实例化 `ROWS × COLS` 个 `pe_top`，组织激活与部分和的传播路径，支持 WS 和 OS 两种数据流模式。
+> **2026-04-14 新增模块**，替代旧版 `pe_array.v`。`npu_top.v` 已切换为实例化此模块。
+
+- **文件**：`rtl/array/reconfig_pe_array.v`
+- **功能**：物理 **16×16** WS 模式 PE 阵列，通过 `cfg_shape` 运行时控制四种工作形态：
+  - **4×4**：仅左上角 16 个 PE 工作，其余时钟门控关闭
+  - **8×8**：仅左上角 64 个 PE 工作，其余时钟门控关闭
+  - **16×16**：全阵列工作
+  - **8×32 折叠**：将 16×16 物理阵列对折为逻辑 8×32 阵列
 
 ### 7.1 模块参数
 
 | 参数 | 默认值 | 说明 |
 |------|-------:|------|
-| `ROWS` | 4 | 行数 |
-| `COLS` | 4 | 列数 |
+| `PHY_ROWS` | 16 | 物理行数 |
+| `PHY_COLS` | 16 | 物理列数 |
 | `DATA_W` | 16 | 数据位宽 |
 | `ACC_W` | 32 | 累加结果位宽 |
 
@@ -638,65 +653,131 @@ done sticky：仅当 CPU 写 CTRL[0]=0 时回零
 
 | 信号 | 方向 | 位宽 | 说明 |
 |------|------|-----:|------|
-| `clk` | input | 1 | 来自 `npu_top` 的 `npu_clk_out`（DFS 分频时钟） |
+| `clk` | input | 1 | 系统时钟 |
 | `rst_n` | input | 1 | 低有效同步复位 |
+| `cfg_shape` | input | 2 | 形状控制（见下表） |
 | `mode` | input | 1 | `0=INT8, 1=FP16` |
 | `stat_mode` | input | 1 | `0=WS, 1=OS` |
-| `en` | input | 1 | PE 使能（时钟使能等效，提供动态功耗控制） |
-| `flush` | input | 1 | 累加器 flush |
-| `load_w` | input | 1 | WS 模式权重锁存脉冲 |
-| `w_in` | input | `COLS*DATA_W` | 权重输入（`[c*DATA_W +: DATA_W]` 为第 c 列权重） |
-| `act_in` | input | `ROWS*DATA_W` | 激活输入（`[r*DATA_W +: DATA_W]` 为第 r 行激活） |
-| `acc_in` | input | `COLS*ACC_W` | 列顶端部分和输入（当前固定为 0） |
-| `acc_out` | output | `COLS*ACC_W` | 列底端累加结果 |
-| `valid_out` | output | COLS | 各列结果有效标志 |
+| `en` | input | 1 | 全局 PE 使能 |
+| `flush` | input | 1 | 全局累加器 flush |
+| `load_w` | input | 1 | WS 权重锁存脉冲 |
+| `swap_w` | input | 1 | 双权重寄存器交换脉冲 |
+| `w_in` | input | `PHY_COLS*DATA_W` | 列广播权重输入（WS） |
+| `act_in` | input | `PHY_ROWS*DATA_W` | 行激活输入 |
+| `acc_in` | input | `PHY_COLS*ACC_W` | 列顶端部分和（固定接 0） |
+| `acc_out` | output | `32*ACC_W` | 累加结果（8×32 模式下最大 32 列输出） |
+| `valid_out` | output | 32 | 各列结果有效标志 |
+| `pe_active` | output | `PHY_ROWS*PHY_COLS` | 每个 PE 的活跃状态（调试用） |
 
-### 7.3 数据传播路径
+### 7.3 cfg_shape 形状编码
+
+| 值 | 名称 | 工作区域 | 活跃 PE 数量 | 说明 |
+|---:|------|---------|-------------:|------|
+| `2'b00` | **4×4** | Row[0:3], Col[0:3] | 16 | 最小配置，适合低功耗场景 |
+| `2'b01` | **8×8** | Row[0:7], Col[0:7] | 64 | 中等规模 |
+| `2'b10` | **16×16** | Row[0:15], Col[0:15] | 256 | 全阵列并行 |
+| `2'b11` | **8×32（折叠）** | 上半 Row[0:7] + 下半 Row[8:15]，各 16 列 | 256 | 将 16×16 对折为 8×32 宽阵列 |
+
+### 7.4 时钟门控机制
+
+每个 PE 的使能信号为：
+
+```verilog
+wire pe_clk_en = en && row_active && col_active;
+```
+
+其中 `row_active` 和 `col_active` 由 `cfg_shape` 组合解码：
+
+```verilog
+wire row_active = (cfg_shape == 2'b00) ? (r < 4) :
+                  (cfg_shape == 2'b01) ? (r < 8) :
+                  1'b1;  // 16x16 和 8x32 使用所有行
+
+wire col_active = (cfg_shape == 2'b00) ? (c < 4) :
+                  (cfg_shape == 2'b01) ? (c < 8) :
+                  1'b1;  // 16x16 和 8x32 使用所有列
+```
+
+**效果**：非活跃区域的 PE 接收 `en=0`，其内部寄存器冻结，不消耗动态功耗。
+
+### 7.5 8×32 折叠模式详解
+
+当 `cfg_shape = 2'b11` 时，物理 16×16 阵列被对折为逻辑 8×32 阵列：
+
+```
+物理阵列 (16x16):
+┌───────────────────────────────────────┐
+│ Top Half   (Row 0~7):  8行 × 16列     │
+│ ┌───────────────────────────────────┐ │
+│ │ Col 0 ... Col 14  →  L[0..14]    │ │
+│ │ Col 15        →  fold_act_from_top│ ├──► 折叠到 Bottom Half
+│ └───────────────────────────────────┘ │
+│ Bottom Half (Row 8~15): 8行 × 16列    │
+│ ┌───────────────────────────────────┐ │
+│ │ Col 0 = from fold_act (折叠输入)  │ │
+│ │ Col 1...15    →  R[17..31]       │ │
+│ └───────────────────────────────────┘ │
+└───────────────────────────────────────┘
+
+逻辑输出 (8x32):
+  L[0..14]  = acc_v[8][0..14]      (Top Half, Row 8 输出)
+  L[15]     = acc_v[8][15]          (Top Half, Row 8 输出)
+  R[16..31] = acc_v[16][0..15]      (Bottom Half, Row 16 输出)
+```
+
+**数据流细节**：
+
+| 方面 | 实现 |
+|------|------|
+| **Activation 折叠** | Row 7, Col 15 的 `act_reg` 输出 → 通过 MUX 路由到 Row 8, Col 0 的激活输入 |
+| **部分和截断** | 下半部（Row ≥ 8）的 `acc_in` 强制为零，无垂直链路连接上下两半 |
+| **输出拼接** | 左半（L[0:15]）来自 `acc_v[8]`，右半（R[16:31]）来自 `acc_v[16]` |
+
+### 7.6 数据传播路径
 
 #### OS 模式（Output-Stationary）
 
 ```
-  激活广播（无行错位）：
-    act_h[r][0] = act_in[r] → act_h[r][1] = act_h[r][0] → ... (绕过 act_reg)
-    所有列的 PE[r][c] 在同一拍看到相同的激活值
+  激活水平传播（无条件，不依赖 en）：
+    act_h[r][c+1] = act_reg (posedge clk)
+    → 行间形成 systolic 流
 
-  权重列路由（由 npu_top 在 w_in 接入前完成）：
-    PE[r][target_col] 收到 B[:,j]；其余列 w_in=0
-    → 只有 target_col 列的 os_acc 有效
+  权重水平传播（OS 模式专用）：
+    w_h[r][c+1] = os_w_reg (posedge clk)
+    → 权重像 activation 一样 systolic 流动
 
-  部分和垂直传播（重力方向）：
-    acc_v[0][c] = 0 (顶端边界)
-    acc_v[r+1][c] = PE[r][c].acc_out → 向下传播
-    acc_out[c] = acc_v[ROWS][c] (最底一行的输出)
+  部分和垂直传播：
+    acc_v[r+1][c] = PE[r][c].acc_out
 ```
 
 #### WS 模式（Weight-Stationary）
 
 ```
-  激活行错位（systolic shift）：
-    act_h[r][c+1] = act_reg (posedge clk 延迟一拍)
-    → 行 r 比行 r-1 晚一拍处理相同激活
-    → 形成 ROWS 拍的流水线斜波
+  激活水平传播（systolic shift）：
+    act_h[r][c+1] = act_reg (posedge clk)
 
-  权重广播（所有列 load 同一行权重）：
-    load_w=1 时所有 PE 的 weight_reg 锁存 w_in
-    后续 K 拍复用 weight_reg
+  权重广播（按列）：
+    pe_w_in = w_in[c*DATA_W +: DATA_W]
+    → 第 c 列的所有行接收相同权重
 
-  部分和流同 OS 模式（向下传播）
+  部分和流同 OS 模式
 ```
 
-### 7.4 关键实现说明
+### 7.7 关键实现说明
 
-- `act_reg` 在 `flush` 周期强制清零，防止跨 tile 污染。
-- `en=0` 时所有 PE 寄存器冻结（clock enable 方式的动态功耗控制，与 `npu_power` ICG 协同）。
-- `acc_in` 顶端固定接 0，PE 内部 `os_acc`/`ws_acc` 各自维护累加状态。
+- **无条件数据传播**：`act_reg` 和 `os_w_reg` 不依赖 `en` 信号，始终传播数据——避免 tile 边界产生气泡
+- **OS 模式权重流动**：新增 `w_h` 水平 shift register，OS 模式下 weight 像 activation 一样 systolic 流动（不再按列广播）
+- **输出端口位宽**：`acc_out` 为 `32 * ACC_W = 1024 bit`，以容纳 8×32 模式的 32 列输出；非使用列输出零
+- **调试接口**：`pe_active` 扁平化输出每个 PE 的活跃状态，可用于波形验证
 
 ---
 
-## 8. `pe_top` — 单个处理单元
+## 8. `pe_top` — 单个处理单元（双权重寄存器版）
+
+> **2026-04-14 升级**：新增双权重寄存器（Dual Weight Register Bank），支持后台预取隐藏权重加载延迟。
 
 - **文件**：`rtl/pe/pe_top.v`
-- **功能**：单 PE 的乘累加（MAC）流水线，3 级流水，支持 INT8/FP16 两条乘法路径，WS/OS 两种累加模式。
+- **功能**：单 PE 的乘累加（MAC）流水线，3 级流水，支持 INT8/FP16 两条乘法路径，WS/OS 两种累加模式。**新增双权重寄存器实现预取隐藏**。
 
 ### 8.1 接口信号
 
@@ -708,58 +789,109 @@ done sticky：仅当 CPU 写 CTRL[0]=0 时回零
 | `stat_mode` | input | 1 | `0=WS, 1=OS` |
 | `en` | input | 1 | 流水线使能 |
 | `flush` | input | 1 | 累加器 flush（输出并清零） |
-| `load_w` | input | 1 | WS 模式：将 `w_in` 锁存到 `weight_reg` |
-| `w_in` | input | DATA_W | 权重（INT8 用 `[7:0]`） |
-| `a_in` | input | DATA_W | 激活（INT8 用 `[7:0]`） |
-| `acc_in` | input | ACC_W | 外部链路部分和（WS chain 测试用；tile-loop 下 = 0） |
+| `load_w` | input | 1 | WS：将 `w_in` 锁存到**活跃+预取**权重寄存器（同周期可用） |
+| `swap_w` | input | 1 | WS：原子交换 active ↔ prefetch 权重寄存器（单拍完成） |
+| `w_in` | input | DATA_W | 权重输入（INT8 用 `[7:0]`） |
+| `a_in` | input | DATA_W | 激活输入（INT8 用 `[7:0]`） |
+| `acc_in` | input | ACC_W | 外部链路部分和（tile-loop 下 = 0） |
 | `acc_out` | output | ACC_W | 累加结果输出 |
 | `valid_out` | output | 1 | 输出有效（flush 拍置高） |
 
-### 8.2 流水线结构
+### 8.2 双权重寄存器架构
+
+> **设计动机**：在 WS 模式中，PE 需要加载新 weight 后才能开始下一轮计算。传统设计中 `load_w` 的 weight 要等下一个周期才能使用，产生一个周期的气泡。双寄存器允许在当前计算进行时**后台预取**下一组 weight。
 
 ```
-  Stage-0 (Input Register)
-    ┌─────────────────────────────────────────┐
-    │  WS: s0_w = load_w ? w_in : weight_reg  │
-    │  OS: s0_w = w_in;  s0_a = a_in         │
-    │  flush: s0_w=0, s0_a=0 (清零防止二次累加)│
-    └─────────────────────────────────────────┘
+                    Dual Weight Register Bank
+                    =========================
+
+  w_sel = 0 (default)          w_sel = 1 (after swap)
+  ┌──────────────┐            ┌──────────────┐
+  │  w_reg[0]     │            │  w_reg[1]     │
+  │  ★ ACTIVE    │   ←swap──→ │  ★ ACTIVE    │
+  │              │            │              │
+  │ 当前用于计算  │            │ 当前用于计算  │
+  └──────────────┘            └──────────────┘
+       ▲                           ▲
+       │ load_w 同时写入           │ load_w 同时写入
+       │ (向后兼容：立即生效)      │ (向后兼容：立即生效)
+       │                           │
+  w_in ◄───────────────────────────┘
+
+  active_weight = w_reg[w_sel]  →  送入 Stage-0
+```
+
+#### 操作语义
+
+| 操作 | 信号 | 效果 |
+|------|------|------|
+| **加载权重（同周期可用）** | `load_w = 1` | 同时写入 `w_reg[w_sel]`(active) 和 `w_reg[~w_sel]`(prefetch)，**本周期 Stage-0 可通过 bypass 使用 `w_in`** |
+| **纯预取** | `load_w = 1` + 后续 `swap_w` | 写入 prefetch 寄存器；下次 `swap_w` 切换后生效 |
+| **原子交换** | `swap_w = 1` | 单拍切换 `w_sel ← ~w_sel`，active 与 prefetch 身份互换 |
+| **复位** | `rst_n = 0` | 所有寄存器归零，`w_sel = 0` |
+
+#### 典型使用流程（无气泡预取）
+
+```verilog
+// 周期 T0: 加载第一组 weight 并计算 tile A
+load_w = 1;  w_in = weight_A;
+// 周期 T0: Stage-0 通过 bypass 直接使用 w_in (=weight_A)
+//           同时 w_reg[0] 和 w_reg[1] 都被写入 weight_A
+
+// 周期 T1~TK: 计算 tile A（使用 w_reg[0]）
+// 后台同时：
+load_w = 1;  w_in = weight_B;  // 在某周期预取 weight_B 到 prefetch
+// ...
+swap_w = 1;                     // 交换：prefetch 变 active
+// 下一个 tile B 可以立即使用 weight_B，无额外等待
+```
+
+### 8.3 流水线结构
+
+```
+  Stage-0 (Input Register) —— 含双权重选择逻辑
+    ┌─────────────────────────────────────────────────────┐
+    │  WS (load_w 周期):                                   │
+    │    s0_w = w_in          ← bypass，同周期可使用       │
+    │  WS (后续周期):                                       │
+    │    s0_w = active_weight (= w_reg[w_sel])             │
+    │  OS:                                                   │
+    │    s0_w = w_in;  s0_a = a_in                          │
+    │  flush: s0_w=0, s0_a=0                                │
+    └─────────────────────────────────────────────────────┘
               ↓ posedge clk
   Stage-1 (Multiply)
     ┌─────────────────────────────────────────┐
     │  INT8: s1_mul = sign_extend(s0_w[7:0]   │
     │                * s0_a[7:0])  → 32-bit   │
     │  FP16: s1_mul = fp16_mul(s0_w, s0_a)   │
-    │         (fp16_mul 内部 1 拍流水)         │
     └─────────────────────────────────────────┘
               ↓ posedge clk
   Stage-2 (Accumulate / Output)
     ┌─────────────────────────────────────────────────────────┐
     │  OS 正常: os_acc += s1_mul (FP16: FP32 精度累加)        │
     │  OS flush: acc_out = os_acc + s1_mul; os_acc=0; valid=1 │
-    │  WS 正常: ws_acc += s1_mul; acc_out = acc_in + s1_mul   │
-    │  WS flush: acc_out = ws_acc; ws_acc=0; valid=1 (仅首拍) │
+    │  WS 正常: ws_acc += s1_mul                               │
+    │  WS flush: acc_out = ws_acc; ws_acc=0; valid=1           │
     └─────────────────────────────────────────────────────────┘
 ```
 
-### 8.3 关键时序：OS 模式 flush
+### 8.4 关键时序：WS 模式 load_w bypass
 
 ```
-  CLK     _/‾\_/‾\_/‾\_/‾\_/‾\_/‾\_/‾\_
-  en       ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
-  flush    ____________/‾‾‾‾‾‾\__________   (持续 3 拍)
-  w_in     ═[K-1]══════[0]=[0]=[0]=══════  (Stage-0 置零)
-  a_in     ═[K-1]══════[0]=[0]=[0]=══════
-                              ↑
-  s1_flush _______________/‾‾‾‾‾‾\________
-  valid    _________________/‾\___________  (Stage-2: 仅首个 flush 拍)
-  acc_out  ═════════════════[RESULT]=══════
+  CLK     _/‾\_/‾\_/‾\_/‾\_/‾\_
+  load_w  ‾‾‾\____________________   (脉冲 1 拍)
+  w_in    ══W0═════════════════════   (新权重值)
+  en      ‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
+  s0_w    ══W0══W0═W0══════════════   (bypass: load_w 周期直接用 w_in)
+                                  (后续周期用 w_reg[w_sel])
 
-  注意: flush=1 且 stage-0 置零 → stage-1 product=0
-       stage-2 acc_out = os_acc + 0 = os_acc 输出后清零
+  关键: load_w=1 且 stat_mode=0 时,
+        s0_w = w_in (bypass), 而非 active_weight (需要 1 周期稳定)
+        这确保了向后兼容——旧代码不需要修改即可工作
 ```
 
-### 8.4 FP16 混合精度实现
+### 8.5 FP16 混合精度实现
 
 - **乘法**：`fp16_mul`（FP16 × FP16 → FP16，1 级流水）
 - **累加**：`fp16_to_fp32()` 将 FP16 乘积转 FP32，然后 `fp32_add`（FP32 + FP32 → FP32）
@@ -768,7 +900,16 @@ done sticky：仅当 CPU 写 CTRL[0]=0 时回零
 
 ---
 
-## 9. `npu_power` — 电源与时钟管理
+## 9. `pe_array` — 旧版 PE 阵列封装（已废弃）
+
+> **状态**：已废弃。`npu_top.v` 已切换为实例化 `reconfig_pe_array.v`（第 7 节）。此文件保留供参考，不再参与综合。
+
+- **文件**：`rtl/array/pe_array.v`
+- **功能**：旧版 4×4 PE 阵列封装。已被 `reconfig_pe_array.v` 替代。
+
+---
+
+## 10. `npu_power` — 电源与时钟管理
 
 - **文件**：`rtl/power/npu_power.v`
 - **功能**：DFS（动态频率调整）分频器 + 行/列时钟门控（ICG 行为模型），为 PE 阵列提供受控时钟。
@@ -841,9 +982,9 @@ done sticky：仅当 CPU 写 CTRL[0]=0 时回零
 
 ---
 
-## 10. SoC 模块
+## 11. SoC 模块
 
-### 10.1 `soc_top` — SoC 顶层
+### 11.1 `soc_top` — SoC 顶层
 
 - **文件**：`rtl/soc/soc_top.v`
 - **功能**：连接 PicoRV32 CPU、SRAM、DRAM、AXI-Lite 桥接器与 NPU 顶层。
@@ -858,19 +999,19 @@ done sticky：仅当 CPU 写 CTRL[0]=0 时回零
 
 > **关键**：`addr_is_ram = mem_addr < 32'h1000`，地址 `0x0F00` 属于 SRAM 范围（`< 0x1000`）。
 
-### 10.2 `soc_mem` — CPU SRAM
+### 11.2 `soc_mem` — CPU SRAM
 
 - **文件**：`rtl/soc/soc_mem.v`
 - **关键实现**：CPU 读口使用**组合（异步）读**（`assign rdata = mem[addr]`）。
 - **为何关键**：PicoRV32 要求 `mem_rdata` 与 `mem_ready` 在同一周期有效；同步读会引入 1 拍延迟，导致每条指令读到 stale 数据。
 
-### 10.3 `dram_model` — DRAM 行为模型
+### 11.3 `dram_model` — DRAM 行为模型
 
 - **文件**：`rtl/soc/dram_model.v`
 - **双端口**：CPU 读/写端口（组合读）+ NPU AXI4 Master 端口（支持 burst）
 - **关键实现**：CPU 读同样使用异步读（`assign cpu_rdata = mem[cpu_addr>>2]`）
 
-### 10.4 `axi_lite_bridge` — AXI-Lite 桥
+### 11.4 `axi_lite_bridge` — AXI-Lite 桥
 
 - **文件**：`rtl/soc/axi_lite_bridge.v`
 - **功能**：将 PicoRV32 `mem_valid/mem_ready/mem_wdata/mem_rdata` 接口转换为 AXI4-Lite。
@@ -878,17 +1019,18 @@ done sticky：仅当 CPU 写 CTRL[0]=0 时回零
 
 ---
 
-## 11. 废弃与保留模块
+## 12. 废弃与保留模块
 
 | 模块 | 文件 | 状态 | 说明 |
 |------|------|------|------|
-| `array_ctrl` | `rtl/ctrl/array_ctrl.v` | ⚠️ 废弃 | 早期独立阵列控制器，已被 `npu_ctrl` 的 tile-loop FSM 取代，仍存在于 `rtl/` 目录，不参与综合，待清理 |
+| `pe_array` | `rtl/array/pe_array.v` | ⚠️ 已废弃 | 旧版 4×4 PE 阵列封装，已由 `reconfig_pe_array.v` 替代 |
+| `array_ctrl` | `rtl/ctrl/array_ctrl.v` | ⚠️ 废弃 | 早期独立阵列控制器，已被 `npu_ctrl` 的 tile-loop FSM 取代 |
 | `axi_monitor` | `rtl/common/axi_monitor.v` | 保留 | 仿真用 AXI 总线监视器（仅 testbench 使用） |
 | `op_counter` | `rtl/common/op_counter.v` | 保留 | 仿真用操作计数器（仅 testbench 使用） |
 
 ---
 
-## 12. 模块关系速查
+## 13. 模块关系速查
 
 ```
 soc_top
@@ -901,10 +1043,12 @@ soc_top
       ├── npu_ctrl        tile-loop FSM 控制器
       ├── npu_dma         3 通道 AXI4 主机 DMA
       ├── pingpong_buf×2  W/A 双 PPBuf（各自独立）
-      ├── pe_array        ROWS×COLS PE 网格
-      │    └── pe_top×16  单 PE（含 fp16_mul/fp32_add）
-      ├── sync_fifo       结果 FIFO（PE→DMA）
-      └── npu_power       DFS 分频 + 行/列 ICG 门控时钟
+      ├── reconfig_pe_array  ★ 16x16 可重配置 PE 阵列
+      │    └── pe_top ×256   双权重寄存器版 PE
+      │          ├── fp16_mul    FP16 乘法器
+      │          └── fp32_add    FP32 加法器（累加）
+      ├── fifo             结果 FIFO
+      └── npu_power        DFS + ICG 时钟管理
 ```
 
 ### 关键控制信号流

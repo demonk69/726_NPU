@@ -171,12 +171,12 @@ end
 // DUT instantiation
 // ---------------------------------------------------------------------------
 npu_top #(
-    .ROWS      (4),
-    .COLS      (4),
-    .DATA_W    (16),
-    .ACC_W     (32),
-    .PPB_DEPTH (64),
-    .PPB_THRESH(16)
+    .PHY_ROWS   (16),
+    .PHY_COLS   (16),
+    .DATA_W     (16),
+    .ACC_W      (32),
+    .PPB_DEPTH  (64),
+    .PPB_THRESH (16)
 ) dut (
     .sys_clk       (sys_clk),
     .sys_rst_n     (sys_rst_n),

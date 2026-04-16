@@ -64,6 +64,8 @@ module npu_ctrl #(
     input  wire [31:0]       a_addr,
     input  wire [31:0]       r_addr,
     input  wire [7:0]        arr_cfg,
+    // Shape configuration for reconfigurable array
+    input  wire [1:0]        cfg_shape_in,
     // Status outputs
     output reg               busy,
     output reg               done,
@@ -86,6 +88,7 @@ module npu_ctrl #(
     output reg               pe_mode,     // 0=INT8, 1=FP16
     output reg               pe_stat,     // 0=WS,  1=OS
     output reg               pe_load_w,   // WS mode: latch weight into PE
+    output reg               pe_swap_w,   // WS mode: swap dual weight regs
     // Ping-Pong Buffer status
     input  wire              w_ppb_ready,
     input  wire              w_ppb_empty,
@@ -149,6 +152,7 @@ wire cfg_start_rise = cfg_start && !cfg_start_d1;
 reg [31:0] lk_m_dim, lk_n_dim, lk_k_dim;
 reg [31:0] lk_w_addr, lk_a_addr, lk_r_addr;
 reg [1:0]  lk_mode, lk_stat;
+reg [1:0]  lk_shape;   // latched cfg_shape
 
 always @(posedge clk) begin
     if (!rst_n) begin
@@ -156,6 +160,7 @@ always @(posedge clk) begin
         lk_w_addr <= 32'd0; lk_a_addr <= 32'd0; lk_r_addr <= 32'd0;
         lk_mode   <= 2'b10;                      // default FP16
         lk_stat   <= 2'b01;                      // default OS
+        lk_shape  <= 2'b10;                      // default 16x16
     end else if (cfg_start_rise) begin
         lk_m_dim  <= m_dim;
         lk_n_dim  <= n_dim;
@@ -165,6 +170,7 @@ always @(posedge clk) begin
         lk_r_addr <= r_addr;
         lk_mode   <= cfg_mode;
         lk_stat   <= cfg_stat;
+        lk_shape  <= cfg_shape_in;
     end
 end
 
@@ -259,6 +265,7 @@ always @(posedge clk) begin
         pe_flush       <= 1'b0;
         pe_stat        <= 1'b1;
         pe_load_w      <= 1'b0;
+        pe_swap_w      <= 1'b0;
         dma_w_start    <= 1'b0;
         dma_a_start    <= 1'b0;
         dma_r_start    <= 1'b0;
@@ -289,6 +296,7 @@ always @(posedge clk) begin
         w_ppb_clear  <= 1'b0;
         a_ppb_clear  <= 1'b0;
         r_fifo_clear <= 1'b0;
+        pe_swap_w    <= 1'b0;
 
         // ── IRQ Clear: CPU writes ctrl_reg[2] = 1 to acknowledge IRQ ──
         if (cfg_irq_clr) irq <= 1'b0;

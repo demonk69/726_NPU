@@ -19,6 +19,7 @@
 //             0x30  ARR_CFG   - [3:0]=act_rows, [7:4]=act_cols
 //             0x34  CLK_DIV   - [2:0]=div_sel
 //             0x38  CG_EN     - clock gating enable
+//             0x3C  CFG_SHAPE - [1:0]=shape (00=4x4, 01=8x8, 10=16x16, 11=8x32)
 //
 //           IRQ Clear dual path:
 //             Path A: write 0x0C (INT_CLR) bit0 = 1  → clears int_pending
@@ -65,6 +66,7 @@ module npu_axi_lite (
     output reg  [7:0]            arr_cfg,    // [3:0]=rows, [7:4]=cols
     output reg  [2:0]            clk_div,
     output reg                   cg_en,
+    output reg  [1:0]            cfg_shape, // shape select for reconfig array
     // Status from NPU controller
     input  wire                  status_busy,
     input  wire                  status_done,
@@ -117,6 +119,7 @@ always @(posedge aclk) begin
         arr_cfg   <= 0;
         clk_div   <= 0;
         cg_en     <= 0;
+        cfg_shape <= 2'b10;  // default: 16x16 mode
     end else if (wr_en) begin
         case (awaddr_q)
             32'h00: begin
@@ -136,6 +139,7 @@ always @(posedge aclk) begin
             32'h30: if (w_strb[0]) arr_cfg <= wdata[7:0];
             32'h34: if (w_strb[0]) clk_div <= wdata[2:0];
             32'h38: if (w_strb[0]) cg_en   <= wdata[0];
+            32'h3C: if (w_strb[0]) cfg_shape <= wdata[1:0];
             default: ;
         endcase
     end
@@ -174,6 +178,7 @@ always @(*) begin
         32'h30: rdata_r = {24'b0, arr_cfg};
         32'h34: rdata_r = {29'b0, clk_div};
         32'h38: rdata_r = {31'b0, cg_en};
+        32'h3C: rdata_r = {30'b0, cfg_shape};
         default: rdata_r = 32'hDEADBEEF;
     endcase
 end

@@ -2,20 +2,22 @@
 
 > 适合对象：刚拿到源码、想立刻跑起仿真的工程师
 >
-> 最后更新：2026-04-10
+> 最后更新：2026-04-14
 
-## ✅ 当前验证状态（2026-04-10 更新）
+## ✅ 当前验证状态（2026-04-14 更新）
 
 | 测试套件 | 状态 | 通过/总数 | 备注 |
 |---------|------|---------|------|
-| PE单元测试 (`tb_pe_top`) | ✅ PASS | 19/19 | PE核心功能完全正常 |
-| NPU综合测试 (`tb_comprehensive`) | ✅ PASS | 8/8 | INT8 OS模式 |
+| PE单元测试 (`tb_pe_top`) | ✅ PASS | **19/19** | 双权重寄存器版全通过 |
+| 综合测试 (`tb_comprehensive`) | ✅ PASS | **28/28** | 含复杂 FP16 场景，使用 reconfig_pe_array |
+| NPU顶层冒烟 (`tb_npu_top`) | ✅ PASS | **4/4** | reconfig_pe_array + npu_ctrl 集成 |
 | FP16端到端 (`tb_fp16_e2e`) | ✅ PASS | 9/9 | 所有FP16测试通过 |
 | 多行多列测试 (`tb_multi_rc`) | ✅ PASS | 13/13 | 多列时序问题已修复 |
 | 阵列规模验证 (`tb_array_scale`) | ✅ PASS | 16/16 | K=4/8/16/32 全通过 |
 | SoC集成 (`tb_soc`) | ✅ PASS | 1/1 | 287 cycles PASS |
 
-**关键修复**（2026-04-10）：
+**核心回归（2026-04-14 重构后）**：51/51 PASS ✅
+**全量回归（重构前）**：86/86 PASS ✅
 1. **WS flush 纯输出语义**：`pe_top.v` 修改 WS 模式 flush 行为——flush beat 直接输出 `ws_acc`，不累加当前 `s1_mul`，使 flush 成为纯触发操作，与 TB 设计意图一致
 2. **drive_ws_beat 时序修正**：`tb_pe_top.v` 的 `drive_ws_beat` task 内部加入 `@(posedge clk); #1; en=0`，确保每个 beat 只被 pipeline 采样一次，防止同一 beat 因 `en` 高电平持续两个 posedge 而被双重采样
 3. **load_w beat en 降低**：所有 WS 模式的 `load_w=1` beat 完成后立即同步设置 `en=0`，避免首个数据 beat 重复进入 pipeline
@@ -1047,7 +1049,9 @@ iverilog -g2012 `
 vvp sim\wave\sim_pe.out
 ```
 
-### 编译 NPU 全系统（含 Ping-Pong、DMA、监控）
+### 编译 NPU 全系统（含可重配置阵列、Ping-Pong、DMA）
+
+> **注意（2026-04-14 更新）**：`pe_array.v` 已被 `reconfig_pe_array.v` 替代。编译时请使用新的文件名。
 
 ```powershell
 iverilog -g2012 -DDUMP_VCD `
@@ -1060,7 +1064,7 @@ iverilog -g2012 -DDUMP_VCD `
   rtl\common\fifo.v `
   rtl\common\axi_monitor.v `
   rtl\common\op_counter.v `
-  rtl\array\pe_array.v `
+  rtl\array\reconfig_pe_array.v `
   rtl\buf\pingpong_buf.v `
   rtl\power\npu_power.v `
   rtl\ctrl\npu_ctrl.v `
@@ -1073,7 +1077,22 @@ cd sim\wave
 vvp ..\npu_sim
 ```
 
+### 运行综合测试（推荐，验证 reconfig_pe_array 集成）
+
+```powershell
+cd D:\NPU_prj
+iverilog -g2012 -o sim\tb_comprehensive.vvp -s tb_comprehensive `
+  rtl\pe\fp16_add.v rtl\pe\fp16_mul.v rtl\pe\fp32_add.v rtl\pe\pe_top.v `
+  rtl\array\reconfig_pe_array.v rtl\common\fifo.v rtl\buf\pingpong_buf.v `
+  rtl\axi\npu_axi_lite.v rtl\axi\npu_dma.v rtl\ctrl\npu_ctrl.v `
+  rtl\power\npu_power.v rtl\top\npu_top.v tb\tb_comprehensive.v
+
+cd sim; vvp -N tb_comprehensive.vvp
+```
+
 ### 编译 SoC 全系统
+
+> **注意**：SoC 测试仍使用旧版 `pe_array.v`（尚未迁移到 `reconfig_pe_array`）。如需在 SoC 中使用新阵列，需更新 `soc_top.v` 的实例化。
 
 ```powershell
 iverilog -g2012 -s tb_soc `
@@ -1084,7 +1103,7 @@ iverilog -g2012 -s tb_soc `
   rtl\soc\axi_lite_bridge.v `
   rtl\soc\soc_top.v `
   rtl\pe\fp16_mul.v rtl\pe\fp16_add.v rtl\pe\fp32_add.v rtl\pe\pe_top.v `
-  rtl\common\fifo.v rtl\array\pe_array.v `
+  rtl\common\fifo.v rtl\array\reconfig_pe_array.v `
   rtl\buf\pingpong_buf.v rtl\power\npu_power.v `
   rtl\ctrl\npu_ctrl.v rtl\axi\npu_axi_lite.v rtl\axi\npu_dma.v `
   rtl\top\npu_top.v `

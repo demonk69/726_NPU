@@ -1,28 +1,31 @@
 // =============================================================================
 // Module  : npu_top
 // Project : NPU_prj
-// Desc    : NPU top-level integration with Ping-Pong Buffer support.
-//           Connects: AXI-Lite registers, NPU controller, DMA, Ping-Pong
-//                     Buffers (Weight, Activation), Result FIFO, PE array,
-//                     power management.
+// Desc    : NPU top-level integration with Reconfigurable 16×16 PE Array.
+//
+//           Physical PE array: always 16×16, reconfigured via cfg_shape:
+//             2'b00 → 4×4   (clock-gate rest)
+//             2'b01 → 8×8   (clock-gate rest)
+//             2'b10 → 16×16 (full active)
+//             2'b11 → 8×32  (folded: top-half + bottom-half stitched)
 //
 //           Data flow:
-//             DRAM --DMA--> PPBuf_W --PE--> PPBuf_R (FIFO) --DMA--> DRAM
-//             DRAM --DMA--> PPBuf_A --PE--^
+//             DRAM --DMA--> PPBuf_W --PE(16×16)--> Result FIFO --DMA--> DRAM
+//             DRAM --DMA--> PPBuf_A --PE(16×16)--^
 //
-//           With Ping-Pong: DMA fill and PE consume operate on different
-//           banks simultaneously, overlapping load and compute.
+//           Each PE has dual weight registers for prefetch hiding.
+//           swap_w signal atomically swaps active/prefetch weight regs.
 // =============================================================================
 
 `timescale 1ns/1ps
 
 module npu_top #(
-    parameter ROWS       = 4,
-    parameter COLS       = 4,
-    parameter DATA_W     = 16,
-    parameter ACC_W      = 32,
-    parameter PPB_DEPTH  = 64,       // Ping-Pong Buffer depth per bank (32-bit words)
-    parameter PPB_THRESH = 16        // Early-start threshold (words)
+    parameter PHY_ROWS     = 16,       // physical rows (always 16)
+    parameter PHY_COLS     = 16,       // physical cols (always 16)
+    parameter DATA_W       = 16,
+    parameter ACC_W        = 32,
+    parameter PPB_DEPTH    = 64,
+    parameter PPB_THRESH   = 16
 )(
     // System
     input  wire              sys_clk,
@@ -92,6 +95,7 @@ wire [31:0] ctrl_reg, m_dim_r, n_dim_r, k_dim_r;
 wire [31:0] w_addr_r, a_addr_r, r_addr_r;
 wire [7:0]  arr_cfg_r;
 wire [2:0]  clk_div_r;
+wire [1:0]  cfg_shape_r;
 wire        cg_en_r;
 wire        status_busy, status_done, irq_flag;
 
@@ -128,6 +132,7 @@ npu_axi_lite u_axi_lite (
     .arr_cfg    (arr_cfg_r),
     .clk_div    (clk_div_r),
     .cg_en      (cg_en_r),
+    .cfg_shape  (cfg_shape_r),
     .status_busy(status_busy),
     .status_done(status_done),
     .irq_flag   (irq_flag),
@@ -142,55 +147,57 @@ wire dma_w_done,  dma_a_done,  dma_r_done;
 wire [31:0] dma_w_addr, dma_a_addr, dma_r_addr;
 wire [15:0] dma_w_len,  dma_a_len,  dma_r_len;
 wire pe_en, pe_flush, pe_mode, pe_stat;
-wire pe_load_w;   // WS mode: latch weight into PE
+wire pe_load_w, pe_swap_w;   // WS mode weight control
 wire ctrl_w_ppb_swap, ctrl_a_ppb_swap, ctrl_w_ppb_clear, ctrl_a_ppb_clear;
-wire ctrl_r_fifo_clear;  // Result FIFO clear from controller
+wire ctrl_r_fifo_clear;
 
 npu_ctrl #(
-    .ROWS  (ROWS),
-    .COLS  (COLS),
+    .ROWS  (PHY_ROWS),       // controller sees physical dimensions
+    .COLS  (PHY_COLS),
     .DATA_W(DATA_W),
     .ACC_W (ACC_W)
 ) u_ctrl (
-    .clk        (sys_clk),
-    .rst_n      (sys_rst_n),
-    .ctrl_reg   (ctrl_reg),
-    .m_dim      (m_dim_r),
-    .n_dim      (n_dim_r),
-    .k_dim      (k_dim_r),
-    .w_addr     (w_addr_r),
-    .a_addr     (a_addr_r),
-    .r_addr     (r_addr_r),
-    .arr_cfg    (arr_cfg_r),
-    .busy       (status_busy),
-    .done       (status_done),
-    .dma_w_start(dma_w_start),
-    .dma_w_done (dma_w_done),
-    .dma_w_addr (dma_w_addr),
-    .dma_w_len  (dma_w_len),
-    .dma_a_start(dma_a_start),
-    .dma_a_done (dma_a_done),
-    .dma_a_addr (dma_a_addr),
-    .dma_a_len  (dma_a_len),
-    .dma_r_start(dma_r_start),
-    .dma_r_done (dma_r_done),
-    .dma_r_addr (dma_r_addr),
-    .dma_r_len  (dma_r_len),
-    .pe_en      (pe_en),
-    .pe_flush   (pe_flush),
-    .pe_mode    (pe_mode),
-    .pe_stat    (pe_stat),
-    .pe_load_w  (pe_load_w),
-    .w_ppb_ready(u_w_ppb.buf_ready),
-    .w_ppb_empty(u_w_ppb.buf_empty),
-    .a_ppb_ready(u_a_ppb.buf_ready),
-    .a_ppb_empty(u_a_ppb.buf_empty),
-    .w_ppb_swap(ctrl_w_ppb_swap),
-    .a_ppb_swap(ctrl_a_ppb_swap),
-    .w_ppb_clear(ctrl_w_ppb_clear),
-    .a_ppb_clear(ctrl_a_ppb_clear),
-    .r_fifo_clear(ctrl_r_fifo_clear),
-    .irq        (irq_flag)
+    .clk          (sys_clk),
+    .rst_n        (sys_rst_n),
+    .ctrl_reg     (ctrl_reg),
+    .m_dim        (m_dim_r),
+    .n_dim        (n_dim_r),
+    .k_dim        (k_dim_r),
+    .w_addr       (w_addr_r),
+    .a_addr       (a_addr_r),
+    .r_addr       (r_addr_r),
+    .arr_cfg      (arr_cfg_r),
+    .cfg_shape_in (cfg_shape_r),
+    .busy         (status_busy),
+    .done         (status_done),
+    .dma_w_start  (dma_w_start),
+    .dma_w_done   (dma_w_done),
+    .dma_w_addr   (dma_w_addr),
+    .dma_w_len    (dma_w_len),
+    .dma_a_start  (dma_a_start),
+    .dma_a_done   (dma_a_done),
+    .dma_a_addr   (dma_a_addr),
+    .dma_a_len    (dma_a_len),
+    .dma_r_start  (dma_r_start),
+    .dma_r_done   (dma_r_done),
+    .dma_r_addr   (dma_r_addr),
+    .dma_r_len    (dma_r_len),
+    .pe_en        (pe_en),
+    .pe_flush     (pe_flush),
+    .pe_mode      (pe_mode),
+    .pe_stat      (pe_stat),
+    .pe_load_w    (pe_load_w),
+    .pe_swap_w    (pe_swap_w),
+    .w_ppb_ready  (u_w_ppb.buf_ready),
+    .w_ppb_empty  (u_w_ppb.buf_empty),
+    .a_ppb_ready  (u_a_ppb.buf_ready),
+    .a_ppb_empty  (u_a_ppb.buf_empty),
+    .w_ppb_swap   (ctrl_w_ppb_swap),
+    .a_ppb_swap   (ctrl_a_ppb_swap),
+    .w_ppb_clear  (ctrl_w_ppb_clear),
+    .a_ppb_clear  (ctrl_a_ppb_clear),
+    .r_fifo_clear  (ctrl_r_fifo_clear),
+    .irq          (irq_flag)
 );
 
 // ---------------------------------------------------------------------------
@@ -202,19 +209,16 @@ wire        w_ppb_full,   a_ppb_full;
 wire        w_ppb_rd_en,  a_ppb_rd_en;
 wire [DATA_W-1:0] w_ppb_rd_data, a_ppb_rd_data;
 
-// PE read enable: PE enabled AND buffer not empty
-wire w_ppb_buf_ready_int, w_ppb_buf_empty_int;
-wire a_ppb_buf_ready_int, a_ppb_buf_empty_int;
-
-// Note: w_ppb_rd_en and a_ppb_rd_en are now defined in FP16 packer logic below
+wire w_ppb_buf_empty_int, a_ppb_buf_empty_int;
+wire w_ppb_buf_ready_int, a_ppb_buf_ready_int;
 
 // Weight Ping-Pong Buffer
 pingpong_buf #(
-    .DATA_W    (ACC_W),       // 32-bit AXI word
-    .DEPTH     (PPB_DEPTH),   // 64 words per bank
-    .OUT_WIDTH (DATA_W),      // 16-bit PE input
+    .DATA_W    (ACC_W),
+    .DEPTH     (PPB_DEPTH),
+    .OUT_WIDTH (DATA_W),
     .THRESHOLD (PPB_THRESH),
-    .SUBW      (4)            // max 4 INT8 sub-words per 32-bit word
+    .SUBW      (4)
 ) u_w_ppb (
     .clk       (sys_clk),
     .rst_n     (sys_rst_n),
@@ -224,7 +228,7 @@ pingpong_buf #(
     .rd_data   (w_ppb_rd_data),
     .swap      (ctrl_w_ppb_swap),
     .clear     (ctrl_w_ppb_clear),
-    .fp16_mode (pe_mode),        // pe_mode=1 → FP16: 16-bit reads (2/word)
+    .fp16_mode (pe_mode),
     .buf_empty (w_ppb_buf_empty_int),
     .buf_full  (w_ppb_full),
     .buf_ready (w_ppb_buf_ready_int),
@@ -248,7 +252,7 @@ pingpong_buf #(
     .rd_data   (a_ppb_rd_data),
     .swap      (ctrl_a_ppb_swap),
     .clear     (ctrl_a_ppb_clear),
-    .fp16_mode (pe_mode),        // pe_mode=1 → FP16: 16-bit reads (2/word)
+    .fp16_mode (pe_mode),
     .buf_empty (a_ppb_buf_empty_int),
     .buf_full  (a_ppb_full),
     .buf_ready (a_ppb_buf_ready_int),
@@ -257,9 +261,11 @@ pingpong_buf #(
 );
 
 // ---------------------------------------------------------------------------
-// DMA (with PPBuf interface)
+// DMA
 // ---------------------------------------------------------------------------
 wire r_fifo_full;
+wire r_fifo_wr_en;
+wire [ACC_W-1:0] r_fifo_din;
 
 npu_dma #(
     .DATA_W      (ACC_W),
@@ -281,7 +287,7 @@ npu_dma #(
     .w_ppb_full     (w_ppb_full),
     .w_ppb_buf_ready(w_ppb_buf_ready_int),
     .w_ppb_buf_empty(w_ppb_buf_empty_int),
-    .w_ppb_drain_done(1'b1),  // drain_done tracked by ctrl FSM
+    .w_ppb_drain_done(1'b1),
     // Activation channel
     .a_start        (dma_a_start),
     .a_base_addr    (dma_a_addr),
@@ -331,90 +337,74 @@ npu_dma #(
 );
 
 // ---------------------------------------------------------------------------
-// Result FIFO interface: PE array → DMA result FIFO
+// FP16 Packer / Consumer Logic
 // ---------------------------------------------------------------------------
-wire r_fifo_wr_en;
-wire [ACC_W-1:0] r_fifo_din;
-
-assign r_fifo_din  = pe_array_result;
-assign r_fifo_wr_en = pe_en && |pe_array_valid;  // any column valid
-
-// ---------------------------------------------------------------------------
-// FP16 Packer Logic
-// ---------------------------------------------------------------------------
-// For FP16 mode: PPBuf outputs complete 16-bit FP16 values directly.
-// Each 32-bit DRAM word contains 2 FP16 values (rd_sub=0: [15:0], rd_sub=1: [31:16]).
-// The PPBuf already handles reading the correct 16-bit half-word.
-//
-// For INT8 mode: PPBuf outputs sign-extended 8-bit values.
-//
-// pe_consume triggers when:
-//   - INT8: both buffers have data (simple ready check)
-//   - FP16: both buffers have data AND pe_en is active
-//
-// In both modes, w_ppb_rd_en and a_ppb_rd_en should assert when pe_consume
-// is active to advance the PPBuf read pointers.
 
 wire pe_data_ready = !w_ppb_buf_empty_int && !a_ppb_buf_empty_int;
-
-// pe_consume: pulse to consume one pair of weight+activation
-// Note: For FP16, we consume when data is ready (PPBuf already outputs 16-bit FP16)
 wire pe_consume = pe_en && (pe_data_ready || pe_flush);
 
-// Generate read enables for PPBuf
-// Both INT8 and FP16 use the same consume logic
 assign w_ppb_rd_en = pe_consume;
 assign a_ppb_rd_en = pe_consume;
 
 // ---------------------------------------------------------------------------
-// PE Array
+// Reconfigurable PE Array (16×16 physical)
 // ---------------------------------------------------------------------------
-wire [COLS*ACC_W-1:0] pe_array_result;
-wire [COLS-1:0]       pe_array_valid;
-wire [COLS*DATA_W-1:0] pe_w_in, pe_a_in;
-wire [COLS*ACC_W-1:0]  pe_acc_in;
 
-// Data source: PPBuf outputs correct format for both INT8 and FP16
-// - INT8: sign-extended 8-bit value in [7:0], [15:8] is sign extension
-// - FP16: complete 16-bit FP16 value
+wire [PHY_COLS*DATA_W-1:0] pe_w_in;
+wire [PHY_ROWS*DATA_W-1:0] pe_a_in;
+wire [PHY_COLS*ACC_W-1:0]  pe_acc_in;
+wire [32*ACC_W-1:0]         pe_array_result;    // max 32 output columns (8×32 mode)
+wire [31:0]                 pe_array_valid;
+wire [PHY_ROWS*PHY_COLS-1:0] pe_active_dbg;
+
+// Data source from PPBuf
 wire [DATA_W-1:0] pe_w_data = w_ppb_rd_data;
 wire [DATA_W-1:0] pe_a_data = a_ppb_rd_data;
 
-// Weight PPBuf output → PE array input (broadcast to all rows in each column)
-assign pe_w_in = {(COLS){pe_w_data}};
-// Activation PPBuf output → PE array input (one per row)
-assign pe_a_in = {(ROWS){pe_a_data}};
-assign pe_acc_in = 0;
+// Broadcast weight to all physical columns
+assign pe_w_in = {(PHY_COLS){pe_w_data}};
+// Broadcast activation to all physical rows
+assign pe_a_in = {(PHY_ROWS){pe_a_data}};
+assign pe_acc_in = {PHY_COLS*ACC_W{1'b0}};
 
-pe_array #(
-    .ROWS  (ROWS),
-    .COLS  (COLS),
-    .DATA_W(DATA_W),
-    .ACC_W (ACC_W)
+reconfig_pe_array #(
+    .PHY_ROWS(PHY_ROWS),
+    .PHY_COLS(PHY_COLS),
+    .DATA_W  (DATA_W),
+    .ACC_W   (ACC_W)
 ) u_pe_array (
-    .clk      (sys_clk),
-    .rst_n    (sys_rst_n),
-    .mode     (pe_mode),
-    .stat_mode(pe_stat),
-    .en       (pe_en),
-    .flush    (pe_flush),
-    .load_w   (pe_load_w),
-    .w_in     (pe_w_in),
-    .act_in   (pe_a_in),
-    .acc_in   (pe_acc_in),
-    .acc_out  (pe_array_result),
-    .valid_out(pe_array_valid)
+    .clk        (sys_clk),
+    .rst_n      (sys_rst_n),
+    .cfg_shape  (cfg_shape_r),
+    .mode       (pe_mode),
+    .stat_mode  (pe_stat),
+    .en         (pe_en),
+    .flush      (pe_flush),
+    .load_w     (pe_load_w),
+    .swap_w     (pe_swap_w),
+    .w_in       (pe_w_in),
+    .act_in     (pe_a_in),
+    .acc_in     (pe_acc_in),
+    .acc_out    (pe_array_result),
+    .valid_out  (pe_array_valid),
+    .pe_active  (pe_active_dbg)
 );
+
+// ---------------------------------------------------------------------------
+// Result FIFO interface
+// ---------------------------------------------------------------------------
+assign r_fifo_din  = pe_array_result[ACC_W-1:0];   // take first result word
+assign r_fifo_wr_en = pe_en && |pe_array_valid;    // any column valid
 
 // ---------------------------------------------------------------------------
 // Power Management
 // ---------------------------------------------------------------------------
-wire [ROWS-1:0] row_cg = {ROWS{~pe_en}};
-wire [COLS-1:0] col_cg = {COLS{~pe_en}};
+wire [PHY_ROWS-1:0] row_cg = {PHY_ROWS{~pe_en}};
+wire [PHY_COLS-1:0] col_cg = {PHY_COLS{~pe_en}};
 
 npu_power #(
-    .ROWS(ROWS),
-    .COLS(COLS)
+    .ROWS(PHY_ROWS),
+    .COLS(PHY_COLS)
 ) u_power (
     .clk         (sys_clk),
     .rst_n       (sys_rst_n),

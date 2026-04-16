@@ -16,6 +16,12 @@
 //   - Partial sums flow vertically (column direction).
 //   - Each PE: pe_top instance.
 //
+//   OS Mode Note:
+//   In OS mode, both weight and activation should flow systolically.
+//   Current implementation uses broadcast for weight (simplified), which
+//   works for 1x1 PE array but may cause bubbles in larger arrays.
+//   For full systolic OS, weight needs horizontal shift registers.
+//
 // Parameters:
 //   ROWS     - number of PE rows (M)
 //   COLS     - number of PE columns (N)
@@ -62,6 +68,10 @@ wire [DATA_W-1:0] act_h [0:ROWS-1][0:COLS];   // COLS+1 nodes per row
 wire [ACC_W-1:0]  acc_v [0:ROWS][0:COLS-1];   // ROWS+1 nodes per col
 wire              valid_v[0:ROWS][0:COLS-1];
 
+// OS mode: weight horizontal shift registers to avoid broadcast bubbles
+// w_h[row][col] is the weight arriving at PE[row][col]
+wire [DATA_W-1:0] w_h [0:ROWS-1][0:COLS];     // COLS+1 nodes per row
+
 // Connect external inputs
 genvar r, c;
 generate
@@ -72,6 +82,10 @@ generate
         assign acc_v[0][c]   = acc_in[c*ACC_W +: ACC_W];
         assign valid_v[0][c] = 1'b0;  // no valid from top boundary
     end
+    // OS mode: weight flows horizontally like activation
+    for (r = 0; r < ROWS; r = r+1) begin : gen_w_in_os
+        assign w_h[r][0] = w_in[0 +: DATA_W];  // First column weight input
+    end
 endgenerate
 
 // ---------------------------------------------------------------------------
@@ -80,6 +94,11 @@ endgenerate
 generate
     for (r = 0; r < ROWS; r = r+1) begin : gen_row
         for (c = 0; c < COLS; c = c+1) begin : gen_col
+
+            // Mode-dependent weight input:
+            //   WS: broadcast per column (original behavior)
+            //   OS: systolic flow horizontally
+            wire [DATA_W-1:0] pe_w_in = stat_mode ? w_h[r][c] : w_in[c*DATA_W +: DATA_W];
 
             pe_top #(
                 .DATA_W(DATA_W),
@@ -92,8 +111,8 @@ generate
                 .en       (en),
                 .flush    (flush),
                 .load_w   (load_w),
-                // weight: broadcast per column
-                .w_in     (w_in[c*DATA_W +: DATA_W]),
+                // weight: broadcast per column (WS) or systolic (OS)
+                .w_in     (pe_w_in),
                 // activation: systolic shift along row
                 .a_in     (act_h[r][c]),
                 // partial sum: pass down column
@@ -104,14 +123,26 @@ generate
 
             // Activation passes to the right (registered inside PE stage-0,
             // so we forward the raw wire; add a register here for timing)
+            // CRITICAL: Always propagate data to avoid bubbles, even when en=0
             reg [DATA_W-1:0] act_reg;
             always @(posedge clk) begin
                 if (!rst_n)
                     act_reg <= 0;
-                else if (en)
-                    act_reg <= act_h[r][c];
+                else
+                    act_reg <= act_h[r][c];  // Always propagate, not gated by en
             end
             assign act_h[r][c+1] = act_reg;
+
+            // OS mode: Weight passes to the right (horizontal systolic)
+            // This eliminates broadcast bubbles in OS mode
+            reg [DATA_W-1:0] w_reg;
+            always @(posedge clk) begin
+                if (!rst_n)
+                    w_reg <= 0;
+                else
+                    w_reg <= w_h[r][c];  // Always propagate
+            end
+            assign w_h[r][c+1] = w_reg;
 
         end
     end

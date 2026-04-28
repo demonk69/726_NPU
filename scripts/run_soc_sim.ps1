@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # run_soc_sim.ps1 - SoC simulation runner
 #
 # Prerequisites:
@@ -14,7 +14,7 @@
 # =============================================================================
 
 $ErrorActionPreference = "Stop"
-$ProjectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
 $RtlDir = Join-Path $ProjectRoot "rtl"
 $TbDir = Join-Path $ProjectRoot "tb"
 $SimDir = Join-Path $ProjectRoot "sim"
@@ -121,7 +121,7 @@ $srcFiles = @(
     (Join-Path $RtlDir "pe\fp16_add.v")
     (Join-Path $RtlDir "pe\fp16_mul.v")
     (Join-Path $RtlDir "pe\fp32_add.v")
-    (Join-Path $RtlDir "array\pe_array.v")
+    (Join-Path $RtlDir "array\reconfig_pe_array.v")
     (Join-Path $RtlDir "power\npu_power.v")
     (Join-Path $RtlDir "top\npu_top.v")
     # Testbench

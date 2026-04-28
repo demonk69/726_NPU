@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # run_npu_top_sanity.ps1  -  NPU Top-Level Sanity Check (Smoke Test)
 #
 # Tests a toy INT8 OS-mode matrix multiply (M=4, N=1, K=4) against
@@ -37,7 +37,7 @@ $srcFiles = @(
     (Join-Path $RtlDir "pe\fp16_mul.v")
     (Join-Path $RtlDir "pe\fp32_add.v")
     (Join-Path $RtlDir "pe\pe_top.v")
-    (Join-Path $RtlDir "array\pe_array.v")
+    (Join-Path $RtlDir "array\reconfig_pe_array.v")
     # Buffers / FIFO
     (Join-Path $RtlDir "common\fifo.v")
     (Join-Path $RtlDir "buf\pingpong_buf.v")

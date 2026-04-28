@@ -55,6 +55,7 @@ localparam REG_K_DIM   = 32'h18;
 localparam REG_W_ADDR  = 32'h20;
 localparam REG_A_ADDR  = 32'h24;
 localparam REG_R_ADDR  = 32'h28;
+localparam REG_CFG_SHAPE = 32'h3C;
 
 localparam CTRL_START    = 32'h01;
 localparam CTRL_OS       = 32'h10;  // bit[4]=1 → OS mode
@@ -661,6 +662,7 @@ task run_npu;
         axi_write(REG_W_ADDR, t_w_addr);
         axi_write(REG_A_ADDR, t_a_addr);
         axi_write(REG_R_ADDR, t_r_addr);
+        axi_write(REG_CFG_SHAPE, 32'h0);  // cfg_shape=4x4 mode for 1x1 PE test
         axi_write(REG_CTRL, t_ctrl_val);
         wait_done(t_timeout);
     end

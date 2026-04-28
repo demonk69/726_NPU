@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # run_array_scale.ps1 - K-depth scale verification on 1x1 PE testbench
 #
 # Tests ROWS=1, COLS=1 with K=N for N=4,8,16,32 under INT8/FP16 × WS/OS modes.
@@ -29,7 +29,7 @@ $RtlSources = @(
     (Join-Path $RtlDir "common\fifo.v"),
     (Join-Path $RtlDir "common\axi_monitor.v"),
     (Join-Path $RtlDir "common\op_counter.v"),
-    (Join-Path $RtlDir "array\pe_array.v"),
+    (Join-Path $RtlDir "array\reconfig_pe_array.v"),
     (Join-Path $RtlDir "buf\pingpong_buf.v"),
     (Join-Path $RtlDir "power\npu_power.v"),
     (Join-Path $RtlDir "ctrl\npu_ctrl.v"),

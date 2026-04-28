@@ -167,7 +167,7 @@ assign m_bvalid = m_bvalid_r;
 // NPU DUT
 // ---------------------------------------------------------------------------
 npu_top #(
-    .ROWS(ROWS), .COLS(COLS), .DATA_W(DATA_W), .ACC_W(ACC_W)
+    .PHY_ROWS(ROWS), .PHY_COLS(COLS), .DATA_W(DATA_W), .ACC_W(ACC_W)
 ) u_npu (
     .sys_clk       (clk),
     .sys_rst_n     (rst_n),

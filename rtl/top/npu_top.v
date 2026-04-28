@@ -20,8 +20,12 @@
 `timescale 1ns/1ps
 
 module npu_top #(
-    parameter PHY_ROWS     = 16,       // physical rows (always 16)
-    parameter PHY_COLS     = 16,       // physical cols (always 16)
+    // ROWS/COLS are kept only as legacy aliases for older testbenches.
+    // The reconfigurable array remains 16x16 unless PHY_* is explicitly set.
+    parameter ROWS         = 16,
+    parameter COLS         = 16,
+    parameter PHY_ROWS     = 16,       // physical rows
+    parameter PHY_COLS     = 16,       // physical cols
     parameter DATA_W       = 16,
     parameter ACC_W        = 32,
     parameter PPB_DEPTH    = 64,
@@ -88,6 +92,8 @@ module npu_top #(
     output wire              npu_irq
 );
 
+localparam TILE_LANES = 4;
+
 // ---------------------------------------------------------------------------
 // Wires: register file → controller
 // ---------------------------------------------------------------------------
@@ -150,6 +156,12 @@ wire pe_en, pe_flush, pe_mode, pe_stat;
 wire pe_load_w, pe_swap_w;   // WS mode weight control
 wire ctrl_w_ppb_swap, ctrl_a_ppb_swap, ctrl_w_ppb_clear, ctrl_a_ppb_clear;
 wire ctrl_r_fifo_clear;
+wire [1:0] ctrl_cfg_shape;
+wire ctrl_tile_mode, ctrl_vec_consume;
+wire [31:0] ctrl_tile_m_base, ctrl_tile_n_base;
+wire [3:0] ctrl_tile_row_valid, ctrl_tile_col_valid;
+wire [2:0] ctrl_tile_active_rows, ctrl_tile_active_cols;
+wire [15:0] ctrl_tile_k_cycle;
 
 npu_ctrl #(
     .ROWS  (PHY_ROWS),       // controller sees physical dimensions
@@ -168,6 +180,16 @@ npu_ctrl #(
     .r_addr       (r_addr_r),
     .arr_cfg      (arr_cfg_r),
     .cfg_shape_in (cfg_shape_r),
+    .cfg_shape_latched(ctrl_cfg_shape),
+    .tile_mode    (ctrl_tile_mode),
+    .vec_consume  (ctrl_vec_consume),
+    .tile_m_base  (ctrl_tile_m_base),
+    .tile_n_base  (ctrl_tile_n_base),
+    .tile_row_valid(ctrl_tile_row_valid),
+    .tile_col_valid(ctrl_tile_col_valid),
+    .tile_active_rows(ctrl_tile_active_rows),
+    .tile_active_cols(ctrl_tile_active_cols),
+    .tile_k_cycle (ctrl_tile_k_cycle),
     .busy         (status_busy),
     .done         (status_done),
     .dma_w_start  (dma_w_start),
@@ -208,6 +230,9 @@ wire [ACC_W-1:0] w_ppb_wr_data, a_ppb_wr_data;
 wire        w_ppb_full,   a_ppb_full;
 wire        w_ppb_rd_en,  a_ppb_rd_en;
 wire [DATA_W-1:0] w_ppb_rd_data, a_ppb_rd_data;
+wire        w_ppb_rd_vec_en, a_ppb_rd_vec_en;
+wire [TILE_LANES*DATA_W-1:0] w_ppb_rd_vec, a_ppb_rd_vec;
+wire        w_ppb_rd_vec_valid, a_ppb_rd_vec_valid;
 
 wire w_ppb_buf_empty_int, a_ppb_buf_empty_int;
 wire w_ppb_buf_ready_int, a_ppb_buf_ready_int;
@@ -226,6 +251,9 @@ pingpong_buf #(
     .wr_data   (w_ppb_wr_data),
     .rd_en     (w_ppb_rd_en),
     .rd_data   (w_ppb_rd_data),
+    .rd_vec_en  (w_ppb_rd_vec_en),
+    .rd_vec     (w_ppb_rd_vec),
+    .rd_vec_valid(w_ppb_rd_vec_valid),
     .swap      (ctrl_w_ppb_swap),
     .clear     (ctrl_w_ppb_clear),
     .fp16_mode (pe_mode),
@@ -250,6 +278,9 @@ pingpong_buf #(
     .wr_data   (a_ppb_wr_data),
     .rd_en     (a_ppb_rd_en),
     .rd_data   (a_ppb_rd_data),
+    .rd_vec_en  (a_ppb_rd_vec_en),
+    .rd_vec     (a_ppb_rd_vec),
+    .rd_vec_valid(a_ppb_rd_vec_valid),
     .swap      (ctrl_a_ppb_swap),
     .clear     (ctrl_a_ppb_clear),
     .fp16_mode (pe_mode),
@@ -342,9 +373,15 @@ npu_dma #(
 
 wire pe_data_ready = !w_ppb_buf_empty_int && !a_ppb_buf_empty_int;
 wire pe_consume = pe_en && (pe_data_ready || pe_flush);
+wire tile_vec_fire = ctrl_vec_consume &&
+                     w_ppb_rd_vec_valid &&
+                     a_ppb_rd_vec_valid;
+wire tile_feed_step = ctrl_tile_mode && pe_en && pe_stat && !pe_flush;
 
-assign w_ppb_rd_en = pe_consume;
-assign a_ppb_rd_en = pe_consume;
+assign w_ppb_rd_en = ctrl_tile_mode ? 1'b0 : pe_consume;
+assign a_ppb_rd_en = ctrl_tile_mode ? 1'b0 : pe_consume;
+assign w_ppb_rd_vec_en = tile_vec_fire;
+assign a_ppb_rd_vec_en = tile_vec_fire;
 
 // ---------------------------------------------------------------------------
 // Reconfigurable PE Array (16×16 physical)
@@ -360,12 +397,96 @@ wire [PHY_ROWS*PHY_COLS-1:0] pe_active_dbg;
 // Data source from PPBuf
 wire [DATA_W-1:0] pe_w_data = w_ppb_rd_data;
 wire [DATA_W-1:0] pe_a_data = a_ppb_rd_data;
+wire [DATA_W-1:0] w_vec_lane0 = w_ppb_rd_vec[0*DATA_W +: DATA_W];
+wire [DATA_W-1:0] w_vec_lane1 = w_ppb_rd_vec[1*DATA_W +: DATA_W];
+wire [DATA_W-1:0] w_vec_lane2 = w_ppb_rd_vec[2*DATA_W +: DATA_W];
+wire [DATA_W-1:0] w_vec_lane3 = w_ppb_rd_vec[3*DATA_W +: DATA_W];
+wire [DATA_W-1:0] a_vec_lane0 = a_ppb_rd_vec[0*DATA_W +: DATA_W];
+wire [DATA_W-1:0] a_vec_lane1 = a_ppb_rd_vec[1*DATA_W +: DATA_W];
+wire [DATA_W-1:0] a_vec_lane2 = a_ppb_rd_vec[2*DATA_W +: DATA_W];
+wire [DATA_W-1:0] a_vec_lane3 = a_ppb_rd_vec[3*DATA_W +: DATA_W];
 
-// Broadcast weight to all physical columns
-assign pe_w_in = {(PHY_COLS){pe_w_data}};
-// Broadcast activation to all physical rows
-assign pe_a_in = {(PHY_ROWS){pe_a_data}};
+reg [DATA_W-1:0] a_lane1_d0;
+reg [DATA_W-1:0] a_lane2_d0, a_lane2_d1;
+reg [DATA_W-1:0] a_lane3_d0, a_lane3_d1, a_lane3_d2;
+
+always @(posedge sys_clk) begin
+    if (!sys_rst_n || !ctrl_tile_mode) begin
+        a_lane1_d0 <= {DATA_W{1'b0}};
+        a_lane2_d0 <= {DATA_W{1'b0}};
+        a_lane2_d1 <= {DATA_W{1'b0}};
+        a_lane3_d0 <= {DATA_W{1'b0}};
+        a_lane3_d1 <= {DATA_W{1'b0}};
+        a_lane3_d2 <= {DATA_W{1'b0}};
+    end else if (tile_feed_step) begin
+        a_lane1_d0 <= tile_vec_fire ? a_vec_lane1 : {DATA_W{1'b0}};
+        a_lane2_d0 <= tile_vec_fire ? a_vec_lane2 : {DATA_W{1'b0}};
+        a_lane2_d1 <= a_lane2_d0;
+        a_lane3_d0 <= tile_vec_fire ? a_vec_lane3 : {DATA_W{1'b0}};
+        a_lane3_d1 <= a_lane3_d0;
+        a_lane3_d2 <= a_lane3_d1;
+    end
+end
+
+wire [DATA_W-1:0] pe_w_lane0 = ctrl_tile_mode
+    ? (tile_vec_fire ? w_vec_lane0 : {DATA_W{1'b0}})
+    : pe_w_data;
+wire [DATA_W-1:0] pe_w_lane1 = ctrl_tile_mode && tile_vec_fire ? w_vec_lane1 : {DATA_W{1'b0}};
+wire [DATA_W-1:0] pe_w_lane2 = ctrl_tile_mode && tile_vec_fire ? w_vec_lane2 : {DATA_W{1'b0}};
+wire [DATA_W-1:0] pe_w_lane3 = ctrl_tile_mode && tile_vec_fire ? w_vec_lane3 : {DATA_W{1'b0}};
+
+wire [DATA_W-1:0] pe_a_lane0 = ctrl_tile_mode
+    ? (tile_vec_fire ? a_vec_lane0 : {DATA_W{1'b0}})
+    : pe_a_data;
+wire [DATA_W-1:0] pe_a_lane1 = ctrl_tile_mode ? a_lane1_d0 : {DATA_W{1'b0}};
+wire [DATA_W-1:0] pe_a_lane2 = ctrl_tile_mode ? a_lane2_d1 : {DATA_W{1'b0}};
+wire [DATA_W-1:0] pe_a_lane3 = ctrl_tile_mode ? a_lane3_d2 : {DATA_W{1'b0}};
+
+// ── Weight input to PE array ──
+// T2.2: lower four columns receive w_vec[0..3]. Upper columns stay zero until
+// wider 8x8/16x16 feeding is implemented.
+assign pe_w_in = {{(PHY_COLS-TILE_LANES)*DATA_W{1'b0}},
+                  pe_w_lane3, pe_w_lane2, pe_w_lane1, pe_w_lane0};
+
+// ── Activation input to PE array ──
+// T2.2: lower four rows receive a_vec[0..3]. OS row-skew scheduling is a T2.3
+// controller/feeder responsibility; this stage only exposes the 4-lane path.
+assign pe_a_in = {{(PHY_ROWS-TILE_LANES)*DATA_W{1'b0}},
+                  pe_a_lane3, pe_a_lane2, pe_a_lane1, pe_a_lane0};
+
 assign pe_acc_in = {PHY_COLS*ACC_W{1'b0}};
+
+// ---------------------------------------------------------------------------
+// Scalar compatibility PE
+// ---------------------------------------------------------------------------
+//
+// Keep the original single-output path for non-tile mode. 4x4 tile mode writes
+// back through the array serializer below.
+wire scalar_pe_en = (!ctrl_tile_mode) && pe_consume;
+wire [ACC_W-1:0] scalar_result;
+wire             scalar_valid;
+
+pe_top #(
+    .DATA_W(DATA_W),
+    .ACC_W (ACC_W)
+) u_scalar_pe (
+    .clk      (sys_clk),
+    .rst_n    (sys_rst_n),
+    .mode     (pe_mode),
+    .stat_mode(pe_stat),
+    .en       (scalar_pe_en),
+    .flush    (pe_flush),
+    .load_w   (pe_load_w),
+    .swap_w   (pe_swap_w),
+    .w_in     (pe_w_data),
+    .a_in     (pe_a_data),
+    .acc_in   ({ACC_W{1'b0}}),
+    .acc_out  (scalar_result),
+    .valid_out(scalar_valid)
+);
+
+// WS load row indicator (for debug/status)
+wire [3:0] ws_load_row_status;
 
 reconfig_pe_array #(
     .PHY_ROWS(PHY_ROWS),
@@ -373,28 +494,78 @@ reconfig_pe_array #(
     .DATA_W  (DATA_W),
     .ACC_W   (ACC_W)
 ) u_pe_array (
-    .clk        (sys_clk),
-    .rst_n      (sys_rst_n),
-    .cfg_shape  (cfg_shape_r),
-    .mode       (pe_mode),
-    .stat_mode  (pe_stat),
-    .en         (pe_en),
-    .flush      (pe_flush),
-    .load_w     (pe_load_w),
-    .swap_w     (pe_swap_w),
-    .w_in       (pe_w_in),
-    .act_in     (pe_a_in),
-    .acc_in     (pe_acc_in),
-    .acc_out    (pe_array_result),
-    .valid_out  (pe_array_valid),
-    .pe_active  (pe_active_dbg)
+    .clk            (sys_clk),
+    .rst_n          (sys_rst_n),
+    .cfg_shape      (ctrl_cfg_shape),
+    .mode           (pe_mode),
+    .stat_mode      (pe_stat),
+    .en             (pe_en),
+    .flush          (pe_flush),
+    .load_w         (pe_load_w),
+    .swap_w         (pe_swap_w),
+    .w_in           (pe_w_in),
+    .act_in         (pe_a_in),
+    .acc_in         (pe_acc_in),
+    .acc_out        (pe_array_result),
+    .valid_out      (pe_array_valid),
+    .ws_load_row_out(ws_load_row_status),
+    .pe_active      (pe_active_dbg)
 );
 
 // ---------------------------------------------------------------------------
 // Result FIFO interface
 // ---------------------------------------------------------------------------
-assign r_fifo_din  = pe_array_result[ACC_W-1:0];   // take first result word
-assign r_fifo_wr_en = pe_en && |pe_array_valid;    // any column valid
+reg [ACC_W-1:0] tile_result_buf [0:15];
+reg             tile_ser_busy;
+reg [2:0]       tile_ser_active_rows;
+reg [2:0]       tile_ser_active_cols;
+reg [1:0]       tile_ser_row;
+reg [1:0]       tile_ser_col;
+
+wire [3:0] tile_ser_idx = {tile_ser_row, tile_ser_col};
+wire       tile_ser_fire = tile_ser_busy && !r_fifo_full;
+wire       tile_ser_last_col = ({1'b0, tile_ser_col} + 3'd1) >= tile_ser_active_cols;
+wire       tile_ser_last_row = ({1'b0, tile_ser_row} + 3'd1) >= tile_ser_active_rows;
+wire       tile_ser_last     = tile_ser_last_col && tile_ser_last_row;
+wire       tile_result_capture = ctrl_tile_mode &&
+                                 pe_stat &&
+                                 pe_array_valid[0] &&
+                                 !tile_ser_busy;
+
+integer tile_ser_i;
+always @(posedge sys_clk) begin
+    if (!sys_rst_n || !ctrl_tile_mode) begin
+        tile_ser_busy       <= 1'b0;
+        tile_ser_active_rows <= 3'd0;
+        tile_ser_active_cols <= 3'd0;
+        tile_ser_row        <= 2'd0;
+        tile_ser_col        <= 2'd0;
+        for (tile_ser_i = 0; tile_ser_i < 16; tile_ser_i = tile_ser_i + 1)
+            tile_result_buf[tile_ser_i] <= {ACC_W{1'b0}};
+    end else if (tile_result_capture) begin
+        for (tile_ser_i = 0; tile_ser_i < 16; tile_ser_i = tile_ser_i + 1)
+            tile_result_buf[tile_ser_i] <= pe_array_result[tile_ser_i*ACC_W +: ACC_W];
+        tile_ser_active_rows <= ctrl_tile_active_rows;
+        tile_ser_active_cols <= ctrl_tile_active_cols;
+        tile_ser_row         <= 2'd0;
+        tile_ser_col         <= 2'd0;
+        tile_ser_busy        <= (ctrl_tile_active_rows != 3'd0) &&
+                                (ctrl_tile_active_cols != 3'd0);
+    end else if (tile_ser_fire) begin
+        if (tile_ser_last) begin
+            tile_ser_busy <= 1'b0;
+        end else if (tile_ser_last_col) begin
+            tile_ser_row <= tile_ser_row + 1'b1;
+            tile_ser_col <= 2'd0;
+        end else begin
+            tile_ser_col <= tile_ser_col + 1'b1;
+        end
+    end
+end
+
+assign r_fifo_din   = ctrl_tile_mode ? tile_result_buf[tile_ser_idx] : scalar_result;
+assign r_fifo_wr_en = ctrl_tile_mode ? tile_ser_fire
+                                     : (scalar_valid && !r_fifo_full);
 
 // ---------------------------------------------------------------------------
 // Power Management

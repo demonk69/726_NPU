@@ -16,7 +16,7 @@
 //             0x20  W_ADDR    - weight base address in DRAM
 //             0x24  A_ADDR    - activation base address in DRAM
 //             0x28  R_ADDR    - result base address in DRAM
-//             0x30  ARR_CFG   - [3:0]=act_rows, [7:4]=act_cols
+//             0x30  ARR_CFG   - bit7=4x4 tile mode enable
 //             0x34  CLK_DIV   - [2:0]=div_sel
 //             0x38  CG_EN     - clock gating enable
 //             0x3C  CFG_SHAPE - [1:0]=shape (00=4x4, 01=8x8, 10=16x16, 11=8x32)
@@ -63,7 +63,7 @@ module npu_axi_lite (
     output reg  [31:0]           w_addr,
     output reg  [31:0]           a_addr,
     output reg  [31:0]           r_addr,
-    output reg  [7:0]            arr_cfg,    // [3:0]=rows, [7:4]=cols
+    output reg  [7:0]            arr_cfg,    // bit7=4x4 tile mode enable
     output reg  [2:0]            clk_div,
     output reg                   cg_en,
     output reg  [1:0]            cfg_shape, // shape select for reconfig array

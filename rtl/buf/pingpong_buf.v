@@ -16,6 +16,7 @@
 //   OUT_WIDTH  - read data width (PE side, e.g. 16); DATA_W/OUT_WIDTH must be int
 //   THRESHOLD  - how many words DMA must fill before buf_ready asserts
 //   SUBW       - max sub-words per word (4 for INT8; FP16 uses SUBW/2=2)
+//   VEC_LANES  - number of PE lanes returned by rd_vec
 //
 // fp16_mode port:
 //   0 (INT8): each 32-bit word yields SUBW=4 bytes; rd_data is sign-extended byte
@@ -29,7 +30,8 @@ module pingpong_buf #(
     parameter DEPTH     = 64,
     parameter OUT_WIDTH = 16,       // PE data width (output)
     parameter THRESHOLD = 16,
-    parameter SUBW      = 4          // max sub-words per word (INT8 case)
+    parameter SUBW      = 4,         // max sub-words per word (INT8 case)
+    parameter VEC_LANES = 4
 )(
     input  wire                      clk,
     input  wire                      rst_n,
@@ -41,6 +43,9 @@ module pingpong_buf #(
     // ---- Read port (PE side) ----
     input  wire                      rd_en,
     output wire [OUT_WIDTH-1:0]      rd_data,
+    input  wire                      rd_vec_en,     // consume VEC_LANES lanes
+    output wire [VEC_LANES*OUT_WIDTH-1:0] rd_vec,
+    output wire                      rd_vec_valid,
 
     // ---- Control ----
     input  wire                      swap,       // toggle active bank
@@ -63,6 +68,7 @@ localparam ADDR_W    = $clog2(DEPTH);
 localparam FILL_W    = ADDR_W + 1;
 localparam SUBW_W    = $clog2(SUBW);             // 2 bits for SUBW=4 index
 localparam RD_FILL_W = $clog2(DEPTH * SUBW) + 1; // max fill: DEPTH*4 sub-words
+localparam [RD_FILL_W-1:0] VEC_LANES_FILL = VEC_LANES;
 
 // Effective sub-words per word (runtime):
 //   INT8:  eff_subw = 4 (SUBW)
@@ -154,7 +160,8 @@ end
 // ---------------------------------------------------------------------------
 // Read logic (sub-word)
 // ---------------------------------------------------------------------------
-wire do_read = rd_en && !buf_empty;
+wire do_vec_read = rd_vec_en && rd_vec_valid;
+wire do_read = rd_en && !buf_empty && !do_vec_read;
 
 // Current memory word
 wire [DATA_W-1:0] rd_mem = (rd_sel == 1'b0)
@@ -180,6 +187,54 @@ wire [OUT_WIDTH-1:0] rd_data_raw = fp16_mode ? rd_fp16 : rd_int8;
 // When buffer is empty, output 0 to avoid PE latching stale data
 assign rd_data = buf_empty ? {OUT_WIDTH{1'b0}} : rd_data_raw;
 
+// ---- 4-lane vector preview path ----
+// rd_vec starts at the same rd_ptr/rd_sub as rd_data.  INT8 returns four
+// sign-extended bytes from one 32-bit word when aligned.  FP16 returns four
+// half-words from two consecutive 32-bit words when aligned.
+wire [ADDR_W-1:0] rd_ptr_p1 = rd_ptr + 1'b1;
+wire [ADDR_W-1:0] rd_ptr_p2 = rd_ptr + 2'd2;
+
+wire [DATA_W-1:0] rd_vec_word0 = (rd_sel == 1'b0) ? mem_a[rd_ptr]    : mem_b[rd_ptr];
+wire [DATA_W-1:0] rd_vec_word1 = (rd_sel == 1'b0) ? mem_a[rd_ptr_p1] : mem_b[rd_ptr_p1];
+wire [DATA_W-1:0] rd_vec_word2 = (rd_sel == 1'b0) ? mem_a[rd_ptr_p2] : mem_b[rd_ptr_p2];
+
+genvar lane_i;
+generate
+    for (lane_i = 0; lane_i < VEC_LANES; lane_i = lane_i + 1) begin : gen_rd_vec
+        wire [3:0] lane_abs = {2'b00, rd_sub} + lane_i[3:0];
+        wire [1:0] int_word_sel = lane_abs[3:2];
+        wire [1:0] fp_word_sel  = lane_abs[3:1];
+        wire [1:0] sub_idx      = fp16_mode ? {1'b0, lane_abs[0]} : lane_abs[1:0];
+
+        wire [DATA_W-1:0] int_word = (int_word_sel == 2'd0) ? rd_vec_word0 : rd_vec_word1;
+        wire [DATA_W-1:0] fp_word  = (fp_word_sel  == 2'd0) ? rd_vec_word0 :
+                                      (fp_word_sel  == 2'd1) ? rd_vec_word1 :
+                                                               rd_vec_word2;
+
+        wire [7:0] vec_byte = (sub_idx == 2'd0) ? int_word[ 7: 0] :
+                              (sub_idx == 2'd1) ? int_word[15: 8] :
+                              (sub_idx == 2'd2) ? int_word[23:16] :
+                                                   int_word[31:24];
+        wire [15:0] vec_half = (sub_idx == 2'd0) ? fp_word[15:0] : fp_word[31:16];
+
+        wire [OUT_WIDTH-1:0] vec_lane =
+            fp16_mode ? {{(OUT_WIDTH-16){1'b0}}, vec_half}
+                      : {{(OUT_WIDTH-8){vec_byte[7]}}, vec_byte};
+
+        assign rd_vec[lane_i*OUT_WIDTH +: OUT_WIDTH] =
+            rd_vec_valid ? vec_lane : {OUT_WIDTH{1'b0}};
+    end
+endgenerate
+
+assign rd_vec_valid = (cur_rd_fill >= VEC_LANES_FILL);
+
+wire [3:0] vec_abs_next = {2'b00, rd_sub} + VEC_LANES;
+wire [ADDR_W:0] vec_word_inc = fp16_mode ? (vec_abs_next >> 1)
+                                         : (vec_abs_next >> 2);
+wire [SUBW_W-1:0] vec_next_sub = fp16_mode
+    ? {{(SUBW_W-1){1'b0}}, vec_abs_next[0]}
+    : vec_abs_next[SUBW_W-1:0];
+
 // Update read pointers & fill counts
 always @(posedge clk) begin
     if (!rst_n || clear) begin
@@ -198,6 +253,16 @@ always @(posedge clk) begin
             rd_ptr_b  <= 0;
             rd_sub_b  <= 0;
             rd_fill_b <= fp16_mode ? (wr_fill_b << 1) : (wr_fill_b * SUBW);
+        end
+    end else if (do_vec_read) begin
+        if (rd_sel == 1'b0) begin
+            rd_ptr_a  <= rd_ptr_a + vec_word_inc[ADDR_W-1:0];
+            rd_sub_a  <= vec_next_sub;
+            rd_fill_a <= rd_fill_a - VEC_LANES_FILL;
+        end else begin
+            rd_ptr_b  <= rd_ptr_b + vec_word_inc[ADDR_W-1:0];
+            rd_sub_b  <= vec_next_sub;
+            rd_fill_b <= rd_fill_b - VEC_LANES_FILL;
         end
     end else if (do_read) begin
         if (rd_sel == 1'b0) begin

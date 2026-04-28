@@ -4,6 +4,8 @@
 > 工具：Git + GitHub  
 > 难度：⭐☆☆☆☆（零基础友好）
 
+> 项目工程状态以 [current_status.md](current_status.md) 和 [task_breakdown.md](task_breakdown.md) 为准；本文只说明 Git 协作流程，不作为架构或验证结论。
+
 ---
 
 ## 目录

@@ -256,8 +256,8 @@ dram_model #(
 // NPU
 // =========================================================================
 npu_top #(
-    .ROWS      (NPU_ROWS),
-    .COLS      (NPU_COLS),
+    .PHY_ROWS  (16),
+    .PHY_COLS  (16),
     .DATA_W    (NPU_DATA_W),
     .ACC_W     (NPU_ACC_W),
     .PPB_DEPTH (NPU_PPB_DEPTH),

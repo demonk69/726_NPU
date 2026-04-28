@@ -25,7 +25,7 @@ $RtlSrc = @(
     "$RtlDir\common\axi_monitor.v",
     "$RtlDir\common\op_counter.v",
     "$RtlDir\buf\pingpong_buf.v",
-    "$RtlDir\array\pe_array.v",
+    "$RtlDir\array\reconfig_pe_array.v",
     "$RtlDir\power\npu_power.v",
     "$RtlDir\ctrl\npu_ctrl.v",
     "$RtlDir\axi\npu_axi_lite.v",
@@ -112,6 +112,22 @@ Run-Test -Name "fp16_e2e" `
 Run-Test -Name "multi_rc_comprehensive" `
     -VvpOut "$SimDir\reg_multi_rc.vvp" `
     -ExtraSrc @("$TbDir\tb_multi_rc_comprehensive.v")
+
+# ---- 2a. 4x4 Tile Writeback ----
+Run-Test -Name "npu_tile_writeback" `
+    -VvpOut "$SimDir\reg_npu_tile_writeback.vvp" `
+    -ExtraSrc @("$TbDir\tb_npu_tile_writeback.v")
+
+# ---- 2b. 4x4 Tile GEMM ----
+Run-Test -Name "tile4/int8_4x4x4" `
+    -VvpOut "$SimDir\reg_tile4_int8_4x4x4.vvp" `
+    -IncDir "$TbDir\tile4\int8_4x4x4" `
+    -ExtraSrc @("$TbDir\tb_npu_tile_gemm.v")
+
+Run-Test -Name "tile4/fp16_4x4x4" `
+    -VvpOut "$SimDir\reg_tile4_fp16_4x4x4.vvp" `
+    -IncDir "$TbDir\tile4\fp16_4x4x4" `
+    -ExtraSrc @("$TbDir\tb_npu_tile_gemm.v")
 
 # ---- 3. OS Matmul tests ----
 $OsCases = @("os_int8_2x3x2", "os_int8_2x4x3", "os_int8_3x4x3", "os_fp16_2x3x2", "os_fp16_3x4x3",

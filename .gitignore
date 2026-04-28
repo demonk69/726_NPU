@@ -1,0 +1,21 @@
+# Simulation/build artifacts
+*.vvp
+*.vcd
+*.out
+*.log
+
+# Icarus/compiled simulation binaries without extensions
+sim/npu_sim
+sim/tb_fp16_e2e
+sim/tb_multi_rc
+
+# Generated console captures
+sim/*_out.txt
+sim/pe_test_out.txt
+sim_soc_out.txt
+soc_out*.txt
+/soc_test.hex
+
+# Python cache
+__pycache__/
+*.pyc

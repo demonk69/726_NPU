@@ -183,7 +183,7 @@ assign m_bresp = 2'b00;
 // NPU DUT
 // ---------------------------------------------------------------------------
 npu_top #(
-    .ROWS(ROWS), .COLS(COLS), .DATA_W(DATA_W), .ACC_W(ACC_W)
+    .PHY_ROWS(16), .PHY_COLS(16), .DATA_W(DATA_W), .ACC_W(ACC_W)
 ) u_npu (
     .sys_clk       (clk),
     .sys_rst_n     (rst_n),
@@ -291,7 +291,7 @@ op_counter #(.ROWS(ROWS), .COLS(COLS)) u_opcnt (
     .dma_w_done(u_npu.dma_w_done),
     .dma_a_done(u_npu.dma_a_done),
     .dma_r_done(u_npu.dma_r_done),
-    .pe_valid(u_npu.pe_array_valid),
+    .pe_valid(u_npu.pe_array_valid[COLS-1:0]),
     .m_dim(u_npu.m_dim_r),
 
     .n_dim(u_npu.n_dim_r),

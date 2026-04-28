@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # Script  : run_classifier_sim.ps1
 # Project : NPU_prj
 # Desc    : 3-Layer Tiny-FC-Net classifier inference simulation.
@@ -54,7 +54,7 @@ $Sources = @(
     (Join-Path $RtlDir "common\fifo.v"),
     (Join-Path $RtlDir "common\axi_monitor.v"),
     (Join-Path $RtlDir "common\op_counter.v"),
-    (Join-Path $RtlDir "array\pe_array.v"),
+    (Join-Path $RtlDir "array\reconfig_pe_array.v"),
     (Join-Path $RtlDir "power\npu_power.v"),
     (Join-Path $RtlDir "buf\pingpong_buf.v"),
     (Join-Path $RtlDir "ctrl\npu_ctrl.v"),

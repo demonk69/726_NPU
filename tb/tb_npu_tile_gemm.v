@@ -19,8 +19,8 @@ localparam REG_R_ADDR    = 32'h28;
 localparam REG_ARR_CFG   = 32'h30;
 localparam REG_CFG_SHAPE = 32'h3C;
 
-localparam ARR_TILE4     = 32'h80;
-localparam CFG_4X4       = 32'h0;
+localparam ARR_TILE4     = 32'h80; // ARR_CFG[7]: enable 4x4 tile planner/data path
+localparam CFG_4X4       = 32'h0;  // CFG_SHAPE=00: use the left-top 4x4 PE array
 
 reg clk = 1'b0;
 always #(CLK_T/2) clk = ~clk;
@@ -74,7 +74,7 @@ wire npu_irq;
 
 reg [31:0] dram [0:`DRAM_SIZE-1];
 reg [31:0] expected [0:`NUM_RESULTS-1];
-integer aw_count;
+integer aw_count;   // number of result row write bursts observed
 integer pass_cnt;
 integer fail_cnt;
 
@@ -154,6 +154,7 @@ always @(posedge clk) begin
             m_rvalid <= 1'b0;
             m_rlast  <= 1'b0;
         end else if (!rd_active && !m_rvalid && m_arvalid && m_arready) begin
+            // Model a simple AXI read burst. m_arlen is beats-1.
             rd_active <= 1'b1;
             rd_base   <= m_araddr;
             rd_len    <= m_arlen;
@@ -188,6 +189,7 @@ always @(posedge clk) begin
     end else begin
         m_awready <= 1'b1;
         if (m_awvalid && m_awready && !wr_phase) begin
+            // Tile mode writes one short burst per valid C row.
             wr_phase <= 1'b1;
             wr_base  <= m_awaddr;
             wr_cnt   <= 8'd0;
@@ -314,6 +316,7 @@ task check_result;
     reg [31:0] got;
     reg [31:0] exp;
     begin
+        // expected[] is row-major C[r,c], so idx/4 is r and idx%4 is c.
         got = dram[(`R_ADDR >> 2) + idx];
         exp = expected[idx];
         if (`IS_FP16) begin
@@ -367,6 +370,7 @@ initial begin
     wait_done(5000);
 
     if (aw_count !== 4) begin
+        // For a full 4x4 tile, npu_ctrl should issue 4 row-wise write bursts.
         $display("[FAIL] %s expected 4 row write bursts, got %0d", `TEST_NAME, aw_count);
         $finish;
     end

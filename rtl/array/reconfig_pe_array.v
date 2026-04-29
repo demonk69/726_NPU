@@ -335,6 +335,8 @@ always @(*) begin
         MODE_4x4: begin
             for (ri = 0; ri < 4; ri = ri+1) begin
                 for (ci = 0; ci < 4; ci = ci+1) begin
+                    // T2.4 serializer expects row-major C tile order:
+                    // result_index = ri*4 + ci -> C[m0+ri,n0+ci].
                     acc_out[(ri*4+ci)*ACC_W +: ACC_W] = acc_v[ri+1][ci];
                     valid_out[ri*4+ci]                = valid_v[ri+1][ci];
                 end

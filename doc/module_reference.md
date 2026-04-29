@@ -1,6 +1,6 @@
 # RTL 模块参考
 
-更新时间：2026-04-27
+更新时间：2026-04-28
 
 本文按“当前状态 + 目标职责 + 待改造点”描述各模块，避免把历史目标误写成已完成事实。
 
@@ -10,7 +10,7 @@
 |---|---|---|---|
 | `pe_top` | `rtl/pe/pe_top.v` | 单 PE 测试通过 | INT8/FP16 MAC，WS/OS 累加 |
 | `reconfig_pe_array` | `rtl/array/reconfig_pe_array.v` | 16x16 阵列存在 | 4x4/8x8/16x16/8x32 形态输出 |
-| `npu_top` | `rtl/top/npu_top.v` | 标量兼容路径通过，A/W 4-lane vector 和 OS row-skew feeder 已接入 | 连接 DMA、buffer、阵列、结果收集 |
+| `npu_top` | `rtl/top/npu_top.v` | 标量兼容路径和 4x4 tile-mode GEMM 路径已通过 | 连接 DMA、buffer、阵列、结果收集 |
 | `npu_axi_lite` | `rtl/axi/npu_axi_lite.v` | 寄存器文件可用 | CPU 配置、状态、中断、descriptor base |
 | `npu_ctrl` | `rtl/ctrl/npu_ctrl.v` | 标量 loop + 4x4 tile planner | descriptor/tile/layer 调度 |
 | `npu_dma` | `rtl/axi/npu_dma.v` | 读 single-beat | 多通路 INCR burst DMA |
@@ -43,40 +43,40 @@
 
 当前限制：
 
-- 顶层只给 `w_in[0]` 和 `act_in[0]` 非零数据，阵列无法满载。
-- OS 模式注释中的 activation 横向流动和实际普通 PE 输入不完全一致。
+- 顶层在 tile mode 只喂左上 4x4 lane；8x8/16x16/8x32 还没有对应的宽向量供数。
+- OS 模式的 4x4 路径已通过 row-skew feeder 验证；更大形态仍需要重新做 valid 对齐和测试。
 - 8x32 需要更严格的折叠路由、valid 对齐和测试。
 
 目标接口应支持：
 
 ```text
-a_vec[4]        // lane r -> A[m0+r,k] with OS row skew
-w_vec[4]        // lane c -> W[k,n0+c]
+a_vec[4]        // PPBuf 输出 A_TILE[k][r]；进入 PE row 前由 feeder 错拍
+w_vec[4]        // PPBuf 输出 W_TILE[k][c]
 row_valid[4]
 col_valid[4]
 result_vec[16]  // result[r*4+c] -> C[m0+r,n0+c]
 valid_vec[16]
 ```
 
-T2.1 决定：OS 模式作为第一条真正 4x4 GEMM tile 路径，PE row 对应 M lane，PE col 对应 N lane。由于当前权重从 top 向下传播，A lane 由 feeder 做 row skew：物理周期 `t` 向 row `r` 输入 `A[m0+r,t-r]`。WS 模式保留为权重驻留的 1x4 row-vector 子流程，完整 4x4 tile 由 4 个 M row pass 组成；`K>4` 的 WS 累加归入 PSUM/K-split 阶段。
+T2.1 决定：OS 模式作为第一条真正 4x4 GEMM tile 路径，PE row 对应 M lane，PE col 对应 N lane。由于当前权重从 top 向下传播，A lane 由 feeder 做 row skew：物理周期 `t` 向 row `r` 输入 `A[m0+r,t-r]`，越界时输入 0。因此前几个周期是 ramp-up bubble，不是 4 个 row 从第 0 拍全部有效。WS 模式保留为权重驻留的 1x4 row-vector 子流程，完整 4x4 tile 由 4 个 M row pass 组成；`K>4` 的 WS 累加归入 PSUM/K-split 阶段。
 
 ## `npu_top`
 
 当前职责：
 
 - 实例化 AXI-Lite、controller、PPBuf、DMA、PE array、power。
-- 把 PPBuf 标量输出接到阵列第 0 行/列，保留 16x16 `reconfig_pe_array` 外壳。
-- Phase 1 新增 `u_scalar_pe` 兼容路径，使用同一组 PPBuf 标量数据产生当前可验证结果。
-- 当前结果 FIFO 写入 `u_scalar_pe` 输出，后续 4x4 tile 阶段再切回阵列 serializer。
+- 非 tile mode 把 PPBuf 标量输出接到 `u_scalar_pe`，保留 Phase 1 兼容回归路径。
+- tile mode 把 PPBuf 4-lane vector 接到阵列左上 4x4，并通过 serializer 收集 16 个阵列输出。
+- 结果 FIFO 在非 tile mode 写入 `u_scalar_pe` 输出，在 tile mode 写入 `pe_array_result` 的 row-major 序列。
 - `cfg_shape` 已由 `npu_ctrl` 在 start 时锁存，运行中修改 `CFG_SHAPE` 不影响当前任务。
 - T2.2 已把 W/A PPBuf 的 `rd_vec` 接到阵列左上 4 行/列。
-- T2.3 已让 `ctrl_vec_consume` 驱动 `rd_vec_en`，并给 A lane1/2/3 增加 1/2/3 拍延迟形成 OS row-skew。
+- T2.3 已让 `ctrl_vec_consume` 驱动 `rd_vec_en`，并给 A lane1/2/3 增加 1/2/3 拍延迟形成 OS row-skew；这些延迟会在启动阶段自然插入 bubble。
 
 必须修复：
 
-1. 结果写回从单 word 改为 16-output tile serializer，输出顺序为 `result[r*4+c]`。
-2. `npu_power` 输出或 clock enable 真正作用于 PE。
-3. 增加 `PSUM/OUT_BUF`。
+1. `npu_power` 输出或 clock enable 真正作用于 PE。
+2. 增加 `PSUM/OUT_BUF`。
+3. 为 8x8/16x16/8x32 增加对应供数、valid 对齐和写回测试。
 
 T2.1 后的顶层数据组织目标：
 
@@ -119,12 +119,12 @@ tb/tb_npu_tile_gemm.v      -> ARR_CFG[7] tile-mode GEMM checker
 | `0x04` | `STATUS` | busy/done |
 | `0x08` | `INT_EN` | 中断使能 |
 | `0x0C` | `INT_CLR/PENDING` | 清/读 pending |
-| `0x10` | `M_DIM` | M |
-| `0x14` | `N_DIM` | N |
-| `0x18` | `K_DIM` | K |
-| `0x20` | `W_ADDR` | weight/B |
-| `0x24` | `A_ADDR` | activation/A |
-| `0x28` | `R_ADDR` | result/C |
+| `0x10` | `M_DIM` | GEMM 行数；卷积中为 `batch*OH*OW` |
+| `0x14` | `N_DIM` | GEMM 列数；卷积中为 `Cout` |
+| `0x18` | `K_DIM` | 归约维度；卷积中为 `Cin*KH*KW` |
+| `0x20` | `W_ADDR` | weight/B 或 W tile-pack 基地址 |
+| `0x24` | `A_ADDR` | activation/A 或 A tile-pack 基地址 |
+| `0x28` | `R_ADDR` | result/C 基地址 |
 | `0x30` | `ARR_CFG` | bit7=4x4 tile mode enable |
 | `0x34` | `CLK_DIV` | DFS 配置 |
 | `0x38` | `CG_EN` | clock gating 配置 |
@@ -153,9 +153,9 @@ if ARR_CFG[7] == 0:
 if ARR_CFG[7] == 1:
   for m_tile in 0..ceil(M/4)-1:
     for n_tile in 0..ceil(N/4)-1:
-      expose tile_m_base/tile_n_base
-      expose row/col valid mask
-      issue vec_consume for K cycles
+      expose tile_m_base/tile_n_base     // tile 左上角的全局 M/N 坐标
+      expose row/col valid mask          // 边界 tile 中哪些 r/c lane 有效
+      issue vec_consume for K cycles     // 每个逻辑 k 周期消费一组 A/W 4-lane vector
 ```
 
 目标行为：
@@ -185,16 +185,16 @@ active_rows, active_cols
 T2.3 已实现 Phase 2 的最小 tile 计数：
 
 ```text
-m_tile_idx = 0 .. ceil(M/4)-1
-n_tile_idx = 0 .. ceil(N/4)-1
+m_tile_idx = 0 .. ceil(M/4)-1       // M 方向 tile 编号
+n_tile_idx = 0 .. ceil(N/4)-1       // N 方向 tile 编号
 k_cycle    = 0 .. K+active_rows-2   // OS row-skew schedule
 ```
 
 并生成：
 
 ```text
-row_valid[r] = (m_tile_idx*4 + r) < M
-col_valid[c] = (n_tile_idx*4 + c) < N
+row_valid[r] = (m_tile_idx*4 + r) < M  // tile 内 row r 是否对应真实 C 行
+col_valid[c] = (n_tile_idx*4 + c) < N  // tile 内 col c 是否对应真实 C 列
 ```
 
 ## `npu_dma`
@@ -243,7 +243,7 @@ FP16 beat0 = lane0,lane1
 FP16 beat1 = lane2,lane3
 ```
 
-T2.2 已增加 4-lane read path，输出 `rd_vec[4*DATA_W-1:0]`。T2.3 需要让 `npu_top` feeder 基于 `rd_vec` 施加 OS row skew，并让 `npu_ctrl` 用 `rd_vec_en` 推进 buffer。
+T2.2 已增加 4-lane read path，输出 `rd_vec[4*DATA_W-1:0]`。T2.3 已让 `npu_top` feeder 基于 `rd_vec` 施加 OS row skew，并让 `npu_ctrl` 用 `rd_vec_en` 推进 buffer。
 
 ## `npu_power`
 

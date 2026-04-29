@@ -1,6 +1,6 @@
 # 架构修复路线
 
-更新时间：2026-04-27
+更新时间：2026-04-28
 
 本文把当前 RTL 原型演进到目标 NPU 的修复路线按依赖关系排列。详细任务表见 [task_breakdown.md](task_breakdown.md)。
 
@@ -14,7 +14,7 @@ A PPBuf -> one scalar -> pe_a_in[0]
 PE array -> result[0] only -> result FIFO
 ```
 
-当前已经为这条路径补上 `u_scalar_pe` 兼容计算和写回，使标量 dot product 可验证通过。但这仍与“4x4/16x16 脉动阵列并行 GEMM”的最终要求不一致；下一阶段必须从 4-lane A/W 供数和 16-output 收集入手。
+当前已经为这条路径补上 `u_scalar_pe` 兼容计算和写回，使标量 dot product 可验证通过。T2.4-T2.6 进一步补上了 4x4 tile-mode GEMM 的 4-lane 供数、16-output 收集和 INT8/FP16 golden 测试；16x16/8x32 高吞吐仍需要后续扩展。
 
 ## 修复层级
 
@@ -57,7 +57,7 @@ scripts/run_full_sim.ps1 -> compile and simulation completed
 1. 已完成 T2.1：定义 4x4 tile 数据布局、A/W tile-pack、OS row skew 和 C serializer 顺序。
 2. 已完成 T2.2：A/W buffer 支持 4-lane `rd_vec`，顶层接入阵列左上 4 行/列。
 3. 已完成 T2.3：`npu_ctrl` 支持 `m_tile/n_tile`、row/col mask、`vec_consume`，顶层接入 OS row-skew feeder。
-4. 结果 serializer 写回 16 个输出。
+4. 已完成 T2.4：结果 serializer 写回 16 个输出，按 row-wise burst 写回 DRAM。
 5. 边界 tile 用 mask 处理。
 
 完成标准：
@@ -163,7 +163,7 @@ conv + ReLU + conv 两层通过
 
 ### 先预展开 im2col，再做 on-the-fly
 
-直接做 on-the-fly im2col 会同时引入窗口地址、边界 padding、stride、DMA 非连续访问等复杂度。建议先让 CPU/脚本在 DRAM 中准备 `A_im2col`，验证 GEMM 核心正确后再把 im2col 前端搬到硬件。
+直接做 on-the-fly im2col 会同时引入窗口地址、边界 padding、stride、DMA 非连续访问等复杂度。建议先让 CPU/脚本在 DRAM 中准备 `A_im2col`，验证 GEMM 核心正确后再把 im2col 前端搬到硬件。卷积变量含义和 `M/N/K` 映射见 [conv_gemm_mapping.md](conv_gemm_mapping.md)。
 
 ### 先 4x4，再 16x16
 

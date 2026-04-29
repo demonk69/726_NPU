@@ -1,8 +1,8 @@
 # NPU 调试检查清单
 
-更新时间：2026-04-27
+更新时间：2026-04-28
 
-本文用于后续每次修 RTL 时快速定位问题。当前顶层标量路径已通过，后续优先围绕“4-lane DMA/PPBuf 供数 -> PE array -> tile serializer -> DMA 写回”这条链路排查。
+本文用于后续每次修 RTL 时快速定位问题。当前顶层标量路径和 4x4 tile-mode GEMM 路径已通过，后续优先围绕“4-lane DMA/PPBuf 供数 -> PE array -> tile serializer -> DMA 写回”这条链路排查。
 
 ## 快速判断
 
@@ -123,11 +123,15 @@ OS：
 
 ## 4x4 tile 检查
 
-实现 4x4 后，每个 tile 应满足：
+当前 4x4 tile 应满足：
 
 ```text
-A lane: OS row r receives A[m0+r,k-r] at physical cycle k
-W lane: OS col c receives W[k,n0+c]
+# m0/n0: 当前 4x4 输出 tile 左上角全局坐标。
+# r/c: tile 内部 row/col lane。
+# k: GEMM 归约维度坐标。
+A lane: OS row r receives A[m0+r,t-r] at physical cycle t
+W lane: row r sees W[t-r,n0+c] after vertical propagation
+startup bubble: row r is zero for the first r physical cycles
 valid mask: edge tile inactive lane 不写回
 result index: result[r*4+c] = C[m0+r,n0+c]
 result count: active_rows * active_cols

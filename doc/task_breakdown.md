@@ -1,6 +1,6 @@
 # 任务分解
 
-更新时间：2026-04-27
+更新时间：2026-04-28
 
 本文是后续协作的主任务清单。建议按任务编号逐项解决，每完成一项就更新本文状态和验证结果。
 
@@ -48,7 +48,7 @@ scripts/run_soc_sim.ps1  -> still blocked by dram_model axi_arlen and PicoRV32 P
 | ID | 状态 | 任务 | 主要文件 | 验收标准 |
 |---|---|---|---|---|
 | T2.1 | DONE | 定义 4x4 tile 数据布局 | `doc/architecture.md` | A/W/C tile 地址和 lane 顺序明确 |
-| T2.2 | DONE | A/W buffer 从标量输出升级为 4-lane 输出 | `pingpong_buf`, `npu_top` | 每拍可输出 4 个 A 和 4 个 W |
+| T2.2 | DONE | A/W buffer 从标量输出升级为 4-lane 输出 | `pingpong_buf`, `npu_top` | 每个逻辑 `k` 周期可输出一组 A/W 4-lane vector |
 | T2.3 | DONE | `npu_ctrl` 从单 `C[i,j]` 改为 4x4 tile 计数 | `npu_ctrl` | 支持 M/N 非 4 整数倍，边界 mask 正确 |
 | T2.4 | DONE | 阵列输出 serializer 收集 16 个结果 | `npu_top` | 一个 4x4 tile 写回 16 个 32-bit word |
 | T2.5 | DONE | 建立 4x4 INT8 GEMM 测试 | `tb/` | 与 Python golden 一致 |
@@ -57,12 +57,17 @@ scripts/run_soc_sim.ps1  -> still blocked by dram_model axi_arlen and PicoRV32 P
 T2.1 结论：
 
 ```text
+# M/N/K: GEMM 行、列、归约维度；卷积中 M=batch*OH*OW, N=Cout, K=Cin*KH*KW。
+# m0/n0: 当前 4x4 输出 tile 左上角坐标。
+# r/c: tile 内部 row/col lane。
+# k: 当前归约维度坐标。
 OS: PE row -> M lane, PE col -> N lane, PE(r,c) -> C[m0+r,n0+c]
 A_TILE[m_tile][k][r] = A[m0+r,k]
 W_TILE[n_tile][k][c] = W[k,n0+c]
 OS physical cycle t:
   w_in[c]   = W_TILE[t][c]
   act_in[r] = A_TILE[t-r][r]  // row skew, out of range -> 0
+  // 前 r 个物理周期 row r 输入为 0；不是第 0 拍 4 个 A row 全部有效
 C serializer order:
   result_index = r*4 + c
   C_ADDR = R_ADDR + ((m0+r) * N + (n0+c)) * 4

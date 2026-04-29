@@ -1,6 +1,6 @@
 # 当前实现状态
 
-更新时间：2026-04-27
+更新时间：2026-04-28
 
 
 
@@ -26,6 +26,9 @@ $env:Path = 'E:\iverilog\bin;' + $env:Path
 | `tb/tb_npu_scalar_smoke.v` | PASS | 顶层标量 INT8 OS 路径可用，`CFG_SHAPE` start 锁存有效 |
 | `tb/tb_pingpong_buf_vec.v` | PASS | PPBuf 4-lane INT8/FP16 vector read 可用 |
 | `tb/tb_npu_ctrl_tile.v` | PASS | 4x4 tile planner 和 M/N 边界 mask 可用 |
+| `tb/tb_npu_tile_writeback.v` | PASS | 4x4 tile 16 个阵列输出可通过 serializer 按 row-wise burst 写回 |
+| `tb/tb_npu_tile_gemm.v` + `tb/tile4/int8_4x4x4` | PASS | 4x4 INT8 GEMM 与 Python golden 一致 |
+| `tb/tb_npu_tile_gemm.v` + `tb/tile4/fp16_4x4x4` | PASS | 4x4 FP16 GEMM 与 FP32 golden 容差一致 |
 | 当前源列表手工编译运行 `tb_comprehensive.v` | 28 PASS / 0 FAIL | Phase 1 顶层标量兼容路径已恢复 |
 | `scripts/run_full_sim.ps1` | 编译和仿真完成 | 脚本源列表与 testbench 参数已对齐 |
 | `scripts/run_soc_sim.ps1` | 编译失败 | `dram_model.v` 的 `axi_arlen` 绑定问题和 PicoRV32 PCPI 端口不匹配 |
@@ -41,21 +44,21 @@ $env:Path = 'E:\iverilog\bin;' + $env:Path
 7. `npu_power` 有 DFS 和 row/col clock gating 行为模型。
 8. `npu_top` 有一条 Phase 1 标量兼容路径：PPBuf 标量输出进入 `u_scalar_pe`，结果通过 FIFO 写回。
 9. `npu_ctrl` 已输出 `cfg_shape_latched`，当前任务启动后修改 `CFG_SHAPE` 不影响正在运行的阵列配置。
-10. T2.1 已定义 4x4 tile 数据布局：OS 模式采用 `PE row -> M lane`、`PE col -> N lane`，A/W 使用 4-lane tile-pack，C 按 `result[r*4+c]` 输出。
-11. T2.2 已给 `pingpong_buf` 增加 4-lane vector read port，并在 `npu_top` 中把 W/A vector 接入 `reconfig_pe_array` 左上 4x4 边界。
+10. T2.1 已定义 4x4 tile 数据布局：OS 模式采用 `PE row -> M lane`、`PE col -> N lane`，A/W 使用 4-lane tile-pack，A row 由 feeder 错拍输入，C 按 `result[r*4+c]` 输出。
+11. T2.2 已给 `pingpong_buf` 增加 4-lane vector read port，并在 `npu_top` 中把 W/A vector 接入 `reconfig_pe_array` 左上 4x4 边界；其中 A lane1/2/3 进入 PE 前会延迟 1/2/3 拍。
 12. T2.3 已实现 `ARR_CFG[7]` 控制的 4x4 tile planner：输出 tile base、row/col mask、`vec_consume` 和 OS row-skew feeder。
+13. T2.4 已实现阵列 16-output serializer 和 row-wise writeback，4x4 tile 输出顺序为 `result[r*4+c]`。
+14. T2.5/T2.6 已建立 4x4 INT8/FP16 tile-mode GEMM golden 测试。
 
 ## 当前关键差距
 
-1. 4x4 tile mode 已能产生 vector consume 和 row/col mask，但结果仍未从阵列 serializer 写回。
-2. 当前可验证写回路径仍是标量 `u_scalar_pe` 结果，阵列 16 个输出还没有进入结果 FIFO。
-3. 当前可验证写回路径是标量 `u_scalar_pe` 结果，还没有收集多列或多行阵列输出。
-4. `npu_ctrl` 的循环单位仍是单个 `C[i][j]`，不是矩阵 tile。
-5. 当前没有 `PSUM/OUT_BUF`，无法支持 K-split、多层卷积中间结果暂存。
-6. 当前没有 descriptor 队列，NPU 不具备自主多层调度能力。
-7. DMA 读通道固定 `ARLEN=0`，未达到 AXI burst 带宽利用率目标。
-8. `npu_power` 输出没有接入 PE 主时钟路径。
-9. SoC 仿真仍存在 DRAM 模型信号绑定和 PicoRV32 PCPI 端口不匹配。
+1. 当前 4x4 tile-mode GEMM 已通过 INT8/FP16 基础验证，但 8x8/16x16/8x32 还没有宽向量供数和完整写回验证。
+2. 当前没有 `PSUM/OUT_BUF`，无法支持 K-split、多层卷积中间结果暂存。
+3. 当前没有 descriptor 队列，NPU 不具备自主多层调度能力。
+4. DMA 读通道固定 `ARLEN=0`，未达到 AXI burst 带宽利用率目标。
+5. `npu_power` 输出没有接入 PE 主时钟路径。
+6. SoC 仿真仍存在 DRAM 模型信号绑定和 PicoRV32 PCPI 端口不匹配。
+7. 当前没有硬件 on-the-fly im2col 地址发生器；卷积需要先由软件/testbench 预展开或预打包为 GEMM/tile 流。
 
 ## 不应继续引用的旧结论
 
@@ -64,11 +67,12 @@ $env:Path = 'E:\iverilog\bin;' + $env:Path
 | `tb_comprehensive` 失败 2/28 PASS | 已过期，当前是 28/28 PASS |
 | 全量回归 903 PASS | 当前不能作为事实引用 |
 | SoC 集成已验证 | 当前需要重新修复和验证 |
-| 16x16/8x32 已完成高吞吐矩阵乘 | 阵列存在，但顶层未喂满、未完整写回 |
+| 4x4 tile 结果还没有从阵列写回 | 已过期，T2.4 已完成 serializer 和 row-wise writeback |
+| 16x16/8x32 已完成高吞吐矩阵乘 | 阵列存在，但顶层尚未喂满更大形态，也缺少完整验证 |
 | DMA 读通道支持多拍 burst | 当前读通道 `ARLEN=0` |
 | DFS/时钟门控已实际降功耗 | 行为模块输出悬空 |
 | 支持 INT16 | 当前 PE 只有 INT8/FP16 |
 
 ## 当前一句话定位
 
-这是一个具备 PE 算术和 NPU 外围框架的原型。下一阶段的重点是把顶层数据组织从“标量点积路径”升级为“可验证的 4x4 tile GEMM 路径”，再扩展到 descriptor、多层卷积和 16x16 高吞吐阵列。
+这是一个具备 PE 算术、NPU 外围框架和可验证 4x4 tile GEMM 路径的原型。下一阶段重点是 AXI burst DMA 和带宽统计，然后再扩展到 PSUM/OUT buffer、descriptor、多层卷积和 16x16 高吞吐阵列。

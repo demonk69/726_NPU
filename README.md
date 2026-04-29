@@ -2,22 +2,22 @@
 
 面向边缘 AI 推理的异构处理器原型：PicoRV32 CPU 负责控制和任务编排，NPU 负责矩阵乘和卷积中的高负载计算。项目目标是通过 AXI4-Lite 配置通路和 AXI4 DMA 数据通路，实现可验证、可扩展、低功耗的 NPU 加速器。
 
-更新时间：2026-04-27
+更新时间：2026-04-28
 
 ## 当前结论
 
-当前仓库已经具备 PE、AXI-Lite、DMA、Ping-Pong Buffer、16x16 可重构阵列外壳和 SoC 框架。Phase 1 已恢复顶层最小正确性：标量 INT8 dot product 可通过 `npu_top` 完成 DMA 读入、PPBuf 供数、单 PE 计算、FIFO 写入和 DMA 写回。
+当前仓库已经具备 PE、AXI-Lite、DMA、Ping-Pong Buffer、16x16 可重构阵列外壳和 SoC 框架。Phase 1 已恢复顶层标量最小正确性；Phase 2 已完成可验证的 4x4 tile-mode GEMM 路径，包括 16-output serializer、row-wise writeback、INT8/FP16 4x4 golden 测试。
 
 已确认可依赖：
 
 - `pe_top` 单 PE INT8/FP16、WS/OS 基本功能通过单元测试。
 - AXI-Lite 寄存器文件、DMA、PPBuf、阵列模块均有 RTL 框架。
 - `reconfig_pe_array` 已实例化 16x16 物理 PE，并有 4x4/8x8/16x16/8x32 形态选择接口。
-- `npu_top` 当前有一条标量兼容计算路径，`tb_npu_scalar_smoke.v` 与 `tb_comprehensive.v` 已通过。
+- `npu_top` 保留标量兼容路径，同时在 `ARR_CFG[7]=1` 时可走 4x4 tile-mode 阵列路径。
+- `tb_npu_scalar_smoke.v`、`tb_npu_tile_writeback.v`、`tb_npu_tile_gemm.v` 与 `tb_comprehensive.v` 已通过。
 
 当前不能作为完成项声明：
 
-- 顶层 NPU 已完成真正 4x4/16x16 并行矩阵乘法。
 - 16x16 或 8x32 阵列已被数据喂满并产生并行吞吐。
 - DMA 读通道已经支持多拍 INCR burst。
 - SoC 集成当前已通过验证。
@@ -38,11 +38,15 @@ CPU writes descriptor list
   -> next layer uses previous output as input
 ```
 
-卷积映射为：
+卷积映射为 GEMM。你的理解是正确的，普通 dense Conv2D 可按下面的行/列/归约维度展开；更完整的变量含义、stride/pad/dilation 公式和索引关系见 [doc/conv_gemm_mapping.md](doc/conv_gemm_mapping.md)。
 
 ```text
+# A_im2col[M,K] * W_col[K,N] = C[M,N]
+# M: GEMM 行数，卷积中等于 batch 内所有输出空间位置数量。
+# K: GEMM 归约维度，卷积中等于一个输入卷积窗口的元素数量。
+# N: GEMM 列数，卷积中等于输出通道数/卷积核个数。
 A_im2col[M,K] * W_col[K,N] = C[M,N]
-M = OH * OW * batch
+M = batch * OH * OW
 K = Cin * KH * KW
 N = Cout
 ```
@@ -59,6 +63,7 @@ N = Cout
 |---|---|
 | [doc/current_status.md](doc/current_status.md) | 当前 RTL 事实、已验证项和不应再引用的旧结论 |
 | [doc/architecture.md](doc/architecture.md) | 目标 NPU 架构、PE 数据流、FSM、AXI/DMA 带宽设计 |
+| [doc/conv_gemm_mapping.md](doc/conv_gemm_mapping.md) | 卷积映射为 GEMM 的公式、变量含义和索引展开 |
 | [doc/module_reference.md](doc/module_reference.md) | 各 RTL 模块职责、当前差距和改造方向 |
 | [doc/task_breakdown.md](doc/task_breakdown.md) | 后续任务拆分，按优先级一个一个解决 |
 | [doc/user_manual.md](doc/user_manual.md) | CPU 侧编程模型和寄存器/descriptor 规划 |
@@ -114,6 +119,9 @@ PASS=19 FAIL=0
 tb/tb_npu_scalar_smoke.v -> PASS
 tb/tb_pingpong_buf_vec.v -> PASS
 tb/tb_npu_ctrl_tile.v    -> PASS
+tb/tb_npu_tile_writeback.v -> PASS
+tb/tb_npu_tile_gemm.v + tb/tile4/int8_4x4x4 -> PASS
+tb/tb_npu_tile_gemm.v + tb/tile4/fp16_4x4x4 -> PASS
 tb_comprehensive.v       -> ALL 28 TESTS PASSED
 scripts/run_full_sim.ps1 -> compile and simulation completed
 ```

@@ -158,10 +158,10 @@ wire ctrl_w_ppb_swap, ctrl_a_ppb_swap, ctrl_w_ppb_clear, ctrl_a_ppb_clear;
 wire ctrl_r_fifo_clear;
 wire [1:0] ctrl_cfg_shape;
 wire ctrl_tile_mode, ctrl_vec_consume;
-wire [31:0] ctrl_tile_m_base, ctrl_tile_n_base;
-wire [3:0] ctrl_tile_row_valid, ctrl_tile_col_valid;
-wire [2:0] ctrl_tile_active_rows, ctrl_tile_active_cols;
-wire [15:0] ctrl_tile_k_cycle;
+wire [31:0] ctrl_tile_m_base, ctrl_tile_n_base; // global C tile origin: m0/n0
+wire [3:0] ctrl_tile_row_valid, ctrl_tile_col_valid; // valid r/c lanes for edge tiles
+wire [2:0] ctrl_tile_active_rows, ctrl_tile_active_cols; // row/col count to serialize
+wire [15:0] ctrl_tile_k_cycle; // OS feeder cycle, includes row-skew drain cycles
 
 npu_ctrl #(
     .ROWS  (PHY_ROWS),       // controller sees physical dimensions
@@ -373,6 +373,8 @@ npu_dma #(
 
 wire pe_data_ready = !w_ppb_buf_empty_int && !a_ppb_buf_empty_int;
 wire pe_consume = pe_en && (pe_data_ready || pe_flush);
+// One packed A vector and one packed W vector are consumed only when both PPBufs
+// have a valid 4-lane preview for the controller's current k cycle.
 wire tile_vec_fire = ctrl_vec_consume &&
                      w_ppb_rd_vec_valid &&
                      a_ppb_rd_vec_valid;
@@ -410,6 +412,14 @@ reg [DATA_W-1:0] a_lane1_d0;
 reg [DATA_W-1:0] a_lane2_d0, a_lane2_d1;
 reg [DATA_W-1:0] a_lane3_d0, a_lane3_d1, a_lane3_d2;
 
+// OS row-skew feeder:
+//   row0 gets A[m0+0,k] immediately,
+//   row1 gets A[m0+1,k] after 1 cycle,
+//   row2 gets A[m0+2,k] after 2 cycles,
+//   row3 gets A[m0+3,k] after 3 cycles.
+// The first r cycles of row r are zero bubbles; this is required so A[k] meets
+// the matching W[k] after W has shifted down r rows.
+// This aligns each row with the vertically shifted W[k,n0+c] stream.
 always @(posedge sys_clk) begin
     if (!sys_rst_n || !ctrl_tile_mode) begin
         a_lane1_d0 <= {DATA_W{1'b0}};
@@ -515,12 +525,12 @@ reconfig_pe_array #(
 // ---------------------------------------------------------------------------
 // Result FIFO interface
 // ---------------------------------------------------------------------------
-reg [ACC_W-1:0] tile_result_buf [0:15];
+reg [ACC_W-1:0] tile_result_buf [0:15]; // captured C tile, index = r*4+c
 reg             tile_ser_busy;
-reg [2:0]       tile_ser_active_rows;
-reg [2:0]       tile_ser_active_cols;
-reg [1:0]       tile_ser_row;
-reg [1:0]       tile_ser_col;
+reg [2:0]       tile_ser_active_rows;   // valid rows in current edge/full tile
+reg [2:0]       tile_ser_active_cols;   // valid cols in current edge/full tile
+reg [1:0]       tile_ser_row;           // serializer row r
+reg [1:0]       tile_ser_col;           // serializer col c
 
 wire [3:0] tile_ser_idx = {tile_ser_row, tile_ser_col};
 wire       tile_ser_fire = tile_ser_busy && !r_fifo_full;
@@ -543,6 +553,8 @@ always @(posedge sys_clk) begin
         for (tile_ser_i = 0; tile_ser_i < 16; tile_ser_i = tile_ser_i + 1)
             tile_result_buf[tile_ser_i] <= {ACC_W{1'b0}};
     end else if (tile_result_capture) begin
+        // Capture all 16 PE outputs at once, then push only active rows/cols
+        // into the result FIFO in row-major order for DMA row-wise writeback.
         for (tile_ser_i = 0; tile_ser_i < 16; tile_ser_i = tile_ser_i + 1)
             tile_result_buf[tile_ser_i] <= pe_array_result[tile_ser_i*ACC_W +: ACC_W];
         tile_ser_active_rows <= ctrl_tile_active_rows;

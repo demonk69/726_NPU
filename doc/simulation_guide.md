@@ -1,8 +1,8 @@
 # 仿真指南
 
-更新时间：2026-04-27
+更新时间：2026-04-28
 
-本文给出当前可复现的仿真入口和后续验证顺序。Phase 1 已恢复顶层标量兼容路径；真正 4x4/16x16 并行 tile 仍是后续任务。
+本文给出当前可复现的仿真入口和后续验证顺序。Phase 1 已恢复顶层标量兼容路径；Phase 2 已完成可验证的 4x4 tile-mode GEMM 路径。16x16/8x32 高吞吐、AXI burst、descriptor 和多层卷积仍是后续任务。
 
 ## 工具
 
@@ -117,6 +117,34 @@ ALL 28 TESTS PASSED
 
 该测试当前可作为 Phase 1 顶层标量兼容路径的回归基线。
 
+### 4x4 tile writeback 和 GEMM
+
+```powershell
+$env:Path = 'E:\iverilog\bin;' + $env:Path
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_regression.ps1
+```
+
+当前已覆盖：
+
+```text
+tb_npu_tile_writeback.v + 4x4 K=1 INT8 tile -> PASS
+tb_npu_tile_gemm.v + tb/tile4/int8_4x4x4   -> PASS，ALL 16 CHECKS PASSED
+tb_npu_tile_gemm.v + tb/tile4/fp16_4x4x4   -> PASS，ALL 16 CHECKS PASSED
+```
+
+变量含义：
+
+```text
+# M/N/K 是 GEMM 维度；卷积中 M=batch*OH*OW，N=Cout，K=Cin*KH*KW。
+# m_tile/n_tile 是 4x4 输出 tile 编号。
+# r/c 是 tile 内部 row/col lane。
+# k 是归约维度坐标。
+A_TILE[m_tile][k][r] = A[m0+r,k]
+W_TILE[n_tile][k][c] = W[k,n0+c]
+```
+
+`A_TILE[k][0..3]` 是 PPBuf 每个逻辑 `k` 周期输出的 4-lane vector。进入 PE array 前，`npu_top` 会把 A lane1/2/3 分别延迟 1/2/3 拍；因此前几个物理周期包含 bubble，这正是 OS 图里的错拍输入。
+
 ### `run_full_sim.ps1`
 
 ```powershell
@@ -150,8 +178,8 @@ soc_top.v: PicoRV32 PCPI ports do not match the referenced CPU module
 |---|---|---|
 | `tb_npu_scalar_smoke.v` | 一个非零 INT8 dot product 写回正确 | T1.3 |
 | `tb_dma_burst.v` | AXI INCR burst 地址和数据正确 | T3.4 |
-| `tb_npu_tile_gemm.v` + `tb/tile4/int8_4x4x4` | 使用 T2.1 tile-pack 的 4x4 INT8 GEMM tile | T2.5 |
-| `tb_npu_tile_gemm.v` + `tb/tile4/fp16_4x4x4` | 使用 T2.1 tile-pack 的 4x4 FP16 GEMM tile | T2.6 |
+| `tb_npu_tile_gemm.v` + `tb/tile4/int8_4x4x4` | 使用 T2.1 tile-pack 的 4x4 INT8 GEMM tile | DONE/T2.5 |
+| `tb_npu_tile_gemm.v` + `tb/tile4/fp16_4x4x4` | 使用 T2.1 tile-pack 的 4x4 FP16 GEMM tile | DONE/T2.6 |
 | `tb_gemm_ksplit.v` | K-split psum 累加正确 | T4.5 |
 | `tb_desc_two_layer.v` | descriptor 多层顺序执行 | T5.4 |
 | `tb_conv2d_relu.v` | 卷积 + 激活 | T6.4 |
@@ -205,6 +233,8 @@ T2.5/T2.6 的 testbench 使用预打包 A/W tile 流：
 A_TILE[m_tile][k][r] = A[m0+r,k]
 W_TILE[n_tile][k][c] = W[k,n0+c]
 ```
+
+物理输入不是从第 0 拍开始 4 个 A row 全部有效；row `r` 实际收到的是 `A_TILE[t-r][r]`，越界时为 0。
 
 INT8 4-lane vector 用一个 32-bit word：
 

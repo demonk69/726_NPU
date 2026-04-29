@@ -20,7 +20,7 @@ localparam REG_CFG_SHAPE = 32'h3C;
 
 localparam CTRL_START    = 32'h01;
 localparam CTRL_OS       = 32'h10;
-localparam ARR_TILE4     = 32'h80;
+localparam ARR_TILE4     = 32'h80; // ARR_CFG[7]: enable 4x4 tile mode
 
 reg clk = 1'b0;
 always #(CLK_T/2) clk = ~clk;
@@ -75,7 +75,7 @@ wire npu_irq;
 reg [31:0] dram [0:DRAM_SZ-1];
 reg [31:0] aw_addr_seen [0:7];
 reg [7:0]  aw_len_seen  [0:7];
-integer aw_count;
+integer aw_count; // number of result row write bursts observed
 
 npu_top #(
     .DATA_W(DATA_W),
@@ -182,6 +182,7 @@ always @(posedge clk) begin
     end else begin
         m_awready <= 1'b1;
         if (m_awvalid && m_awready && !wr_phase) begin
+            // Capture each row-wise writeback burst address and length.
             wr_phase <= 1'b1;
             wr_base  <= m_awaddr;
             wr_cnt   <= 8'd0;
@@ -313,7 +314,9 @@ initial begin
     s_araddr = 0; s_arvalid = 0; s_rready = 0;
 
     // K=1 4x4 tile:
-    // A lanes = [1,2,3,4], W lanes = [5,6,7,8].
+    //   M/N are both 4, so there is one full output tile.
+    //   A lanes are rows r=0..3, W lanes are columns c=0..3.
+    //   Expected C[r,c] = A[r,0] * W[0,c].
     dram[32'h100 >> 2] = 32'h08070605;
     dram[32'h120 >> 2] = 32'h04030201;
 

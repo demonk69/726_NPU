@@ -1,6 +1,6 @@
 # NPU 目标架构方案
 
-更新时间：2026-04-27
+更新时间：2026-04-28
 
 本文描述项目应收敛到的目标架构，并标注当前 RTL 与目标之间的差距。评分要求以 4x4 脉动阵列、AXI-Lite/Burst AXI、DMA、低功耗、RTL/FPGA 验证为基础；动态可重构阵列和更高带宽/算力作为优化项。
 
@@ -45,14 +45,42 @@ post-process: bias, ReLU/ReLU6, quant/saturate
 
 ## 卷积到 GEMM 的映射
 
+普通 dense Conv2D（`groups=1`）可以统一映射为 `A_im2col[M,K] * W_col[K,N] = C[M,N]`。详细推导、stride/padding/dilation 公式和 layout 说明见 [conv_gemm_mapping.md](conv_gemm_mapping.md)。
+
 ```text
-M = OH * OW * batch
+# M: GEMM 行数；卷积中表示 batch 内所有输出空间位置。
+# K: GEMM 归约维度；卷积中表示一个卷积窗口内的输入元素数。
+# N: GEMM 列数；卷积中表示输出通道数，也就是卷积核个数。
+M = batch * OH * OW
 K = Cin * KH * KW
 N = Cout
 
-A_im2col[M,K] : 每一行是一个输出像素位置展开后的输入窗口
-W_col[K,N]    : 每一列是一个输出通道的卷积核
-C[M,N]        : 输出特征图按空间位置和输出通道排列
+# A_im2col 的每一行对应一个输出像素位置 (b,oh,ow) 的完整输入窗口。
+A_im2col[M,K]
+
+# W_col 的每一列对应一个输出通道 cout 的卷积核，展平顺序必须和 A 的 K 维一致。
+W_col[K,N]
+
+# C 的每一行对应一个输出空间位置，每一列对应一个输出通道。
+C[M,N]
+```
+
+索引关系：
+
+```text
+# b/oh/ow: 输出元素所在的 batch、输出行、输出列。
+# cin/kh/kw: 卷积窗口中的输入通道、核行、核列。
+# cout: 输出通道。
+m = (b * OH + oh) * OW + ow
+k = (cin * KH + kh) * KW + kw
+n = cout
+
+ih = oh * stride_h + kh * dilation_h - pad_h
+iw = ow * stride_w + kw * dilation_w - pad_w
+
+A_im2col[m,k] = (0 <= ih < IH and 0 <= iw < IW) ? IFM[b,cin,ih,iw] : 0
+W_col[k,n]    = WEIGHT[cout,cin,kh,kw]
+C[m,n]        = OFM[b,oh,ow,cout]  // NHWC 视角；NCHW 只改变外部存储顺序
 ```
 
 建议不要在 DRAM 中完整物理展开 im2col。更好的方式是 DMA/地址发生器按窗口顺序读取 IFM，并在片上形成 `A_BUF` tile。第一阶段为了降低复杂度，可以先由 CPU/脚本在 DRAM 中预展开 im2col，等 GEMM 路径正确后再做 on-the-fly im2col。
@@ -65,17 +93,21 @@ C[M,N]        : 输出特征图按空间位置和输出通道排列
 desc {
   op_type        // GEMM, CONV2D, FC
   dtype          // INT8, FP16
-  dataflow       // WS, OS
-  M, N, K
-  IH, IW, OH, OW, Cin, Cout, KH, KW, stride, pad
-  ifm_addr
-  weight_addr
-  bias_addr
-  psum_addr
-  ofm_addr
+  dataflow       // WS or OS
+  M, N, K        // GEMM dimensions; for conv: M=batch*OH*OW, N=Cout, K=Cin*KH*KW
+  IH, IW         // input feature map height/width
+  OH, OW         // output feature map height/width
+  Cin, Cout      // input/output channel count
+  KH, KW         // kernel height/width
+  stride, pad    // convolution window stride and zero-padding
+  ifm_addr       // input feature map base, or pre-expanded A base
+  weight_addr    // weight/kernel base
+  bias_addr      // optional bias base, 0 if unused
+  psum_addr      // partial-sum buffer base for K-split, 0 if unused
+  ofm_addr       // output feature map/result base
   activation     // none, ReLU, ReLU6
   flags          // first_k, last_k, last_layer, irq_en
-  next_desc
+  next_desc      // next descriptor address, 0 means end
 }
 ```
 
@@ -98,7 +130,7 @@ desc.last_layer == 1 or desc.next_desc == 0
 基础验收先实现真正的 4x4：
 
 - 16 个 PE 同时参与计算。
-- 每拍向阵列边界提供 4 个 activation 和 4 个 weight。
+- 每个逻辑 `k` 周期从 PPBuf 读取 4 个 activation lane 和 4 个 weight lane；activation 进入 PE row 前要做 row-skew，前几个物理周期不是 4 个 row 全部有效。
 - 每个 tile 产生最多 16 个输出。
 - 支持 INT8 和 FP16。
 - 支持 WS 和 OS。
@@ -259,11 +291,28 @@ PE(r,c)  -> C[m0+r, n0+c]
 ```text
 logical cycle t = 0 .. K+3
 
+# w_in[c] 是送入 column c 顶部的 W lane。
+# act_in[r] 是已经过 row-skew 后送入 row r 左侧/边界的 A lane。
 w_in[c]   = (t < K && col_valid[c]) ? W_TILE[n_tile][t][c] : 0
 act_in[r] = (0 <= t-r < K && row_valid[r])
               ? A_TILE[m_tile][t-r][r]
               : 0
 ```
+
+因此启动阶段有 bubble，不是第 0 拍就 4 个 row 全部有效。以 `active_rows=4` 为例：
+
+```text
+physical t | row0 act_in | row1 act_in | row2 act_in | row3 act_in
+-----------|-------------|-------------|-------------|------------
+0          | A[0,0]      | 0           | 0           | 0
+1          | A[0,1]      | A[1,0]      | 0           | 0
+2          | A[0,2]      | A[1,1]      | A[2,0]      | 0
+3          | A[0,3]      | A[1,2]      | A[2,1]      | A[3,0]
+...
+K          | 0           | A[1,K-1]    | A[2,K-2]    | A[3,K-3]
+```
+
+`4-lane vector` 指 PPBuf/feeder 在逻辑 `k` 维度上每次取出 `A_TILE[k][0..3]` 和 `W_TILE[k][0..3]`；它不表示 4 个 A row 从第 0 个物理周期就同时送到 PE。
 
 这样 PE(r,c) 在物理周期 `t = k + r` 同时看到：
 
@@ -352,8 +401,8 @@ for r in 0..active_rows-1:
 后续 RTL 按以下接口推进：
 
 ```text
-a_vec[4]       // A lane r
-w_vec[4]       // W lane c
+a_vec[4]       // PPBuf 输出的 A_TILE[k][r]；进入 PE row 前会做 row-skew
+w_vec[4]       // PPBuf 输出的 W_TILE[k][c]
 row_valid[4]
 col_valid[4]
 result_vec[16] // result[r*4+c]
@@ -504,7 +553,7 @@ raw = 2.0 GB/s
 | 目标 | 当前状态 | 后续任务 |
 |---|---|---|
 | 顶层标量 dot product | Phase 1 已通过，`u_scalar_pe` 兼容路径可写回正确结果 | 作为后续回归基线保留 |
-| 4-lane A/W buffer | T2.2 已增加 `rd_vec`/`rd_vec_en`，顶层已接入阵列左上 4x4 | T2.3 切换 controller 到 vector consume |
+| 4-lane A/W buffer | T2.2/T2.3 已增加 `rd_vec`/`rd_vec_en`，并由 controller 的 `vec_consume` 推进 | 保持回归 |
 | 4x4 tile 计数和 mask | T2.3 已通过 `ARR_CFG[7]` 启用 tile planner，支持 M/N 边界 mask | 保持回归 |
 | 4x4 真并行 tile | T2.4/T2.5/T2.6 已完成 serializer/writeback 和 4x4 INT8/FP16 golden 测试 | Phase 3 进入 AXI burst DMA |
 | 多层卷积 | 无 descriptor、无 OUT/PSUM buffer | 增加 descriptor controller 和 PSUM/OUT_BUF |

@@ -119,6 +119,8 @@ Run-Test -Name "npu_tile_writeback" `
     -ExtraSrc @("$TbDir\tb_npu_tile_writeback.v")
 
 # ---- 2b. 4x4 Tile GEMM ----
+# Each case sets M=N=K=4 in test_params.vh.
+# The input hex files contain pre-packed A_TILE[k][r] and W_TILE[k][c] streams.
 Run-Test -Name "tile4/int8_4x4x4" `
     -VvpOut "$SimDir\reg_tile4_int8_4x4x4.vvp" `
     -IncDir "$TbDir\tile4\int8_4x4x4" `

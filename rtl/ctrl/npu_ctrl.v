@@ -150,6 +150,8 @@ wire        cfg_irq_clr = ctrl_reg[6];   // CPU writes 1 → clear IRQ
 wire [1:0]  cfg_data_bytes = (cfg_mode == 2'b00) ? 2'd1 : 2'd2;
 wire [15:0] cfg_scalar_elem_bytes = {14'b0, cfg_data_bytes};
 wire [15:0] cfg_vector_elem_bytes = cfg_scalar_elem_bytes << 2;
+// Warm-up uses live config because shadow registers latch on the same start edge.
+// In tile mode each k step loads 4 lanes, so bytes per k are 4*element_bytes.
 wire [15:0] cfg_start_tile_len = k_dim[15:0] *
                                   (arr_cfg[7] ? cfg_vector_elem_bytes
                                               : cfg_scalar_elem_bytes);
@@ -218,16 +220,17 @@ wire [1:0] data_bytes = (lk_mode == 2'b00) ? 2'd1 : 2'd2;
 // ---------------------------------------------------------------------------
 reg [31:0] tile_i;
 reg [31:0] tile_j;
-reg [2:0]  wb_row;
+reg [2:0]  wb_row;  // tile-mode writeback row r within the current 4x4 C tile
 
 localparam [31:0] TILE_LANES = 32'd4;
+// Scalar mode iterates individual C[i,j]; tile mode iterates 4x4 C tiles.
 wire [31:0] tile_m_tiles = tile_mode ? ((lk_m_dim + 32'd3) >> 2) : lk_m_dim;
 wire [31:0] tile_n_tiles = tile_mode ? ((lk_n_dim + 32'd3) >> 2) : lk_n_dim;
 wire [31:0] tile_iter_m_count = (tile_m_tiles == 32'd0) ? 32'd1 : tile_m_tiles;
 wire [31:0] tile_iter_n_count = (tile_n_tiles == 32'd0) ? 32'd1 : tile_n_tiles;
 
-assign tile_m_base = tile_mode ? (tile_i << 2) : tile_i;
-assign tile_n_base = tile_mode ? (tile_j << 2) : tile_j;
+assign tile_m_base = tile_mode ? (tile_i << 2) : tile_i; // global M row of tile row 0
+assign tile_n_base = tile_mode ? (tile_j << 2) : tile_j; // global N col of tile col 0
 
 wire [31:0] tile_row_rem = (lk_m_dim > tile_m_base) ? (lk_m_dim - tile_m_base) : 32'd0;
 wire [31:0] tile_col_rem = (lk_n_dim > tile_n_base) ? (lk_n_dim - tile_n_base) : 32'd0;
@@ -239,6 +242,8 @@ assign tile_active_cols = !tile_mode ? 3'd1 :
                           (tile_col_rem >= TILE_LANES) ? 3'd4 :
                           tile_col_rem[2:0];
 
+// Edge tiles may have fewer than 4 valid rows/cols when M or N is not a
+// multiple of 4. These masks prevent inactive lanes from being written back.
 assign tile_row_valid[0] = (tile_active_rows > 3'd0);
 assign tile_row_valid[1] = (tile_active_rows > 3'd1);
 assign tile_row_valid[2] = (tile_active_rows > 3'd2);
@@ -257,9 +262,12 @@ wire [15:0] tile_len = lk_k_dim[15:0] *
 // Current-tile addresses (used for write-back address calc)
 wire [31:0] comp_r_addr = lk_r_addr +
                           (tile_m_base * lk_n_dim + tile_n_base) * (ACC_W/8);
+// Row-wise tile writeback address:
+//   C row = tile_m_base + wb_row, C col starts at tile_n_base.
 wire [31:0] comp_row_r_addr = lk_r_addr +
                               (((tile_m_base + {29'd0, wb_row}) * lk_n_dim) +
                                tile_n_base) * (ACC_W/8);
+// One row burst writes active_cols 32-bit accumulation words.
 wire [15:0] tile_row_r_len = {13'd0, tile_active_cols} << 2;
 
 // ── Last-tile flag ──
@@ -272,6 +280,8 @@ localparam [15:0] TILE_R_LEN = 16'd4;
 wire [15:0] tile_compute_cycles = lk_k_dim[15:0] +
                                   {13'd0, tile_active_rows} - 16'd1;
 
+// vec_consume advances one packed A vector and one packed W vector for each
+// logical k. Extra cycles after K drain row-skewed activations through the array.
 assign vec_consume = tile_mode &&
                      pe_en &&
                      (state == S_OVERLAP_COMPUTE) &&
@@ -549,6 +559,8 @@ always @(posedge clk) begin
             S_WRITE_BACK: begin
                 pe_en        <= 1'b1;
                 pe_flush     <= 1'b0;
+                // Scalar mode writes one C[i,j]. Tile mode writes one valid C row
+                // per DMA transaction so global row-major gaps between rows are kept.
                 dma_r_addr   <= tile_mode ? comp_row_r_addr : comp_r_addr;
                 dma_r_len    <= tile_mode ? tile_row_r_len  : TILE_R_LEN;
                 dma_r_start  <= 1'b1;

@@ -15,7 +15,7 @@
 //     iverilog -g2012 -DN=4 -o sim/tb_arr4.vvp \
 //       rtl/pe/fp16_mul.v rtl/pe/fp16_add.v rtl/pe/fp32_add.v rtl/pe/pe_top.v \
 //       rtl/common/fifo.v rtl/common/axi_monitor.v rtl/common/op_counter.v \
-//       rtl/array/pe_array.v rtl/buf/pingpong_buf.v \
+//       rtl/array/reconfig_pe_array.v rtl/buf/pingpong_buf.v \
 //       rtl/power/npu_power.v rtl/ctrl/npu_ctrl.v \
 //       rtl/axi/npu_axi_lite.v rtl/axi/npu_dma.v \
 //       rtl/top/npu_top.v tb/tb_array_scale.v

@@ -1,6 +1,6 @@
 # 使用说明
 
-更新时间：2026-04-28
+更新时间：2026-04-29
 
 本文面向 CPU 侧软件和 testbench。当前实现还处于原型阶段，寄存器直配模式可用于调试；多层卷积建议按 descriptor 模式设计。
 
@@ -13,12 +13,24 @@
 - PPBuf 对 INT8/FP16 数据拆包。
 - 顶层标量 INT8 dot product 兼容路径，可用于 Phase 1 回归。
 - `ARR_CFG[7]=1` 的 4x4 tile-mode GEMM 路径，已覆盖 INT8/FP16 4x4x4 golden 测试。
+- DMA 读通道 INCR burst，当前覆盖 W/A 读请求。
+- DMA 写通道多 INCR burst 和 4KB 边界切分。
+- 混合读写场景下 8/16 beat burst 正确性测试。
+- 长 burst 带宽利用率目标测试。
+- AXI perf counters，可通过 AXI-Lite `0x48..0x70` 读出 burst/beat/byte/cycle、带宽和利用率。
+- 独立 `psum_out_buf` 模块，支持 4x4 tile PSUM/OUT read-modify-write、边界 mask 和双 bank 隔离。
+- `pe_top`/`reconfig_pe_array` accumulator init，支持从 PSUM 初值继续 MAC。
+- `npu_ctrl` k_tile loop，支持 K 超过 PPB 深度时按 K slice 加载 A/W，并在最后 k_tile 写回。
+- Descriptor v1 二进制格式已固定。
+- AXI-Lite `DESC_BASE(0x40)`、`DESC_COUNT(0x44)` 和 `CTRL[7] desc_mode` 可写入并读回。
+- 第一版 descriptor fetch/decode/next-layer 已接入：支持多个 `GEMM_TILEPACK + INT8/FP16 + OS + 4x4 + TILE_PACKED` descriptor 顺序执行。
+- T5.4 已支持 descriptor 链中后一层使用上一层 32-bit row-major OFM 作为 IFM：`desc_ctrl[23]=IFM_FROM_PREV_OFM` 时，DMA 会把上一层 OFM gather/repack 成当前 4-lane A tile stream。当前已验证 INT8 4x4 GEMM 串联。
 
 不能依赖：
 
 - 16x16/8x32 高吞吐。
-- DMA 读通道 burst。
 - 多层卷积自动调度。
+- FP16 OFM 自动转换成下一层 FP16 IFM；这需要后续 post-process/format conversion。
 - INT16。
 
 ## 寄存器直配模式
@@ -34,8 +46,8 @@ NPU 基地址建议：
 | 偏移 | 名称 | 作用 |
 |---:|---|---|
 | `0x00` | `CTRL` | start/abort/mode/stat_mode/irq clear |
-| `0x04` | `STATUS` | busy/done |
-| `0x08` | `INT_EN` | 中断使能 |
+| `0x04` | `STATUS` | busy/done/error |
+| `0x08` | `INT_EN` | bit0=done IRQ enable, bit1=error IRQ enable |
 | `0x0C` | `INT_CLR/PENDING` | 清 pending / 读 pending |
 | `0x10` | `M_DIM` | GEMM 行数；卷积中为 `batch*OH*OW` |
 | `0x14` | `N_DIM` | GEMM 列数；卷积中为 `Cout` |
@@ -47,6 +59,20 @@ NPU 基地址建议：
 | `0x34` | `CLK_DIV` | DFS 配置，当前未接入 PE 时钟 |
 | `0x38` | `CG_EN` | clock gating 配置 |
 | `0x3C` | `CFG_SHAPE` | 00=4x4, 01=8x8, 10=16x16, 11=8x32 |
+| `0x40` | `DESC_BASE` | descriptor 链表基地址 |
+| `0x44` | `DESC_COUNT` | descriptor 数量 / fetch 上限 |
+| `0x48` | `PERF_CYCLES` | monitor cycles since reset |
+| `0x4C` | `PERF_RD_BEATS` | DMA AXI read data beats |
+| `0x50` | `PERF_WR_BEATS` | DMA AXI write data beats |
+| `0x54` | `PERF_RD_BYTES` | DMA AXI read bytes |
+| `0x58` | `PERF_WR_BYTES` | DMA AXI write bytes |
+| `0x5C` | `PERF_RD_BW` | read bytes/cycle x1000 |
+| `0x60` | `PERF_WR_BW` | write bytes/cycle x1000 |
+| `0x64` | `PERF_RD_UTIL` | read data-channel utilization, basis points |
+| `0x68` | `PERF_WR_UTIL` | write data-channel utilization, basis points |
+| `0x6C` | `PERF_RD_BURSTS` | DMA AXI read burst count |
+| `0x70` | `PERF_WR_BURSTS` | DMA AXI write burst count |
+| `0x74` | `ERR_STATUS` | W1C error status |
 
 `CTRL` 编码：
 
@@ -56,7 +82,27 @@ bit1     abort
 bit[3:2] data mode: 00=INT8, 10=FP16
 bit[5:4] dataflow: 00=WS, 01=OS
 bit6     irq clear
+bit7     desc_mode: 0=direct register mode, 1=descriptor mode; T5.3 起由 controller fetch/decode descriptor
 ```
+
+`STATUS` 编码：
+
+```text
+bit0 busy
+bit1 done
+bit2 error
+```
+
+`ERR_STATUS` 编码：
+
+```text
+bit0 DESC_COUNT_ZERO
+bit1 DESC_UNSUPPORTED
+bit2 DESC_COUNT_EXHAUSTED
+bit3 IFM_PREV_MISSING
+```
+
+`ERR_STATUS` 为 W1C：CPU 写 1 清对应错误位。`INT_CLR(0x0C)` 写 bit0 或 `CTRL[6]` 写 1 都会清中断 pending；`CTRL[6]` 读回始终为 0。
 
 常用值：
 
@@ -145,40 +191,254 @@ C_ADDR(r,c) = R_ADDR + ((m0+r) * N + (n0+c)) * 4
 
 多层网络应使用 descriptor，而不是 CPU 每层手工轮询配置。
 
-建议 descriptor 以 32-bit word 对齐：
+T5.1 固定 descriptor v1 ABI：每个 descriptor 是 16 个 32-bit little-endian word，总长 64 byte。CPU 侧写入的 word 序和 NPU 侧 DMA 读取/解码的 word 序必须完全一致。
 
-| Word | 字段 | 说明 |
+全局约束：
+
+- `DESC_BASE` 和每个 `next_desc` 必须 64-byte aligned。
+- descriptor 内所有地址字段都是 32-bit byte address。
+- W/A/PSUM/OFM/Bias 数据地址至少 4-byte aligned，因为当前 AXI master 数据宽度是 32 bit。
+- 保留位和保留 word 必须写 0；NPU 以后可以把非 0 保留位作为 `ERR_BAD_DESC`。
+- 当前已验证的基础可执行组合是 `OP=GEMM_TILEPACK`、`DTYPE=INT8/FP16`、`DATAFLOW=OS`、`SHAPE=4x4`、`TILE_PACKED=1`。
+- 当前已验证的层间串联组合是 `OP=GEMM_TILEPACK`、`DTYPE=INT8`、`DATAFLOW=OS`、`SHAPE=4x4`、`TILE_PACKED=1`、`IFM_FROM_PREV_OFM=1`。
+
+### Descriptor v1 word layout
+
+| Word | 字段 | 位定义 | 说明 |
+|---:|---|---|---|
+| 0 | `desc_ctrl` | 见下表 | 版本、op、dtype、dataflow、shape 和 flags |
+| 1 | `M` | `[31:0]` | GEMM M；卷积中为 `batch*OH*OW` |
+| 2 | `N` | `[31:0]` | GEMM N；卷积中为 `Cout` |
+| 3 | `K` | `[31:0]` | GEMM reduce 维度；卷积中为 `Cin*KH*KW` |
+| 4 | `ifm_addr` | `[31:0]` | 输入特征图基地址；tile-pack GEMM 下是 A tile-pack stream 基地址；`IFM_FROM_PREV_OFM=1` 时由上一层 `ofm_addr` 覆盖 |
+| 5 | `weight_addr` | `[31:0]` | 权重基地址；tile-pack GEMM 下是 W tile-pack stream 基地址 |
+| 6 | `bias_addr` | `[31:0]` | bias 基地址，`USE_BIAS=0` 时写 0 |
+| 7 | `psum_addr` | `[31:0]` | 外部 PSUM surface 基地址，`USE_PSUM=0` 时写 0 |
+| 8 | `ofm_addr` | `[31:0]` | 输出特征图或 GEMM C 基地址；直配模式中等价 `R_ADDR` |
+| 9 | `ifm_shape` | `[15:0]=IH, [31:16]=IW` | GEMM 可写 0；on-the-fly conv 地址生成会使用 |
+| 10 | `ofm_shape` | `[15:0]=OH, [31:16]=OW` | GEMM 可写 0；conv 输出空间尺寸 |
+| 11 | `channel_shape` | `[15:0]=Cin, [31:16]=Cout` | GEMM 可写 0；conv 中 `Cout` 应等于 `N` |
+| 12 | `kernel_stride` | `[7:0]=KH, [15:8]=KW, [23:16]=stride_h, [31:24]=stride_w` | GEMM 可写 0；conv/im2col 使用 |
+| 13 | `pad_dilation` | `[7:0]=pad_h, [15:8]=pad_w, [23:16]=dilation_h, [31:24]=dilation_w` | GEMM 可写 0；默认 dilation 为 1 |
+| 14 | `post_cfg` | `[3:0]=activation, [7:4]=quant_mode, [15:8]=out_shift, [31:16]=reserved` | 当前后处理尚未实现，未使用字段写 0 |
+| 15 | `next_desc` | `[31:0]` | 下一个 descriptor byte address；0 表示 descriptor 链结束 |
+
+### `desc_ctrl` bit layout
+
+| Bits | 字段 | 编码 |
 |---:|---|---|
-| 0 | `op_dtype_flow_flags` | 操作类型、数据类型、WS/OS、first/last/irq 等 flags |
-| 1 | `M` | GEMM M；卷积中为 `batch*OH*OW` |
-| 2 | `N` | GEMM N；卷积中为 `Cout` |
-| 3 | `K` | GEMM reduce 维度；卷积中为 `Cin*KH*KW` |
-| 4 | `ifm_addr` | 输入特征图基地址，或预展开/预打包 A 基地址 |
-| 5 | `weight_addr` | 权重/卷积核基地址 |
-| 6 | `bias_addr` | bias 基地址，可为 0 |
-| 7 | `psum_addr` | K-split 部分和基地址，可为 0 |
-| 8 | `ofm_addr` | 输出特征图或 GEMM C 基地址 |
-| 9 | `shape0` | `IH/IW/OH/OW` 或 tile-pack 索引参数 |
-| 10 | `shape1` | `Cin/Cout/KH/KW` |
-| 11 | `stride_pad_act` | stride、padding、dilation、activation 等后处理配置 |
-| 12 | `next_desc` | 下一个 descriptor 地址，0 表示结束 |
+| `[3:0]` | `OP` | `0=NOP`, `1=GEMM_TILEPACK`, `2=GEMM_ROWMAJOR`, `3=CONV2D_IM2COL`, `4=FC` |
+| `[7:4]` | `DTYPE` | `0=INT8`, `2=FP16`；低 2 bit 可直接映射到 `CTRL[3:2]` |
+| `[11:8]` | `DATAFLOW` | `0=WS`, `1=OS`；低 2 bit 可直接映射到 `CTRL[5:4]` |
+| `[15:12]` | `SHAPE` | `0=4x4`, `1=8x8`, `2=16x16`, `3=8x32`；低 2 bit 可直接映射到 `CFG_SHAPE` |
+| `16` | `TILE_PACKED` | 1 表示 A/W 已按 4-lane tile-pack 布局，NPU 设置 `ARR_CFG[7]=1` |
+| `17` | `FIRST_K` | descriptor 覆盖的 K range 是该输出 tile/layer 的第一段；可清 PSUM 或加载 bias |
+| `18` | `LAST_K` | descriptor 覆盖的 K range 是最后一段；可写 OFM 并执行后处理 |
+| `19` | `LAST_LAYER` | 1 表示执行完本 descriptor 后整个网络结束 |
+| `20` | `IRQ_EN` | 本 descriptor 或网络结束后允许产生中断 |
+| `21` | `USE_BIAS` | `bias_addr` 有效 |
+| `22` | `USE_PSUM` | `psum_addr` 有效；用于外部 PSUM read/write |
+| `23` | `IFM_FROM_PREV_OFM` | 本层 IFM 来自前一个已完成 descriptor 的 `ofm_addr`；DMA 按 row-major 32-bit OFM gather/repack 为 A tile stream |
+| `[27:24]` | `reserved` | 必须写 0 |
+| `[31:28]` | `VERSION` | v1 固定为 `1` |
 
-后续 AXI-Lite 建议新增：
+当前 T4.5 已实现的是单 descriptor 内部 K-split：CPU 对整层写一个 descriptor，`K` 是完整 reduce 维度，`FIRST_K=1` 且 `LAST_K=1`。未来如果做 descriptor 级外部 K-split，则可用多个 descriptor 覆盖同一个 C/OFM surface 的不同 K range，并通过 `PSUM_ADDR` 保存跨 descriptor 部分和。
+
+### CPU 侧结构体
+
+CPU 侧必须按下面的结构体写 descriptor。字段类型固定为 `uint32_t`，不能使用 C bitfield。
+
+```c
+#include <stdint.h>
+
+#define NPU_DESC_VERSION             1u
+#define NPU_DESC_WORDS               16u
+#define NPU_DESC_BYTES               64u
+
+#define NPU_DESC_OP_NOP              0u
+#define NPU_DESC_OP_GEMM_TILEPACK    1u
+#define NPU_DESC_OP_GEMM_ROWMAJOR    2u
+#define NPU_DESC_OP_CONV2D_IM2COL    3u
+#define NPU_DESC_OP_FC               4u
+
+#define NPU_DESC_DTYPE_INT8          0u
+#define NPU_DESC_DTYPE_FP16          2u
+
+#define NPU_DESC_FLOW_WS             0u
+#define NPU_DESC_FLOW_OS             1u
+
+#define NPU_DESC_SHAPE_4X4           0u
+#define NPU_DESC_SHAPE_8X8           1u
+#define NPU_DESC_SHAPE_16X16         2u
+#define NPU_DESC_SHAPE_8X32          3u
+
+#define NPU_DESC_FLAG_TILE_PACKED    (1u << 16)
+#define NPU_DESC_FLAG_FIRST_K        (1u << 17)
+#define NPU_DESC_FLAG_LAST_K         (1u << 18)
+#define NPU_DESC_FLAG_LAST_LAYER     (1u << 19)
+#define NPU_DESC_FLAG_IRQ_EN         (1u << 20)
+#define NPU_DESC_FLAG_USE_BIAS       (1u << 21)
+#define NPU_DESC_FLAG_USE_PSUM       (1u << 22)
+#define NPU_DESC_FLAG_IFM_PREV_OFM   (1u << 23)
+
+#define NPU_DESC_CTRL(op, dtype, flow, shape, flags) \
+    ((NPU_DESC_VERSION << 28) | (((shape) & 0xfu) << 12) | \
+     (((flow) & 0xfu) << 8) | (((dtype) & 0xfu) << 4) | \
+     ((op) & 0xfu) | (flags))
+
+typedef struct {
+    uint32_t desc_ctrl;
+    uint32_t m;
+    uint32_t n;
+    uint32_t k;
+    uint32_t ifm_addr;
+    uint32_t weight_addr;
+    uint32_t bias_addr;
+    uint32_t psum_addr;
+    uint32_t ofm_addr;
+    uint32_t ifm_shape;
+    uint32_t ofm_shape;
+    uint32_t channel_shape;
+    uint32_t kernel_stride;
+    uint32_t pad_dilation;
+    uint32_t post_cfg;
+    uint32_t next_desc;
+} npu_desc_v1_t;
+
+/* C11: _Static_assert(sizeof(npu_desc_v1_t) == NPU_DESC_BYTES, "bad NPU descriptor size"); */
+```
+
+一个当前可执行的 4x4 tile-pack GEMM descriptor：
+
+```c
+npu_desc_v1_t d = {0};
+d.desc_ctrl = NPU_DESC_CTRL(
+    NPU_DESC_OP_GEMM_TILEPACK,
+    NPU_DESC_DTYPE_INT8,
+    NPU_DESC_FLOW_OS,
+    NPU_DESC_SHAPE_4X4,
+    NPU_DESC_FLAG_TILE_PACKED |
+    NPU_DESC_FLAG_FIRST_K |
+    NPU_DESC_FLAG_LAST_K |
+    NPU_DESC_FLAG_LAST_LAYER |
+    NPU_DESC_FLAG_IRQ_EN);
+d.m = 4;
+d.n = 4;
+d.k = 10;
+d.ifm_addr = a_tile_pack_base;
+d.weight_addr = w_tile_pack_base;
+d.ofm_addr = c_base;
+d.next_desc = 0;
+```
+
+### NPU RTL 解码常量
+
+RTL 侧 T5.3 解码使用同一组 word index 和 bit range：
+
+```verilog
+localparam integer NPU_DESC_WORDS = 16;
+localparam integer NPU_DESC_BYTES = 64;
+
+localparam integer DESC_W_CTRL          = 0;
+localparam integer DESC_W_M             = 1;
+localparam integer DESC_W_N             = 2;
+localparam integer DESC_W_K             = 3;
+localparam integer DESC_W_IFM_ADDR      = 4;
+localparam integer DESC_W_WEIGHT_ADDR   = 5;
+localparam integer DESC_W_BIAS_ADDR     = 6;
+localparam integer DESC_W_PSUM_ADDR     = 7;
+localparam integer DESC_W_OFM_ADDR      = 8;
+localparam integer DESC_W_IFM_SHAPE     = 9;
+localparam integer DESC_W_OFM_SHAPE     = 10;
+localparam integer DESC_W_CHANNEL_SHAPE = 11;
+localparam integer DESC_W_KERNEL_STRIDE = 12;
+localparam integer DESC_W_PAD_DILATION  = 13;
+localparam integer DESC_W_POST_CFG      = 14;
+localparam integer DESC_W_NEXT_DESC     = 15;
+
+localparam integer DESC_CTRL_OP_LSB       = 0;
+localparam integer DESC_CTRL_DTYPE_LSB    = 4;
+localparam integer DESC_CTRL_FLOW_LSB     = 8;
+localparam integer DESC_CTRL_SHAPE_LSB    = 12;
+localparam integer DESC_CTRL_TILE_PACKED  = 16;
+localparam integer DESC_CTRL_FIRST_K      = 17;
+localparam integer DESC_CTRL_LAST_K       = 18;
+localparam integer DESC_CTRL_LAST_LAYER   = 19;
+localparam integer DESC_CTRL_IRQ_EN       = 20;
+localparam integer DESC_CTRL_USE_BIAS     = 21;
+localparam integer DESC_CTRL_USE_PSUM     = 22;
+localparam integer DESC_CTRL_IFM_PREV_OFM = 23;
+localparam integer DESC_CTRL_VERSION_LSB  = 28;
+```
+
+### Descriptor 到当前寄存器的映射
+
+T5.3 的第一版 descriptor controller 会把 descriptor 映射到当前直配寄存器语义：
+
+| 当前寄存器/控制 | descriptor 来源 |
+|---|---|
+| `M_DIM` | `word1 M` |
+| `N_DIM` | `word2 N` |
+| `K_DIM` | `word3 K` |
+| `A_ADDR` | `word4 ifm_addr`，或在 `IFM_FROM_PREV_OFM=1` 且已有上一层时使用上一 descriptor 的 `word8 ofm_addr` |
+| `W_ADDR` | `word5 weight_addr` |
+| `R_ADDR` | `word8 ofm_addr` |
+| `CTRL[3:2]` | `desc_ctrl[5:4]`，即 `DTYPE[1:0]` |
+| `CTRL[5:4]` | `desc_ctrl[9:8]`，即 `DATAFLOW[1:0]` |
+| `ARR_CFG[7]` | `desc_ctrl[16] TILE_PACKED` |
+| `CFG_SHAPE` | `desc_ctrl[13:12]`，即 `SHAPE[1:0]` |
+
+descriptor 链结束条件：
+
+```text
+normal_stop = desc_ctrl.LAST_LAYER or next_desc == 0
+next_addr   = next_desc
+```
+
+`DESC_COUNT` 是防止链表跑飞的上限，不是正常结束条件。如果 `DESC_COUNT` 先耗尽但当前 descriptor 没有 `LAST_LAYER` 且 `next_desc != 0`，NPU 应报告 descriptor count exhausted error。
+
+AXI-Lite descriptor 相关寄存器：
 
 | 偏移 | 名称 | 说明 |
 |---:|---|---|
-| `0x40` | `DESC_BASE` | descriptor 链表基地址 |
-| `0x44` | `DESC_COUNT` | descriptor 数量 |
-| `0x50` | `ERR_STATUS` | 错误状态 |
+| `0x40` | `DESC_BASE` | 已实现；descriptor 链表基地址 |
+| `0x44` | `DESC_COUNT` | 已实现；descriptor 数量 / fetch 上限 |
+| `0x74` | `ERR_STATUS` | 已实现；W1C descriptor/参数错误状态 |
 
-CPU 提交流程：
+T5.2 保证 CPU 可提交 descriptor list 的入口寄存器：`DESC_BASE/DESC_COUNT` 和 `CTRL[7]` 可写入并读回。T5.3 已支持 descriptor 自动 fetch/decode/execute 的第一版，当前限制为已验证的 4x4 OS tile-pack GEMM 组合。T5.5 已让 unsupported descriptor、descriptor count exhausted 等错误通过 `STATUS.error` 和 `ERR_STATUS` 对 CPU 可见。
+
+T5.4 的 `IFM_FROM_PREV_OFM` 语义：
+
+```text
+descriptor i:
+  ofm_addr = OUT_i surface, row-major 32-bit word
+
+descriptor i+1:
+  desc_ctrl.IFM_FROM_PREV_OFM = 1
+  ifm_addr is ignored by RTL
+  npu_ctrl uses OUT_i base as A source base
+  npu_dma reads A[m0+r,k] from OUT_i[(m0+r) * K + k]
+  npu_dma packs lanes r=0..3 into the A PPBuf tile stream
+```
+
+当前该路径用于 INT8 链式 GEMM/FC 验证：DMA 取上一层 32-bit OFM word 的低 8 bit 作为下一层 INT8 lane，再由 PPBuf 符号扩展。真实网络仍需要后续 bias/activation/quant，确保写入 OFM 的值就是下一层期望的数据格式。
+
+CPU descriptor 提交流程：
 
 ```c
 prepare_desc_list(desc_base);
 npu_write(DESC_BASE, desc_base);
 npu_write(DESC_COUNT, count);
 npu_write(CTRL, START | DESC_MODE);
-while ((npu_read(STATUS) & DONE) == 0) {}
+uint32_t st;
+do {
+    st = npu_read(STATUS);
+} while ((st & (DONE | ERROR)) == 0);
+if (st & ERROR) {
+    uint32_t err;
+    err = npu_read(ERR_STATUS);
+    npu_write(ERR_STATUS, err); // W1C
+}
 ```
 
 ## 多层卷积的数据生命周期
@@ -203,7 +463,14 @@ last k_tile:
   read psum -> accumulate -> activation -> write ofm
 ```
 
-因此 NPU 需要 `PSUM/OUT_BUF`，不能只靠 W/A ping-pong buffer。
+T4.1 规定 PSUM/OFM 在外部内存中使用 32-bit word、row-major surface：
+
+```text
+PSUM_ADDR(i,j) = PSUM_BASE + (i * N + j) * 4
+OFM_ADDR(i,j)  = OFM_BASE  + (i * N + j) * 4
+```
+
+片上 `PSUM/OUT_BUF` 只缓存当前 4x4 tile 的 accumulator，完整大矩阵的 partial sum surface 仍在外部内存中。T4.2 已提供独立 `psum_out_buf` RMW 存储模块，T4.3 已提供 accumulator init，T4.4 已提供 controller k_tile loop，T4.5 已完成顶层 K-split GEMM golden。当前同一 C tile 的多个 k_tile 连续执行，中间 k_tile 不 flush/writeback，最后 k_tile 写回最终 tile；外部 PSUM surface 仍留给后续 descriptor 级 K-split 接入。T5.4 已接入外部 OFM surface 作为下一层 IFM 的 INT8 descriptor 链路。
 
 ## 推荐当前使用方式
 
@@ -213,4 +480,4 @@ last k_tile:
 powershell -ExecutionPolicy Bypass -File scripts\run_sim.ps1
 ```
 
-同时运行 `tb_npu_scalar_smoke.v`、`tb_pingpong_buf_vec.v`、`tb_npu_ctrl_tile.v`、`tb_npu_tile_writeback.v`、`tb_npu_tile_gemm.v` 和 `tb_comprehensive.v`。然后按 [task_breakdown.md](task_breakdown.md) 进入 Phase 3 的 AXI burst DMA 和带宽统计。不要先写多层卷积固件，因为 NPU 还没有 descriptor、PSUM/OUT buffer 和 K-split 支持。
+同时运行 `tb_npu_scalar_smoke.v`、`tb_dma_read_burst.v`、`tb_dma_write_burst.v`、`tb_dma_burst.v`、`tb_dma_perf.v`、`tb_psum_out_buf.v`、`tb_reconfig_pe_acc_init.v`、`tb_npu_ctrl_ksplit.v`、`tb_npu_ctrl_dataflow_modes.v`、`tb_npu_ctrl_error_status.v`、`tb_npu_tile_ksplit_gemm.v`、`tb_npu_axi_lite_desc.v`、`tb_npu_desc_two_layer.v`、`tb_npu_desc_ofm_chain.v`、`tb_pingpong_buf_vec.v`、`tb_npu_ctrl_tile.v`、`tb_npu_tile_writeback.v`、`tb_npu_tile_gemm.v` 和 `tb_comprehensive.v`。需要临时验证大矩阵功能时，使用 `scripts/run_matmul_case.ps1` 生成并运行 direct scalar matmul case。T5.5 已补齐 IRQ/error status；当前 tile/descriptor 主线是 OS，direct scalar matmul 回归覆盖 OS 和 WS。下一步进入外部 PSUM surface、bias/activation/quant 或卷积前端。

@@ -23,6 +23,17 @@ localparam REG_W_ADDR    = 32'h20;
 localparam REG_A_ADDR    = 32'h24;
 localparam REG_R_ADDR    = 32'h28;
 localparam REG_CFG_SHAPE = 32'h3C;
+localparam REG_PERF_CYCLES    = 32'h48;
+localparam REG_PERF_RD_BEATS  = 32'h4C;
+localparam REG_PERF_WR_BEATS  = 32'h50;
+localparam REG_PERF_RD_BYTES  = 32'h54;
+localparam REG_PERF_WR_BYTES  = 32'h58;
+localparam REG_PERF_RD_BW     = 32'h5C;
+localparam REG_PERF_WR_BW     = 32'h60;
+localparam REG_PERF_RD_UTIL   = 32'h64;
+localparam REG_PERF_WR_UTIL   = 32'h68;
+localparam REG_PERF_RD_BURSTS = 32'h6C;
+localparam REG_PERF_WR_BURSTS = 32'h70;
 
 localparam CTRL_START    = 32'h01;
 localparam CTRL_OS       = 32'h10;
@@ -299,6 +310,11 @@ endtask
 
 integer i;
 reg [31:0] got;
+reg [31:0] perf_cycles, perf_rd_beats, perf_wr_beats;
+reg [31:0] perf_rd_bytes, perf_wr_bytes;
+reg [31:0] perf_rd_bw, perf_wr_bw;
+reg [31:0] perf_rd_util, perf_wr_util;
+reg [31:0] perf_rd_bursts, perf_wr_bursts;
 
 initial begin
     for (i = 0; i < DRAM_SZ; i = i + 1)
@@ -339,7 +355,32 @@ initial begin
         $finish;
     end
 
-    $display("[PASS] tb_npu_scalar_smoke: scalar INT8 OS result=300 and cfg_shape latched");
+    axi_read(REG_PERF_CYCLES, perf_cycles);
+    axi_read(REG_PERF_RD_BEATS, perf_rd_beats);
+    axi_read(REG_PERF_WR_BEATS, perf_wr_beats);
+    axi_read(REG_PERF_RD_BYTES, perf_rd_bytes);
+    axi_read(REG_PERF_WR_BYTES, perf_wr_bytes);
+    axi_read(REG_PERF_RD_BW, perf_rd_bw);
+    axi_read(REG_PERF_WR_BW, perf_wr_bw);
+    axi_read(REG_PERF_RD_UTIL, perf_rd_util);
+    axi_read(REG_PERF_WR_UTIL, perf_wr_util);
+    axi_read(REG_PERF_RD_BURSTS, perf_rd_bursts);
+    axi_read(REG_PERF_WR_BURSTS, perf_wr_bursts);
+
+    if (perf_cycles == 32'd0 ||
+        perf_rd_beats !== 32'd2 || perf_wr_beats !== 32'd1 ||
+        perf_rd_bytes !== 32'd8 || perf_wr_bytes !== 32'd4 ||
+        perf_rd_bursts !== 32'd2 || perf_wr_bursts !== 32'd1 ||
+        perf_rd_bw == 32'd0 || perf_wr_bw == 32'd0 ||
+        perf_rd_util == 32'd0 || perf_wr_util == 32'd0) begin
+        $display("[FAIL] perf counters cycles=%0d rd_beats=%0d wr_beats=%0d rd_bytes=%0d wr_bytes=%0d rd_bw=%0d wr_bw=%0d rd_util=%0d wr_util=%0d rd_bursts=%0d wr_bursts=%0d",
+                 perf_cycles, perf_rd_beats, perf_wr_beats,
+                 perf_rd_bytes, perf_wr_bytes, perf_rd_bw, perf_wr_bw,
+                 perf_rd_util, perf_wr_util, perf_rd_bursts, perf_wr_bursts);
+        $finish;
+    end
+
+    $display("[PASS] tb_npu_scalar_smoke: scalar INT8 OS result=300, cfg_shape latched, perf counters valid");
     $finish;
 end
 

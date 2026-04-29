@@ -58,7 +58,9 @@ module axi_monitor #(
     output wire [31:0] total_cycles,     // monitoring duration
     // Derived metrics (computed each cycle)
     output wire [31:0] m_axi_rd_bw,      // read bandwidth (bytes/cycle)
-    output wire [31:0] m_axi_wr_bw       // write bandwidth (bytes/cycle)
+    output wire [31:0] m_axi_wr_bw,      // write bandwidth (bytes/cycle)
+    output wire [31:0] m_axi_rd_util,    // read data-channel utilization, basis points
+    output wire [31:0] m_axi_wr_util     // write data-channel utilization, basis points
 );
 
 // ---------------------------------------------------------------------------
@@ -200,6 +202,8 @@ end
 // ---------------------------------------------------------------------------
 assign m_axi_rd_bw = (cycle_cnt > 0) ? (m_rd_bytes_r * 1000 / cycle_cnt) : 0;
 assign m_axi_wr_bw = (cycle_cnt > 0) ? (m_wr_bytes_r * 1000 / cycle_cnt) : 0;
+assign m_axi_rd_util = (cycle_cnt > 0) ? (m_rd_beats_r * 10000 / cycle_cnt) : 0;
+assign m_axi_wr_util = (cycle_cnt > 0) ? (m_wr_beats_r * 10000 / cycle_cnt) : 0;
 
 // ---------------------------------------------------------------------------
 // Output assignments

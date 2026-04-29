@@ -276,6 +276,13 @@ def main():
     parser = argparse.ArgumentParser(description='Generate NPU matmul test data')
     parser.add_argument('--square', action='store_true', help='Generate square matrix tests only')
     parser.add_argument('--ws', action='store_true', help='Generate WS mode tests only')
+    parser.add_argument('--custom', action='store_true', help='Generate one custom matrix test')
+    parser.add_argument('--m', type=int, default=None, help='Custom M dimension')
+    parser.add_argument('--k', type=int, default=None, help='Custom K dimension')
+    parser.add_argument('--n', type=int, default=None, help='Custom N dimension')
+    parser.add_argument('--dtype', choices=['int8', 'fp16'], default='int8', help='Custom data type')
+    parser.add_argument('--mode', choices=['OS', 'WS'], default='OS', help='Custom dataflow mode')
+    parser.add_argument('--test-id', default='', help='Custom output directory name')
     args = parser.parse_args()
 
     out_dir = os.path.dirname(os.path.abspath(__file__))
@@ -283,7 +290,17 @@ def main():
 
     print(f"Generating matrix multiplication test data in:\n  {out_dir}\n")
 
-    if args.ws:
+    if args.custom:
+        if args.m is None or args.k is None or args.n is None:
+            parser.error('--custom requires --m, --k, and --n')
+        if args.m <= 0 or args.k <= 0 or args.n <= 0:
+            parser.error('--m, --k, and --n must be positive')
+        test_id = args.test_id
+        if not test_id:
+            test_id = f'{args.mode.lower()}_{args.dtype}_{args.m}x{args.k}x{args.n}'
+        print("=== Custom Matrix Test ===")
+        generate(args.m, args.k, args.n, args.dtype, args.mode, seed_base+9000, out_dir, test_id)
+    elif args.ws:
         # WS mode square matrix tests
         print("=== WS Square Matrix Tests ===")
         print("\n--- WS INT8 Square ---")

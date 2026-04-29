@@ -49,6 +49,19 @@ module npu_dma #(
     input  wire        a_ppb_buf_ready,
     input  wire        a_ppb_buf_empty,
     input  wire        a_ppb_drain_done,
+    input  wire        a_ofm_mode,
+    input  wire [31:0] a_ofm_stride,
+    input  wire [31:0] a_ofm_m_base,
+    input  wire [31:0] a_ofm_k_base,
+    input  wire [15:0] a_ofm_k_len,
+    input  wire [2:0]  a_ofm_active_rows,
+    input  wire        a_ofm_fp16_mode,
+
+    // ---- Descriptor fetch ----
+    input  wire        desc_start,
+    input  wire [31:0] desc_base_addr,
+    output reg         desc_done,
+    output reg  [511:0] desc_words,
 
     // ---- Channel 2: Result ----
     input  wire        r_start,
@@ -116,12 +129,17 @@ wire r_fifo_empty_n;
 // PPBuf write enables
 // ===========================================================================
 assign w_ppb_wr_en = (load_state == L_WREAD || (load_state == L_WA_READ && load_reading_w))
-                      && m_axi_rvalid && !w_ppb_full;
+                      && m_axi_rvalid && m_axi_rready && !w_ppb_full;
 assign w_ppb_wr_data = m_axi_rdata;
 
-assign a_ppb_wr_en = (load_state == L_AREAD || (load_state == L_WA_READ && !load_reading_w))
-                      && m_axi_rvalid && !a_ppb_full;
-assign a_ppb_wr_data = m_axi_rdata;
+reg        a_ofm_wr_en;
+reg [DATA_W-1:0] a_ofm_wr_data;
+
+wire a_read_ppb_wr_en = (load_state == L_AREAD || (load_state == L_WA_READ && !load_reading_w))
+                         && m_axi_rvalid && m_axi_rready && !a_ppb_full;
+
+assign a_ppb_wr_en = a_read_ppb_wr_en || (a_ofm_wr_en && !a_ppb_full);
+assign a_ppb_wr_data = a_ofm_wr_en ? a_ofm_wr_data : m_axi_rdata;
 
 // ===========================================================================
 // Load-FSM states
@@ -130,121 +148,395 @@ localparam [2:0] L_IDLE   = 3'd0;
 localparam [2:0] L_WREAD  = 3'd1;
 localparam [2:0] L_AREAD  = 3'd2;
 localparam [2:0] L_WA_READ= 3'd3;
+localparam [2:0] L_DESC   = 3'd4;
+localparam [2:0] L_A_OFM  = 3'd5;
+localparam [2:0] L_A_OFM_DONE = 3'd6;
 
 reg [2:0] load_state;
 reg [31:0] load_addr_cnt;
 reg [15:0] load_byte_cnt;
 reg [15:0] w_bytes_done, a_bytes_done;
+reg [15:0] desc_bytes_done;
+reg [4:0]  desc_word_idx;
 reg        load_reading_w;
+reg [7:0]  load_arlen;
+reg        load_r_active;
+reg        load_a_after_w;
+reg        load_a_after_w_ofm;
+
+reg [31:0] ofm_stride_latch;
+reg [31:0] ofm_base_latch;
+reg [31:0] ofm_m_base_latch;
+reg [31:0] ofm_k_base_latch;
+reg [15:0] ofm_k_len_latch;
+reg [2:0]  ofm_active_rows_latch;
+reg        ofm_fp16_latch;
+reg [15:0] ofm_k_pos;
+reg [2:0]  ofm_lane_pos;
+reg [1:0]  ofm_emit_phase;
+reg [31:0] ofm_pack0;
+reg [31:0] ofm_pack1;
+
+localparam integer AXI_DATA_BYTES = DATA_W / 8;
+localparam integer AXI_BYTE_SHIFT = $clog2(DATA_W / 8);
+localparam [15:0] READ_BURST_MAX_BEATS =
+    (BURST_MAX > 256) ? 16'd256 : BURST_MAX;
+localparam [15:0] DESC_BYTES = 16'd64;
+
+wire [15:0] load_target_len =
+    (load_state == L_DESC)  ? DESC_BYTES  :
+    (load_state == L_WREAD) ? w_len_bytes :
+    (load_state == L_AREAD) ? a_len_bytes :
+    load_reading_w          ? w_len_bytes : a_len_bytes;
+
+wire [15:0] load_target_done =
+    (load_state == L_DESC)  ? desc_bytes_done :
+    (load_state == L_WREAD) ? w_bytes_done    :
+    (load_state == L_AREAD) ? a_bytes_done    :
+    load_reading_w          ? w_bytes_done    : a_bytes_done;
+
+wire [31:0] ofm_cur_addr =
+    ofm_base_latch +
+    ((((ofm_m_base_latch + {29'd0, ofm_lane_pos}) * ofm_stride_latch) +
+      (ofm_k_base_latch + {16'd0, ofm_k_pos})) << AXI_BYTE_SHIFT);
+
+wire [15:0] load_remaining_bytes =
+    (load_target_len > load_target_done) ? (load_target_len - load_target_done) : 16'd0;
+
+wire [15:0] load_remaining_beats =
+    (load_remaining_bytes == 16'd0) ? 16'd0 :
+    ((load_remaining_bytes + AXI_DATA_BYTES - 1) >> AXI_BYTE_SHIFT);
+
+// AXI INCR bursts must not cross a 4KB boundary.
+wire [15:0] load_bytes_to_4k =
+    16'd4096 - {4'd0, load_addr_cnt[11:0]};
+wire [15:0] load_beats_to_4k =
+    (load_bytes_to_4k >> AXI_BYTE_SHIFT);
+
+wire [15:0] load_burst_beats_cap0 =
+    (load_remaining_beats > READ_BURST_MAX_BEATS) ? READ_BURST_MAX_BEATS :
+                                                    load_remaining_beats;
+wire [15:0] load_burst_beats =
+    (load_burst_beats_cap0 > load_beats_to_4k) ? load_beats_to_4k :
+                                                 load_burst_beats_cap0;
+
+wire [7:0] load_next_arlen =
+    ((load_burst_beats == 16'd0) ? 16'd1 : load_burst_beats) - 1'b1;
 
 always @(posedge clk) begin
     if (!rst_n) begin
         load_state <= L_IDLE; load_addr_cnt <= 0; load_byte_cnt <= 0;
         w_done <= 0; a_done <= 0;
         w_bytes_done <= 0; a_bytes_done <= 0;
+        desc_done <= 1'b0;
+        desc_words <= 512'd0;
+        desc_bytes_done <= 16'd0;
+        desc_word_idx <= 5'd0;
         load_reading_w <= 1;
+        load_arlen <= 8'd0;
+        load_r_active <= 1'b0;
+        load_a_after_w <= 1'b0;
+        load_a_after_w_ofm <= 1'b0;
+        a_ofm_wr_en <= 1'b0;
+        a_ofm_wr_data <= {DATA_W{1'b0}};
+        ofm_stride_latch <= 32'd0;
+        ofm_base_latch <= 32'd0;
+        ofm_m_base_latch <= 32'd0;
+        ofm_k_base_latch <= 32'd0;
+        ofm_k_len_latch <= 16'd0;
+        ofm_active_rows_latch <= 3'd0;
+        ofm_fp16_latch <= 1'b0;
+        ofm_k_pos <= 16'd0;
+        ofm_lane_pos <= 3'd0;
+        ofm_emit_phase <= 2'd0;
+        ofm_pack0 <= 32'd0;
+        ofm_pack1 <= 32'd0;
         m_axi_arvalid <= 0; m_axi_rready <= 0;
     end else begin
+        w_done <= 1'b0;
+        a_done <= 1'b0;
+        desc_done <= 1'b0;
+        a_ofm_wr_en <= 1'b0;
         case (load_state)
             L_IDLE: begin
                 w_bytes_done <= 0; a_bytes_done <= 0;
+                desc_bytes_done <= 16'd0;
+                desc_word_idx <= 5'd0;
                 m_axi_arvalid <= 0; m_axi_rready <= 0;
+                load_r_active <= 1'b0;
                 load_reading_w <= 1;
-                w_done <= 0; a_done <= 0;
-                // Result WB has priority — handled by separate WB-FSM
-                // Weight or simultaneous W+A start
-                if (w_start && a_start) begin
-                    load_state <= L_WREAD; load_addr_cnt <= w_base_addr; load_byte_cnt <= 0;
-                    w_bytes_done <= 0; a_bytes_done <= 0;
-                end else if (w_start && !w_ppb_full) begin
-                    load_state <= L_WREAD; load_addr_cnt <= w_base_addr; load_byte_cnt <= 0;
-                    w_bytes_done <= 0;
-                end else if (a_start && !a_ppb_full) begin
-                    load_state <= L_AREAD; load_addr_cnt <= a_base_addr; load_byte_cnt <= 0;
-                    a_bytes_done <= 0;
+                load_byte_cnt <= 16'd0;
+                load_a_after_w <= 1'b0;
+                load_a_after_w_ofm <= 1'b0;
+                ofm_emit_phase <= 2'd0;
+                ofm_lane_pos <= 3'd0;
+                ofm_k_pos <= 16'd0;
+                ofm_pack0 <= 32'd0;
+                ofm_pack1 <= 32'd0;
+
+                if (w_start && (w_len_bytes == 16'd0))
+                    w_done <= 1'b1;
+                if (a_start && !a_ofm_mode && (a_len_bytes == 16'd0))
+                    a_done <= 1'b1;
+                if (a_start && a_ofm_mode && (a_ofm_k_len == 16'd0))
+                    a_done <= 1'b1;
+
+                // Result WB uses independent AW/W/B channels; read-side DMA can
+                // issue W/A bursts while writeback is active.
+                if (desc_start) begin
+                    load_state       <= L_DESC;
+                    load_addr_cnt    <= desc_base_addr;
+                    load_byte_cnt    <= 16'd0;
+                    desc_bytes_done  <= 16'd0;
+                    desc_word_idx    <= 5'd0;
+                end else if (w_start && (w_len_bytes != 16'd0) && !w_ppb_full) begin
+                    load_state    <= L_WREAD;
+                    load_addr_cnt <= w_base_addr;
+                    load_byte_cnt <= 16'd0;
+                    w_bytes_done  <= 16'd0;
+                    a_bytes_done  <= 16'd0;
+                    load_a_after_w <= a_start && ((a_ofm_mode && (a_ofm_k_len != 16'd0)) ||
+                                                  (!a_ofm_mode && (a_len_bytes != 16'd0)));
+                    load_a_after_w_ofm <= a_ofm_mode;
+                    if (a_start && a_ofm_mode) begin
+                        ofm_stride_latch <= a_ofm_stride;
+                        ofm_base_latch <= a_base_addr;
+                        ofm_m_base_latch <= a_ofm_m_base;
+                        ofm_k_base_latch <= a_ofm_k_base;
+                        ofm_k_len_latch <= a_ofm_k_len;
+                        ofm_active_rows_latch <= a_ofm_active_rows;
+                        ofm_fp16_latch <= a_ofm_fp16_mode;
+                    end
+                end else if (a_start && a_ofm_mode && (a_ofm_k_len != 16'd0) && !a_ppb_full) begin
+                    load_state       <= L_A_OFM;
+                    load_addr_cnt    <= a_base_addr;
+                    load_byte_cnt    <= 16'd0;
+                    a_bytes_done     <= 16'd0;
+                    ofm_stride_latch <= a_ofm_stride;
+                    ofm_base_latch <= a_base_addr;
+                    ofm_m_base_latch <= a_ofm_m_base;
+                    ofm_k_base_latch <= a_ofm_k_base;
+                    ofm_k_len_latch <= a_ofm_k_len;
+                    ofm_active_rows_latch <= a_ofm_active_rows;
+                    ofm_fp16_latch <= a_ofm_fp16_mode;
+                    ofm_k_pos <= 16'd0;
+                    ofm_lane_pos <= 3'd0;
+                    ofm_emit_phase <= 2'd0;
+                    ofm_pack0 <= 32'd0;
+                    ofm_pack1 <= 32'd0;
+                end else if (a_start && (a_len_bytes != 16'd0) && !a_ppb_full) begin
+                    load_state    <= L_AREAD;
+                    load_addr_cnt <= a_base_addr;
+                    load_byte_cnt <= 16'd0;
+                    a_bytes_done  <= 16'd0;
                 end
             end
 
-            // Weight-only read — identical behavior to HEAD W_READ
+            // Descriptor fetch. Reads one descriptor v1 record: 16 x 32-bit words.
+            L_DESC: begin
+                if (!m_axi_arvalid && !load_r_active) begin
+                    m_axi_arvalid <= 1'b1;
+                    load_arlen    <= load_next_arlen;
+                end
+
+                if (m_axi_arvalid && m_axi_arready) begin
+                    m_axi_arvalid <= 1'b0;
+                    load_r_active <= 1'b1;
+                    m_axi_rready  <= 1'b1;
+                    load_byte_cnt <= 16'd0;
+                end else if (load_r_active) begin
+                    m_axi_rready <= 1'b1;
+                    if (m_axi_rvalid && m_axi_rready) begin
+                        desc_words[(desc_word_idx * DATA_W) +: DATA_W] <= m_axi_rdata;
+                        desc_word_idx   <= desc_word_idx + 1'b1;
+                        load_byte_cnt   <= load_byte_cnt + AXI_DATA_BYTES;
+                        desc_bytes_done <= desc_bytes_done + AXI_DATA_BYTES;
+                        if (m_axi_rlast) begin
+                            load_r_active <= 1'b0;
+                            m_axi_rready  <= 1'b0;
+                            load_addr_cnt <= load_addr_cnt +
+                                             (({8'd0, load_arlen} + 16'd1) << AXI_BYTE_SHIFT);
+                            load_byte_cnt <= 16'd0;
+                            if (desc_bytes_done + AXI_DATA_BYTES >= DESC_BYTES) begin
+                                desc_done  <= 1'b1;
+                                load_state <= L_IDLE;
+                            end
+                        end
+                    end
+                end
+            end
+
+            // Weight read. T3.1: one outstanding INCR burst at a time.
             L_WREAD: begin
-                m_axi_arvalid <= 1;
-                m_axi_rready  <= 1;
-                if (m_axi_rvalid && m_axi_rready) begin
-                    load_byte_cnt  <= load_byte_cnt + DATA_W/8;
-                    w_bytes_done   <= w_bytes_done + DATA_W/8;
-                    if (w_bytes_done + DATA_W/8 >= w_len_bytes) begin
-                        w_done       <= 1;
-                        m_axi_arvalid <= 0;
-                        m_axi_rready  <= 0;
-                        if (a_len_bytes > 0) begin
-                            load_state    <= L_AREAD;
-                            load_addr_cnt <= a_base_addr;
-                            load_byte_cnt <= 0;
-                        end else begin
-                            load_state <= L_IDLE;
+                if (!m_axi_arvalid && !load_r_active && !w_ppb_full) begin
+                    m_axi_arvalid <= 1'b1;
+                    load_arlen    <= load_next_arlen;
+                end
+
+                if (m_axi_arvalid && m_axi_arready) begin
+                    m_axi_arvalid <= 1'b0;
+                    load_r_active <= 1'b1;
+                    m_axi_rready  <= !w_ppb_full;
+                    load_byte_cnt <= 16'd0;
+                end else if (load_r_active) begin
+                    m_axi_rready <= !w_ppb_full;
+                    if (m_axi_rvalid && m_axi_rready) begin
+                        load_byte_cnt <= load_byte_cnt + AXI_DATA_BYTES;
+                        w_bytes_done  <= w_bytes_done + AXI_DATA_BYTES;
+                        if (m_axi_rlast) begin
+                            load_r_active <= 1'b0;
+                            m_axi_rready  <= 1'b0;
+                            load_addr_cnt <= load_addr_cnt +
+                                             (({8'd0, load_arlen} + 16'd1) << AXI_BYTE_SHIFT);
+                            load_byte_cnt <= 16'd0;
+                            if (w_bytes_done + AXI_DATA_BYTES >= w_len_bytes) begin
+                                w_done <= 1'b1;
+                                if (load_a_after_w) begin
+                                    load_state    <= load_a_after_w_ofm ? L_A_OFM : L_AREAD;
+                                    load_addr_cnt <= a_base_addr;
+                                    a_bytes_done  <= 16'd0;
+                                    ofm_k_pos     <= 16'd0;
+                                    ofm_lane_pos  <= 3'd0;
+                                    ofm_emit_phase <= 2'd0;
+                                    ofm_pack0     <= 32'd0;
+                                    ofm_pack1     <= 32'd0;
+                                    load_a_after_w <= 1'b0;
+                                    load_a_after_w_ofm <= 1'b0;
+                                end else begin
+                                    load_state <= L_IDLE;
+                                    load_a_after_w <= 1'b0;
+                                    load_a_after_w_ofm <= 1'b0;
+                                end
+                            end
                         end
-                    end else if (m_axi_rlast) begin
-                        m_axi_arvalid <= 0;
-                        load_addr_cnt <= w_base_addr + w_bytes_done + DATA_W/8;
-                        load_byte_cnt <= 0;
                     end
                 end
             end
 
-            // Activation-only read — identical behavior to HEAD A_READ
+            // Activation read. Same burst engine as WREAD, targeting A PPBuf.
             L_AREAD: begin
-                m_axi_arvalid <= 1;
-                m_axi_rready  <= 1;
-                if (m_axi_rvalid && m_axi_rready) begin
-                    load_byte_cnt  <= load_byte_cnt + DATA_W/8;
-                    a_bytes_done   <= a_bytes_done + DATA_W/8;
-                    if (a_bytes_done + DATA_W/8 >= a_len_bytes) begin
-                        a_done       <= 1;
-                        load_state   <= L_IDLE;
-                        m_axi_arvalid <= 0;
-                        m_axi_rready  <= 0;
-                    end else if (m_axi_rlast) begin
-                        m_axi_arvalid <= 0;
-                        load_addr_cnt <= a_base_addr + a_bytes_done + DATA_W/8;
-                        load_byte_cnt <= 0;
+                if (!m_axi_arvalid && !load_r_active && !a_ppb_full) begin
+                    m_axi_arvalid <= 1'b1;
+                    load_arlen    <= load_next_arlen;
+                end
+
+                if (m_axi_arvalid && m_axi_arready) begin
+                    m_axi_arvalid <= 1'b0;
+                    load_r_active <= 1'b1;
+                    m_axi_rready  <= !a_ppb_full;
+                    load_byte_cnt <= 16'd0;
+                end else if (load_r_active) begin
+                    m_axi_rready <= !a_ppb_full;
+                    if (m_axi_rvalid && m_axi_rready) begin
+                        load_byte_cnt <= load_byte_cnt + AXI_DATA_BYTES;
+                        a_bytes_done  <= a_bytes_done + AXI_DATA_BYTES;
+                        if (m_axi_rlast) begin
+                            load_r_active <= 1'b0;
+                            m_axi_rready  <= 1'b0;
+                            load_addr_cnt <= load_addr_cnt +
+                                             (({8'd0, load_arlen} + 16'd1) << AXI_BYTE_SHIFT);
+                            load_byte_cnt <= 16'd0;
+                            if (a_bytes_done + AXI_DATA_BYTES >= a_len_bytes) begin
+                                a_done     <= 1'b1;
+                                load_state <= L_IDLE;
+                            end
+                        end
                     end
                 end
             end
 
-            // Interleaved W+A read — identical to HEAD WA_READ
-            L_WA_READ: begin
-                m_axi_arvalid <= 1;
-                m_axi_rready  <= 1;
-                if (m_axi_rvalid && m_axi_rready) begin
-                    load_byte_cnt <= load_byte_cnt + DATA_W/8;
-                    if (load_reading_w) begin
-                        w_bytes_done <= w_bytes_done + DATA_W/8;
-                        if (w_bytes_done + DATA_W/8 >= w_len_bytes) begin
-                            if (a_bytes_done < a_len_bytes) begin
-                                load_reading_w <= 0;
-                                load_addr_cnt  <= a_base_addr + a_bytes_done;
-                                load_byte_cnt  <= 0;
-                                m_axi_arvalid <= 0;
+            // Activation source is the previous layer's 32-bit row-major OFM.
+            // Gather A[m0+r,k] for r=0..3 and repack into the current 4-lane
+            // tile stream consumed by pingpong_buf.
+            L_A_OFM: begin
+                if (ofm_emit_phase != 2'd0) begin
+                    if (!a_ppb_full) begin
+                        a_ofm_wr_en <= 1'b1;
+                        a_ofm_wr_data <= (ofm_emit_phase == 2'd1) ? ofm_pack0 : ofm_pack1;
+                        if (!ofm_fp16_latch || ofm_emit_phase == 2'd2) begin
+                            if (ofm_k_pos + 16'd1 >= ofm_k_len_latch) begin
+                                load_state <= L_A_OFM_DONE;
+                                ofm_emit_phase <= 2'd0;
                             end else begin
-                                w_done <= 1; a_done <= 1; load_state <= L_IDLE;
-                                m_axi_arvalid <= 0; m_axi_rready <= 0;
+                                ofm_k_pos <= ofm_k_pos + 16'd1;
+                                ofm_lane_pos <= 3'd0;
+                                ofm_emit_phase <= 2'd0;
+                                ofm_pack0 <= 32'd0;
+                                ofm_pack1 <= 32'd0;
                             end
-                        end
-                    end else begin
-                        a_bytes_done <= a_bytes_done + DATA_W/8;
-                        if (a_bytes_done + DATA_W/8 >= a_len_bytes) begin
-                            if (w_bytes_done < w_len_bytes) begin
-                                load_reading_w <= 1;
-                                load_addr_cnt  <= w_base_addr + w_bytes_done;
-                                load_byte_cnt  <= 0;
-                                m_axi_arvalid <= 0;
-                            end else begin
-                                w_done <= 1; a_done <= 1; load_state <= L_IDLE;
-                                m_axi_arvalid <= 0; m_axi_rready <= 0;
-                            end
+                        end else begin
+                            ofm_emit_phase <= 2'd2;
                         end
                     end
+                end else if (ofm_lane_pos >= 3'd4) begin
+                    ofm_emit_phase <= 2'd1;
+                end else if (ofm_lane_pos >= ofm_active_rows_latch) begin
+                    case (ofm_lane_pos)
+                        3'd0: ofm_pack0[ 7: 0] <= 8'd0;
+                        3'd1: begin
+                            if (ofm_fp16_latch) ofm_pack0[31:16] <= 16'd0;
+                            else                ofm_pack0[15: 8] <= 8'd0;
+                        end
+                        3'd2: begin
+                            if (ofm_fp16_latch) ofm_pack1[15: 0] <= 16'd0;
+                            else                ofm_pack0[23:16] <= 8'd0;
+                        end
+                        default: begin
+                            if (ofm_fp16_latch) ofm_pack1[31:16] <= 16'd0;
+                            else                ofm_pack0[31:24] <= 8'd0;
+                        end
+                    endcase
+                    ofm_lane_pos <= ofm_lane_pos + 1'b1;
+                end else if (!m_axi_arvalid && !load_r_active && !a_ppb_full) begin
+                    load_addr_cnt <= ofm_cur_addr;
+                    load_arlen    <= 8'd0;
+                    m_axi_arvalid <= 1'b1;
+                end else if (m_axi_arvalid && m_axi_arready) begin
+                    m_axi_arvalid <= 1'b0;
+                    load_r_active <= 1'b1;
+                    m_axi_rready  <= 1'b1;
+                end else if (load_r_active) begin
+                    m_axi_rready <= 1'b1;
+                    if (m_axi_rvalid && m_axi_rready) begin
+                        case (ofm_lane_pos)
+                            3'd0: begin
+                                if (ofm_fp16_latch) ofm_pack0[15: 0] <= m_axi_rdata[15:0];
+                                else                ofm_pack0[ 7: 0] <= m_axi_rdata[7:0];
+                            end
+                            3'd1: begin
+                                if (ofm_fp16_latch) ofm_pack0[31:16] <= m_axi_rdata[15:0];
+                                else                ofm_pack0[15: 8] <= m_axi_rdata[7:0];
+                            end
+                            3'd2: begin
+                                if (ofm_fp16_latch) ofm_pack1[15: 0] <= m_axi_rdata[15:0];
+                                else                ofm_pack0[23:16] <= m_axi_rdata[7:0];
+                            end
+                            default: begin
+                                if (ofm_fp16_latch) ofm_pack1[31:16] <= m_axi_rdata[15:0];
+                                else                ofm_pack0[31:24] <= m_axi_rdata[7:0];
+                            end
+                        endcase
+                        load_r_active <= 1'b0;
+                        m_axi_rready  <= 1'b0;
+                        ofm_lane_pos  <= ofm_lane_pos + 1'b1;
+                    end
                 end
+            end
+
+            // One-cycle delay after the final packed OFM word so the A PPBuf
+            // sees the last a_ofm_wr_en before the controller swaps banks.
+            L_A_OFM_DONE: begin
+                a_done <= 1'b1;
+                load_state <= L_IDLE;
+            end
+
+            // Reserved for a future interleaved read scheduler. Current T3.1 uses
+            // sequential W then A bursts to preserve the existing controller contract.
+            L_WA_READ: begin
+                load_state <= L_IDLE;
+                m_axi_arvalid <= 1'b0;
+                m_axi_rready  <= 1'b0;
+                load_r_active <= 1'b0;
             end
 
             default: load_state <= L_IDLE;
@@ -261,13 +553,49 @@ localparam [1:0] WB_ACTIVE = 2'd1;
 reg [1:0] wb_state;
 reg [31:0] wb_addr_cnt;
 reg [15:0] wb_byte_cnt;
+reg [15:0] wb_bytes_done;
 reg [7:0]  wb_burst_len;
 reg        wb_aw_sent;
+reg        wb_wait_b;
+reg        wb_req_done_after_b;
 
 reg r_pending;
 reg [31:0] r_base_latch;
 reg [15:0] r_len_latch;
 reg r_pending_clr;
+
+localparam [15:0] WRITE_BURST_MAX_BEATS =
+    (BURST_MAX > 256) ? 16'd256 : BURST_MAX;
+
+wire [15:0] wb_remaining_bytes =
+    (r_len_latch > wb_bytes_done) ? (r_len_latch - wb_bytes_done) : 16'd0;
+
+wire [15:0] wb_remaining_beats =
+    (wb_remaining_bytes == 16'd0) ? 16'd0 :
+    ((wb_remaining_bytes + AXI_DATA_BYTES - 1) >> AXI_BYTE_SHIFT);
+
+wire [15:0] wb_bytes_to_4k =
+    16'd4096 - {4'd0, wb_addr_cnt[11:0]};
+wire [15:0] wb_beats_to_4k =
+    (wb_bytes_to_4k >> AXI_BYTE_SHIFT);
+
+wire [15:0] wb_burst_beats_cap0 =
+    (wb_remaining_beats > WRITE_BURST_MAX_BEATS) ? WRITE_BURST_MAX_BEATS :
+                                                   wb_remaining_beats;
+wire [15:0] wb_burst_beats =
+    (wb_burst_beats_cap0 > wb_beats_to_4k) ? wb_beats_to_4k :
+                                             wb_burst_beats_cap0;
+
+wire [7:0] wb_next_awlen =
+    ((wb_burst_beats == 16'd0) ? 16'd1 : wb_burst_beats) - 1'b1;
+wire [15:0] wb_cur_burst_bytes =
+    ({8'd0, wb_burst_len} + 16'd1) << AXI_BYTE_SHIFT;
+wire        wb_cur_burst_last_beat =
+    (wb_byte_cnt + AXI_DATA_BYTES >= wb_cur_burst_bytes);
+wire        wb_request_last_beat =
+    (wb_bytes_done + AXI_DATA_BYTES >= r_len_latch);
+wire        r_fifo_has_next_word =
+    (r_fill > 1) || (r_fifo_wr_en && !r_fifo_full);
 
 always @(posedge clk) begin
     if (!rst_n) begin
@@ -286,7 +614,9 @@ end
 always @(posedge clk) begin
     if (!rst_n) begin
         wb_state <= WB_IDLE; wb_addr_cnt <= 0; wb_byte_cnt <= 0;
+        wb_bytes_done <= 0;
         r_done <= 0; wb_burst_len <= 0; wb_aw_sent <= 0;
+        wb_wait_b <= 1'b0; wb_req_done_after_b <= 1'b0;
         r_pending_clr <= 0;
         m_axi_awvalid <= 0; m_axi_wvalid <= 0;
         m_axi_bready <= 0; m_axi_wstrb <= 0;
@@ -297,25 +627,66 @@ always @(posedge clk) begin
             WB_IDLE: begin
                 m_axi_awvalid <= 0; m_axi_wvalid <= 0;
                 m_axi_bready  <= 0; m_axi_wstrb   <= 0; wb_aw_sent <= 0;
-                if (r_pending && !r_fifo_empty_n) begin
+                wb_wait_b <= 1'b0; wb_req_done_after_b <= 1'b0;
+                if (r_pending && (r_len_latch == 16'd0)) begin
+                    r_done        <= 1'b1;
+                    r_pending_clr <= 1'b1;
+                end else if (r_pending && !r_fifo_empty_n) begin
                     wb_state      <= WB_ACTIVE;
-                    wb_addr_cnt   <= r_base_latch; wb_byte_cnt   <= 0;
-                    wb_burst_len  <= (r_len_latch >> $clog2(DATA_W/8)) - 1;
-                    r_pending_clr <= 1;
+                    wb_addr_cnt   <= r_base_latch;
+                    wb_byte_cnt   <= 16'd0;
+                    wb_bytes_done <= 16'd0;
+                    wb_burst_len  <= 8'd0;
+                    r_pending_clr <= 1'b1;
                 end
             end
             WB_ACTIVE: begin
-                m_axi_bready <= 1; m_axi_wstrb <= {(DATA_W/8){1'b1}};
-                if (!wb_aw_sent) begin
-                    m_axi_awvalid <= 1;
-                    if (m_axi_awvalid && m_axi_awready) begin wb_aw_sent <= 1; m_axi_awvalid <= 0; end
-                end
-                m_axi_wvalid <= !r_fifo_empty_n;
-                if (m_axi_wvalid && m_axi_wready) begin
-                    wb_byte_cnt <= wb_byte_cnt + DATA_W/8;
-                    if (wb_byte_cnt + DATA_W/8 >= r_len_latch) begin
-                        r_done <= 1; wb_state <= WB_IDLE;
-                        m_axi_wvalid <= 0; m_axi_bready <= 0; wb_aw_sent <= 0;
+                m_axi_wstrb <= {(DATA_W/8){1'b1}};
+
+                if (wb_wait_b) begin
+                    m_axi_awvalid <= 1'b0;
+                    m_axi_wvalid  <= 1'b0;
+                    m_axi_bready  <= 1'b1;
+                    if (m_axi_bvalid && m_axi_bready) begin
+                        m_axi_bready <= 1'b0;
+                        wb_wait_b    <= 1'b0;
+                        wb_aw_sent   <= 1'b0;
+                        wb_byte_cnt  <= 16'd0;
+                        wb_req_done_after_b <= 1'b0;
+                        if (wb_req_done_after_b) begin
+                            r_done   <= 1'b1;
+                            wb_state <= WB_IDLE;
+                        end
+                    end
+                end else if (!wb_aw_sent) begin
+                    m_axi_bready <= 1'b0;
+                    m_axi_wvalid <= 1'b0;
+                    if (!m_axi_awvalid) begin
+                        wb_burst_len  <= wb_next_awlen;
+                        wb_byte_cnt   <= 16'd0;
+                        m_axi_awvalid <= 1'b1;
+                    end else if (m_axi_awready) begin
+                        m_axi_awvalid <= 1'b0;
+                        wb_aw_sent    <= 1'b1;
+                    end
+                end else begin
+                    m_axi_awvalid <= 1'b0;
+                    m_axi_bready  <= 1'b0;
+                    if (!m_axi_wvalid && !r_fifo_empty_n)
+                        m_axi_wvalid <= 1'b1;
+
+                    if (m_axi_wvalid && m_axi_wready) begin
+                        wb_byte_cnt   <= wb_byte_cnt + AXI_DATA_BYTES;
+                        wb_bytes_done <= wb_bytes_done + AXI_DATA_BYTES;
+                        if (wb_cur_burst_last_beat) begin
+                            wb_addr_cnt <= wb_addr_cnt + wb_cur_burst_bytes;
+                            wb_wait_b   <= 1'b1;
+                            wb_req_done_after_b <= wb_request_last_beat;
+                            m_axi_wvalid <= 1'b0;
+                            m_axi_bready <= 1'b1;
+                        end else begin
+                            m_axi_wvalid <= r_fifo_has_next_word;
+                        end
                     end
                 end
             end
@@ -328,7 +699,7 @@ end
 // AXI outputs (combinational)
 // ===========================================================================
 assign m_axi_araddr  = load_addr_cnt;
-assign m_axi_arlen   = 8'd0;  // Fixed single-beat (same as HEAD)
+assign m_axi_arlen   = load_arlen;
 assign m_axi_arsize  = $clog2(DATA_W/8);
 assign m_axi_arburst = 2'b01;
 
@@ -338,7 +709,7 @@ assign m_axi_awsize  = $clog2(DATA_W/8);
 assign m_axi_awburst = 2'b01;
 
 assign m_axi_wdata   = r_fifo_dout_int;
-assign m_axi_wlast    = (wb_state == WB_ACTIVE) && (wb_byte_cnt + DATA_W/8 >= r_len_latch);
+assign m_axi_wlast   = (wb_state == WB_ACTIVE) && m_axi_wvalid && wb_cur_burst_last_beat;
 
 // Debug: combined state for testbench compatibility
 wire [3:0] dma_state = {wb_state, load_state};

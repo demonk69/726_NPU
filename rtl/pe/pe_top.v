@@ -14,6 +14,8 @@
 //                    swap_w atomically swaps active/prefetch registers.
 //           OS mode: weight streams through like activation.
 //           FP16/INT8 support with mixed-precision FP32 accumulation.
+//           acc_init_en loads the internal accumulator from PSUM/OUT_BUF before
+//           a K-split continuation tile starts.
 // =============================================================================
 
 `timescale 1ns/1ps
@@ -31,10 +33,12 @@ module pe_top #(
     input  wire              flush,     // flush accumulator
     input  wire              load_w,    // WS: latch w_in into PREFETCH weight reg this cycle
     input  wire              swap_w,    // WS: atomic swap of active↔prefetch weight regs
+    input  wire              acc_init_en, // load internal accumulator from acc_init
     // data
     input  wire [DATA_W-1:0] w_in,      // weight input
     input  wire [DATA_W-1:0] a_in,      // activation input
     input  wire [ACC_W-1:0]  acc_in,    // incoming partial sum (from above PE)
+    input  wire [ACC_W-1:0]  acc_init,  // initial accumulator value for K-split
     output reg  [ACC_W-1:0]  acc_out,   // accumulated result output
     output reg               valid_out
 );
@@ -88,6 +92,13 @@ always @(posedge clk) begin
         s0_flush <= 0;
         s0_mode  <= 0;
         s0_stat  <= 0;
+    end else if (acc_init_en) begin
+        s0_w     <= 0;
+        s0_a     <= 0;
+        s0_valid <= 0;
+        s0_flush <= 0;
+        s0_mode  <= mode;
+        s0_stat  <= stat_mode;
     end else if (en) begin
         s0_mode  <= mode;
         s0_stat <= stat_mode;
@@ -147,6 +158,13 @@ always @(posedge clk) begin
         s1_flush  <= 0;
         s1_stat   <= 0;
         s1_mode   <= 0;
+        s1_acc_in <= 0;
+    end else if (acc_init_en) begin
+        s1_mul    <= 0;
+        s1_valid  <= 0;
+        s1_flush  <= 0;
+        s1_stat   <= stat_mode;
+        s1_mode   <= mode;
         s1_acc_in <= 0;
     end else if (s0_valid) begin
         s1_valid  <= s0_valid;
@@ -227,7 +245,12 @@ always @(posedge clk) begin
     end else begin
         valid_out <= 0;   // default
 
-        if (s1_valid) begin
+        if (acc_init_en) begin
+            if (stat_mode)
+                os_acc <= acc_init;
+            else
+                ws_acc <= acc_init;
+        end else if (s1_valid) begin
             if (s1_stat == 1'b0) begin
                 // ----- Weight-Stationary -----
                 if (s1_flush) begin

@@ -1,7 +1,9 @@
 // =============================================================================
-// tb_matmul_os.v - Matrix multiplication testbench (OS mode)
+// tb_matmul_os.v - Matrix multiplication testbench (OS/WS direct mode)
 //
-// Verifies C[M×N] = A[M×K] × B[K×N] using the tile-loop OS architecture.
+// Verifies C[M×N] = A[M×K] × B[K×N] using generated direct-mode OS or WS
+// parameters. The file name is historical; the active dataflow is selected by
+// `CTRL and `IS_OS from test_params.vh.
 // Uses gen_matmul_data.py generated data files.
 //
 // Parameterized via `include test_params.vh.
@@ -324,9 +326,8 @@ task do_matmul_test;
         wait_done(timeout);
 
         // Debug: print NPU state
-        $display("    NPU ctrl state=%0d, tile_i=%0d, tile_j=%0d, tile_count=%0d/%0d",
-                 u_npu.u_ctrl.state, u_npu.u_ctrl.tile_i, u_npu.u_ctrl.tile_j,
-                 u_npu.u_ctrl.tile_count, u_npu.u_ctrl.tile_total);
+        $display("    NPU ctrl state=%0d, tile_i=%0d, tile_j=%0d",
+                 u_npu.u_ctrl.state, u_npu.u_ctrl.tile_i, u_npu.u_ctrl.tile_j);
         $display("    DMA state=%0d, r_pending=%0d",
                  u_npu.u_dma.dma_state, u_npu.u_dma.r_pending);
 
@@ -383,9 +384,11 @@ initial begin
 
     $display("");
     $display("################################################################");
-    $display("  Matrix Multiplication OS Test: %0dx%0d x %0dx%0d = %0dx%0d",
+    $display("  Matrix Multiplication %0s Test: %0dx%0d x %0dx%0d = %0dx%0d",
+             `IS_OS ? "OS" : "WS",
              `M_DIM, `K_DIM, `K_DIM, `N_DIM, `M_DIM, `N_DIM);
     $display("  Data type: %0s", `IS_FP16 ? "FP16" : "INT8");
+    $display("  CTRL=0x%08h  IS_OS=%0d", `CTRL, `IS_OS);
     $display("################################################################");
 
     do_matmul_test(

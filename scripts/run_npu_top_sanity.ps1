@@ -17,7 +17,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ProjectRoot = "D:\NPU_prj"
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
 $RtlDir  = Join-Path $ProjectRoot "rtl"
 $SimDir  = Join-Path $ProjectRoot "sim"
 
@@ -40,6 +40,7 @@ $srcFiles = @(
     (Join-Path $RtlDir "array\reconfig_pe_array.v")
     # Buffers / FIFO
     (Join-Path $RtlDir "common\fifo.v")
+    (Join-Path $RtlDir "common\axi_monitor.v")
     (Join-Path $RtlDir "buf\pingpong_buf.v")
     # AXI / DMA / Ctrl
     (Join-Path $RtlDir "axi\npu_axi_lite.v")

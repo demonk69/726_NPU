@@ -25,12 +25,12 @@
 //
 //   S_IDLE            - Wait for CPU start; latch all config registers.
 //   S_WARMUP_LOAD     - Phase 0: wait for tile(0,0) DMA load to finish.
-//   S_WARMUP_WAIT     - 1-cycle PPBuf swap propagation; launch prefetch.
+//   S_WARMUP_WAIT     - 1-cycle PPBuf swap propagation.
 //   S_OVERLAP_COMPUTE - Compute tile(i,j) while DMA prefetches next tile.
 //   S_DRAIN           - Assert pe_flush 1 cycle.
 //   S_DRAIN2          - Drain pipeline 2nd cycle.
 //   S_WRITE_BACK      - Initiate DMA write-back.
-//   S_WB_WAIT         - Wait DMA WB done; swap banks; launch next prefetch.
+//   S_WB_WAIT         - Wait DMA WB done; swap banks; S_PRELOAD launches next prefetch.
 //   S_DONE            - Assert IRQ, reset counters, enter S_IDLE.
 //
 // ── IRQ Clear ─────────────────────────────────────────────────────────────
@@ -51,7 +51,8 @@ module npu_ctrl #(
     parameter ROWS   = 4,
     parameter COLS   = 4,
     parameter DATA_W = 16,
-    parameter ACC_W  = 32
+    parameter ACC_W  = 32,
+    parameter PPB_DEPTH = 64
 )(
     input  wire              clk,
     input  wire              rst_n,
@@ -64,6 +65,12 @@ module npu_ctrl #(
     input  wire [31:0]       a_addr,
     input  wire [31:0]       r_addr,
     input  wire [7:0]        arr_cfg,
+    input  wire [31:0]       desc_base,
+    input  wire [31:0]       desc_count,
+    output reg               desc_start,
+    output reg  [31:0]       desc_addr,
+    input  wire              desc_done,
+    input  wire [511:0]      desc_words,
     // Shape configuration for reconfigurable array
     input  wire [1:0]        cfg_shape_in,
     output wire [1:0]        cfg_shape_latched,
@@ -76,10 +83,17 @@ module npu_ctrl #(
     output wire [3:0]        tile_col_valid,
     output wire [2:0]        tile_active_rows,
     output wire [2:0]        tile_active_cols,
+    output wire [31:0]       tile_k_base,
+    output wire [15:0]       tile_k_len,
+    output wire [31:0]       tile_k_index,
     output reg  [15:0]       tile_k_cycle,
     // Status outputs
     output reg               busy,
     output reg               done,
+    output wire              error,
+    output reg [31:0]        err_status,
+    input  wire              err_clear,
+    input  wire [31:0]       err_clear_mask,
     // DMA interface
     output reg               dma_w_start,
     input  wire              dma_w_done,
@@ -89,6 +103,13 @@ module npu_ctrl #(
     input  wire              dma_a_done,
     output reg [31:0]        dma_a_addr,
     output reg [15:0]        dma_a_len,
+    output reg               dma_a_ofm_mode,
+    output reg [31:0]        dma_a_ofm_stride,
+    output reg [31:0]        dma_a_ofm_m_base,
+    output reg [31:0]        dma_a_ofm_k_base,
+    output reg [15:0]        dma_a_ofm_k_len,
+    output reg [2:0]         dma_a_ofm_active_rows,
+    output reg               dma_a_ofm_fp16_mode,
     output reg               dma_r_start,
     input  wire              dma_r_done,
     output reg [31:0]        dma_r_addr,
@@ -129,9 +150,18 @@ localparam S_DRAIN2          = 4'd5;
 localparam S_WRITE_BACK      = 4'd6;
 localparam S_WB_WAIT         = 4'd7;
 localparam S_WAIT_PREFETCH   = 4'd10;  // Wait for prefetch DMA before swap+compute
+localparam S_FETCH_DESC      = 4'd11;
+localparam S_DECODE_DESC     = 4'd12;
+localparam S_DESC_LAUNCH     = 4'd13;
 localparam S_DONE            = 4'd8;
 
 reg [3:0] state;
+localparam [31:0] PPB_DEPTH_WORDS = PPB_DEPTH;
+
+localparam [31:0] ERR_DESC_COUNT_ZERO      = 32'h0000_0001;
+localparam [31:0] ERR_DESC_UNSUPPORTED     = 32'h0000_0002;
+localparam [31:0] ERR_DESC_COUNT_EXHAUSTED = 32'h0000_0004;
+localparam [31:0] ERR_IFM_PREV_MISSING     = 32'h0000_0008;
 
 // ---------------------------------------------------------------------------
 // ctrl_reg bit decode  (live, from AXI-Lite)
@@ -147,12 +177,20 @@ wire        cfg_abort   = ctrl_reg[1];
 wire [1:0]  cfg_mode    = ctrl_reg[3:2]; // 00=INT8  10=FP16
 wire [1:0]  cfg_stat    = ctrl_reg[5:4]; // 00=WS    01=OS
 wire        cfg_irq_clr = ctrl_reg[6];   // CPU writes 1 → clear IRQ
+wire        cfg_desc_mode = ctrl_reg[7];
 wire [1:0]  cfg_data_bytes = (cfg_mode == 2'b00) ? 2'd1 : 2'd2;
 wire [15:0] cfg_scalar_elem_bytes = {14'b0, cfg_data_bytes};
 wire [15:0] cfg_vector_elem_bytes = cfg_scalar_elem_bytes << 2;
+wire [31:0] cfg_k_tile_elems_raw = arr_cfg[7]
+    ? ((cfg_mode == 2'b00) ? PPB_DEPTH_WORDS : (PPB_DEPTH_WORDS >> 1))
+    : k_dim;
+wire [31:0] cfg_k_tile_elems = (cfg_k_tile_elems_raw == 32'd0) ? 32'd1
+                                                               : cfg_k_tile_elems_raw;
+wire [31:0] cfg_start_k_len_32 = (k_dim <= cfg_k_tile_elems) ? k_dim
+                                                             : cfg_k_tile_elems;
 // Warm-up uses live config because shadow registers latch on the same start edge.
 // In tile mode each k step loads 4 lanes, so bytes per k are 4*element_bytes.
-wire [15:0] cfg_start_tile_len = k_dim[15:0] *
+wire [15:0] cfg_start_tile_len = cfg_start_k_len_32[15:0] *
                                   (arr_cfg[7] ? cfg_vector_elem_bytes
                                               : cfg_scalar_elem_bytes);
 
@@ -163,6 +201,63 @@ always @(posedge clk) begin
     else        cfg_start_d1 <= cfg_start;
 end
 wire cfg_start_rise = cfg_start && !cfg_start_d1;
+wire direct_start_rise = cfg_start_rise && !cfg_desc_mode;
+wire desc_mode_start_rise = cfg_start_rise && cfg_desc_mode;
+
+reg        prev_ofm_valid;
+reg [31:0] prev_ofm_addr;
+
+// ---------------------------------------------------------------------------
+// Descriptor v1 decode helpers
+// ---------------------------------------------------------------------------
+localparam integer DESC_W_CTRL        = 0;
+localparam integer DESC_W_M           = 1;
+localparam integer DESC_W_N           = 2;
+localparam integer DESC_W_K           = 3;
+localparam integer DESC_W_IFM_ADDR    = 4;
+localparam integer DESC_W_WEIGHT_ADDR = 5;
+localparam integer DESC_W_OFM_ADDR    = 8;
+localparam integer DESC_W_NEXT_DESC   = 15;
+
+wire [31:0] desc_ctrl_word = desc_words[DESC_W_CTRL*32 +: 32];
+wire [31:0] desc_m_word    = desc_words[DESC_W_M*32 +: 32];
+wire [31:0] desc_n_word    = desc_words[DESC_W_N*32 +: 32];
+wire [31:0] desc_k_word    = desc_words[DESC_W_K*32 +: 32];
+wire [31:0] desc_ifm_word  = desc_words[DESC_W_IFM_ADDR*32 +: 32];
+wire [31:0] desc_wgt_word  = desc_words[DESC_W_WEIGHT_ADDR*32 +: 32];
+wire [31:0] desc_ofm_word  = desc_words[DESC_W_OFM_ADDR*32 +: 32];
+wire [31:0] desc_next_word = desc_words[DESC_W_NEXT_DESC*32 +: 32];
+
+wire [3:0] desc_op_field      = desc_ctrl_word[3:0];
+wire [3:0] desc_dtype_field   = desc_ctrl_word[7:4];
+wire [3:0] desc_flow_field    = desc_ctrl_word[11:8];
+wire [3:0] desc_shape_field   = desc_ctrl_word[15:12];
+wire [3:0] desc_reserved_bits = desc_ctrl_word[27:24];
+wire [3:0] desc_version_field = desc_ctrl_word[31:28];
+wire [1:0] desc_mode_bits     = desc_dtype_field[1:0];
+wire [1:0] desc_flow_bits     = desc_flow_field[1:0];
+wire [1:0] desc_shape_bits    = desc_shape_field[1:0];
+wire       desc_tile_packed   = desc_ctrl_word[16];
+wire       desc_last_layer_bit = desc_ctrl_word[19];
+wire       desc_irq_en_bit    = desc_ctrl_word[20];
+wire       desc_use_bias      = desc_ctrl_word[21];
+wire       desc_use_psum      = desc_ctrl_word[22];
+wire       desc_ifm_from_prev_ofm = desc_ctrl_word[23];
+wire       desc_ifm_prev_missing = desc_ifm_from_prev_ofm && !prev_ofm_valid;
+wire       desc_supported_base =
+    (desc_version_field == 4'd1) &&
+    (desc_op_field == 4'd1) &&                    // GEMM_TILEPACK
+    ((desc_dtype_field == 4'd0) || (desc_dtype_field == 4'd2)) &&
+    (desc_flow_field == 4'd1) &&                  // OS
+    (desc_shape_field == 4'd0) &&                 // 4x4
+    desc_tile_packed &&
+    !desc_use_bias &&
+    !desc_use_psum &&
+    (desc_reserved_bits == 4'd0);
+wire [31:0] desc_decode_err_mask =
+    (desc_supported_base ? 32'd0 : ERR_DESC_UNSUPPORTED) |
+    (desc_ifm_prev_missing ? ERR_IFM_PREV_MISSING : 32'd0);
+wire       desc_decode_error = (desc_decode_err_mask != 32'd0);
 
 // ---------------------------------------------------------------------------
 // Shadow (latched) configuration registers
@@ -173,6 +268,8 @@ reg [31:0] lk_w_addr, lk_a_addr, lk_r_addr;
 reg [1:0]  lk_mode, lk_stat;
 reg [1:0]  lk_shape;   // latched cfg_shape
 reg [7:0]  lk_arr_cfg;
+reg        lk_a_from_prev_ofm;
+reg        lk_desc_irq_en;
 
 assign cfg_shape_latched = lk_shape;
 assign tile_mode = lk_arr_cfg[7];
@@ -185,7 +282,9 @@ always @(posedge clk) begin
         lk_stat   <= 2'b01;                      // default OS
         lk_shape  <= 2'b10;                      // default 16x16
         lk_arr_cfg <= 8'd0;
-    end else if (cfg_start_rise) begin
+        lk_a_from_prev_ofm <= 1'b0;
+        lk_desc_irq_en <= 1'b0;
+    end else if (direct_start_rise) begin
         lk_m_dim  <= m_dim;
         lk_n_dim  <= n_dim;
         lk_k_dim  <= k_dim;
@@ -196,6 +295,22 @@ always @(posedge clk) begin
         lk_stat   <= cfg_stat;
         lk_shape  <= cfg_shape_in;
         lk_arr_cfg <= arr_cfg;
+        lk_a_from_prev_ofm <= 1'b0;
+        lk_desc_irq_en <= 1'b1;
+    end else if (state == S_DECODE_DESC && !desc_decode_error) begin
+        lk_m_dim  <= desc_m_word;
+        lk_n_dim  <= desc_n_word;
+        lk_k_dim  <= desc_k_word;
+        lk_w_addr <= desc_wgt_word;
+        lk_a_addr <= (desc_ifm_from_prev_ofm && prev_ofm_valid) ? prev_ofm_addr
+                                                                : desc_ifm_word;
+        lk_r_addr <= desc_ofm_word;
+        lk_mode   <= desc_mode_bits;
+        lk_stat   <= desc_flow_bits;
+        lk_shape  <= desc_shape_bits;
+        lk_arr_cfg <= {desc_tile_packed, 7'd0};
+        lk_a_from_prev_ofm <= desc_ifm_from_prev_ofm && prev_ofm_valid;
+        lk_desc_irq_en <= desc_irq_en_bit;
     end
 end
 
@@ -220,6 +335,7 @@ wire [1:0] data_bytes = (lk_mode == 2'b00) ? 2'd1 : 2'd2;
 // ---------------------------------------------------------------------------
 reg [31:0] tile_i;
 reg [31:0] tile_j;
+reg [31:0] k_tile_idx;
 reg [2:0]  wb_row;  // tile-mode writeback row r within the current 4x4 C tile
 
 localparam [31:0] TILE_LANES = 32'd4;
@@ -228,9 +344,22 @@ wire [31:0] tile_m_tiles = tile_mode ? ((lk_m_dim + 32'd3) >> 2) : lk_m_dim;
 wire [31:0] tile_n_tiles = tile_mode ? ((lk_n_dim + 32'd3) >> 2) : lk_n_dim;
 wire [31:0] tile_iter_m_count = (tile_m_tiles == 32'd0) ? 32'd1 : tile_m_tiles;
 wire [31:0] tile_iter_n_count = (tile_n_tiles == 32'd0) ? 32'd1 : tile_n_tiles;
+wire [31:0] k_tile_elems_raw = tile_mode
+    ? ((lk_mode == 2'b00) ? PPB_DEPTH_WORDS : (PPB_DEPTH_WORDS >> 1))
+    : lk_k_dim;
+wire [31:0] k_tile_elems = (k_tile_elems_raw == 32'd0) ? 32'd1 : k_tile_elems_raw;
+wire [31:0] k_tile_count_raw = (lk_k_dim + k_tile_elems - 32'd1) / k_tile_elems;
+wire [31:0] k_tile_count = (k_tile_count_raw == 32'd0) ? 32'd1 : k_tile_count_raw;
 
 assign tile_m_base = tile_mode ? (tile_i << 2) : tile_i; // global M row of tile row 0
 assign tile_n_base = tile_mode ? (tile_j << 2) : tile_j; // global N col of tile col 0
+assign tile_k_index = k_tile_idx;
+assign tile_k_base = tile_mode ? (k_tile_idx * k_tile_elems) : 32'd0;
+wire [31:0] tile_k_rem = (lk_k_dim > tile_k_base) ? (lk_k_dim - tile_k_base) : 32'd0;
+wire [31:0] tile_k_len_32 = tile_mode ?
+                            ((tile_k_rem > k_tile_elems) ? k_tile_elems : tile_k_rem) :
+                            lk_k_dim;
+assign tile_k_len = (tile_k_len_32 == 32'd0) ? 16'd1 : tile_k_len_32[15:0];
 
 wire [31:0] tile_row_rem = (lk_m_dim > tile_m_base) ? (lk_m_dim - tile_m_base) : 32'd0;
 wire [31:0] tile_col_rem = (lk_n_dim > tile_n_base) ? (lk_n_dim - tile_n_base) : 32'd0;
@@ -256,7 +385,8 @@ assign tile_col_valid[3] = (tile_active_cols > 3'd3);
 // One-tile DMA byte length
 wire [15:0] scalar_elem_bytes = {14'b0, data_bytes};
 wire [15:0] vector_elem_bytes = scalar_elem_bytes << 2;
-wire [15:0] tile_len = lk_k_dim[15:0] *
+wire [15:0] bytes_per_k = tile_mode ? vector_elem_bytes : scalar_elem_bytes;
+wire [15:0] tile_len = tile_k_len *
                        (tile_mode ? vector_elem_bytes : scalar_elem_bytes);
 
 // Current-tile addresses (used for write-back address calc)
@@ -277,7 +407,7 @@ wire is_last_tile = (tile_i == tile_iter_m_count - 1) &&
 // Result DMA: scalar mode writes one word; tile mode writes one row burst.
 localparam [15:0] TILE_R_LEN = 16'd4;
 
-wire [15:0] tile_compute_cycles = lk_k_dim[15:0] +
+wire [15:0] tile_compute_cycles = tile_k_len +
                                   {13'd0, tile_active_rows} - 16'd1;
 
 // vec_consume advances one packed A vector and one packed W vector for each
@@ -286,7 +416,7 @@ assign vec_consume = tile_mode &&
                      pe_en &&
                      (state == S_OVERLAP_COMPUTE) &&
                      (lk_stat[0] == 1'b1) &&
-                     (tile_k_cycle < lk_k_dim[15:0]);
+                     (tile_k_cycle < tile_k_len);
 
 // ---------------------------------------------------------------------------
 // DMA completion latches
@@ -312,27 +442,69 @@ end
 reg [15:0] ws_consume_cnt;
 
 // ---------------------------------------------------------------------------
-// Combinational: next-tile coordinates (after advancing current tile)
-// These are the coordinates of the tile whose prefetch we need to issue.
+// Descriptor sequencing state
+// desc_left is the remaining fetch budget after the current descriptor fetch.
 // ---------------------------------------------------------------------------
-wire [31:0] next_j_after_cur;   // j coord of tile AFTER current
-wire [31:0] next_i_after_cur;   // i coord of tile AFTER current
-assign next_j_after_cur = (tile_j + 1 < tile_iter_n_count) ? (tile_j + 1) : 32'd0;
-assign next_i_after_cur = (tile_j + 1 < tile_iter_n_count) ? tile_i       : (tile_i + 1);
+reg        desc_mode_run;
+reg [31:0] desc_left;
+reg [31:0] desc_next_addr;
+reg        desc_last_layer;
+wire       desc_normal_stop = desc_last_layer || (desc_next_addr == 32'd0);
+wire       desc_can_fetch_next = desc_mode_run && !desc_normal_stop && (desc_left != 32'd0);
+wire       desc_count_exhausted = desc_mode_run && !desc_normal_stop && (desc_left == 32'd0);
 
-// "The tile after the next tile" — this is what we prefetch when sitting
-// in S_WARMUP_WAIT (we've swapped tile(0,0) to Ping; we want to load tile(0,1))
-// Since we're currently computing tile(0,0), next = tile(0,1):
-//   pf_j = (0+1 < N) ? 1 : 0  etc.  →  already covered by next_j_after_cur/next_i_after_cur
-//   at state entry tile_i=0, tile_j=0.
+reg [31:0] err_set_mask;
+wire [31:0] err_status_after_clear = err_clear ? (err_status & ~err_clear_mask) : err_status;
 
-// Prefetch DMA addresses (next tile)
-wire [31:0] pfetch_w_addr = lk_w_addr + next_j_after_cur * {16'b0, tile_len};
-wire [31:0] pfetch_a_addr = lk_a_addr + next_i_after_cur * {16'b0, tile_len};
+assign error = (err_status != 32'd0);
 
-// Is the next tile the last tile?
-wire next_is_last = (next_i_after_cur == tile_iter_m_count - 1) &&
-                    (next_j_after_cur == tile_iter_n_count - 1);
+always @(posedge clk) begin
+    if (!rst_n) begin
+        err_status <= 32'd0;
+    end else if (err_set_mask != 32'd0) begin
+        err_status <= err_status_after_clear | err_set_mask;
+    end else begin
+        err_status <= err_status_after_clear;
+    end
+end
+
+// ---------------------------------------------------------------------------
+// Combinational: next sequence coordinates.
+// T4.4 makes K the innermost loop:
+//   for m_tile:
+//     for n_tile:
+//       for k_tile:
+//         load/compute current K slice
+// ---------------------------------------------------------------------------
+wire k_tile_last = !tile_mode || (k_tile_idx + 32'd1 >= k_tile_count);
+wire cur_has_next_k = tile_mode && !k_tile_last;
+wire [31:0] next_mn_j = (tile_j + 1 < tile_iter_n_count) ? (tile_j + 1) : 32'd0;
+wire [31:0] next_mn_i = (tile_j + 1 < tile_iter_n_count) ? tile_i       : (tile_i + 1);
+
+wire [31:0] seq1_k = cur_has_next_k ? (k_tile_idx + 32'd1) : 32'd0;
+wire [31:0] seq1_j = cur_has_next_k ? tile_j               : next_mn_j;
+wire [31:0] seq1_i = cur_has_next_k ? tile_i               : next_mn_i;
+
+wire is_last_seq = is_last_tile && k_tile_last;
+
+wire [31:0] seq1_k_base = tile_mode ? (seq1_k * k_tile_elems) : 32'd0;
+wire [31:0] seq1_k_rem = (lk_k_dim > seq1_k_base) ? (lk_k_dim - seq1_k_base) : 32'd0;
+wire [31:0] seq1_k_len_32 = tile_mode ?
+                            ((seq1_k_rem > k_tile_elems) ? k_tile_elems : seq1_k_rem) :
+                            lk_k_dim;
+wire [15:0] seq1_len_bytes = seq1_k_len_32[15:0] * bytes_per_k;
+wire [31:0] seq1_m_base = tile_mode ? (seq1_i << 2) : seq1_i;
+wire [31:0] seq1_row_rem = (lk_m_dim > seq1_m_base) ? (lk_m_dim - seq1_m_base) : 32'd0;
+wire [2:0] seq1_active_rows = !tile_mode ? 3'd1 :
+                              (seq1_row_rem >= TILE_LANES) ? 3'd4 :
+                              seq1_row_rem[2:0];
+
+wire [31:0] pfetch_w_addr = tile_mode ?
+    (lk_w_addr + ((seq1_j * lk_k_dim + seq1_k_base) * {16'b0, vector_elem_bytes})) :
+    (lk_w_addr + seq1_j * ({16'b0, tile_len}));
+wire [31:0] pfetch_a_addr = tile_mode ?
+    (lk_a_addr + ((seq1_i * lk_k_dim + seq1_k_base) * {16'b0, vector_elem_bytes})) :
+    (lk_a_addr + seq1_i * ({16'b0, tile_len}));
 
 // ---------------------------------------------------------------------------
 // Main FSM
@@ -351,12 +523,21 @@ always @(posedge clk) begin
         dma_w_start    <= 1'b0;
         dma_a_start    <= 1'b0;
         dma_r_start    <= 1'b0;
+        desc_start     <= 1'b0;
+        desc_addr      <= 32'd0;
         dma_w_addr     <= 32'd0;
         dma_a_addr     <= 32'd0;
         dma_r_addr     <= 32'd0;
         dma_w_len      <= 16'd0;
         dma_a_len      <= 16'd0;
         dma_r_len      <= 16'd0;
+        dma_a_ofm_mode <= 1'b0;
+        dma_a_ofm_stride <= 32'd0;
+        dma_a_ofm_m_base <= 32'd0;
+        dma_a_ofm_k_base <= 32'd0;
+        dma_a_ofm_k_len <= 16'd0;
+        dma_a_ofm_active_rows <= 3'd0;
+        dma_a_ofm_fp16_mode <= 1'b0;
         dma_w_done_r   <= 1'b0;
         dma_a_done_r   <= 1'b0;
         dma_r_done_r   <= 1'b0;
@@ -369,18 +550,28 @@ always @(posedge clk) begin
         tile_k_cycle   <= 16'd0;
         tile_i         <= 32'd0;
         tile_j         <= 32'd0;
+        k_tile_idx     <= 32'd0;
         wb_row         <= 3'd0;
+        desc_mode_run  <= 1'b0;
+        desc_left      <= 32'd0;
+        desc_next_addr <= 32'd0;
+        desc_last_layer <= 1'b0;
+        prev_ofm_valid <= 1'b0;
+        prev_ofm_addr  <= 32'd0;
+        err_set_mask   <= 32'd0;
     end else begin
         // ── Default: de-assert all one-cycle pulse signals ──
         dma_w_start  <= 1'b0;
         dma_a_start  <= 1'b0;
         dma_r_start  <= 1'b0;
+        desc_start   <= 1'b0;
         w_ppb_swap   <= 1'b0;
         a_ppb_swap   <= 1'b0;
         w_ppb_clear  <= 1'b0;
         a_ppb_clear  <= 1'b0;
         r_fifo_clear <= 1'b0;
         pe_swap_w    <= 1'b0;
+        err_set_mask <= 32'd0;
 
         // ── IRQ Clear: CPU writes ctrl_reg[2] = 1 to acknowledge IRQ ──
         if (cfg_irq_clr) irq <= 1'b0;
@@ -401,12 +592,46 @@ always @(posedge clk) begin
                 dma_a_done_r <= 1'b0;
                 dma_r_done_r <= 1'b0;
 
-                if (cfg_start_rise) begin
+                if (desc_mode_start_rise) begin
+                    done            <= 1'b0;
+                    irq             <= 1'b0;
+                    desc_mode_run   <= 1'b0;
+                    desc_left       <= 32'd0;
+                    desc_next_addr  <= 32'd0;
+                    desc_last_layer <= 1'b0;
+                    prev_ofm_valid  <= 1'b0;
+                    prev_ofm_addr   <= 32'd0;
+                    tile_i          <= 32'd0;
+                    tile_j          <= 32'd0;
+                    k_tile_idx      <= 32'd0;
+                    wb_row          <= 3'd0;
+                    ws_consume_cnt  <= 16'd0;
+                    tile_k_cycle    <= 16'd0;
+                    w_ppb_clear     <= 1'b1;
+                    a_ppb_clear     <= 1'b1;
+                    r_fifo_clear    <= 1'b1;
+                    if (desc_count == 32'd0) begin
+                        busy         <= 1'b0;
+                        err_set_mask <= ERR_DESC_COUNT_ZERO;
+                        state        <= S_IDLE;
+                    end else begin
+                        busy          <= 1'b1;
+                        desc_mode_run <= 1'b1;
+                        desc_left     <= desc_count - 32'd1;
+                        desc_addr     <= desc_base;
+                        desc_start    <= 1'b1;
+                        state         <= S_FETCH_DESC;
+                    end
+                end else if (direct_start_rise) begin
                     busy           <= 1'b1;
+                    desc_mode_run  <= 1'b0;
+                    prev_ofm_valid <= 1'b0;
+                    prev_ofm_addr  <= 32'd0;
                     tile_i         <= 32'd0;
                     tile_j         <= 32'd0;
                     ws_consume_cnt <= 16'd0;
                     tile_k_cycle   <= 16'd0;
+                    k_tile_idx     <= 32'd0;
                     wb_row         <= 3'd0;
 
                     // Clear all buffers for fresh layer start
@@ -420,6 +645,13 @@ always @(posedge clk) begin
                     dma_w_len   <= cfg_start_tile_len;
                     dma_a_addr  <= a_addr;
                     dma_a_len   <= cfg_start_tile_len;
+                    dma_a_ofm_mode <= 1'b0;
+                    dma_a_ofm_stride <= 32'd0;
+                    dma_a_ofm_m_base <= 32'd0;
+                    dma_a_ofm_k_base <= 32'd0;
+                    dma_a_ofm_k_len <= 16'd0;
+                    dma_a_ofm_active_rows <= 3'd0;
+                    dma_a_ofm_fp16_mode <= 1'b0;
                     dma_w_start <= 1'b1;
                     dma_a_start <= 1'b1;
 
@@ -430,6 +662,66 @@ always @(posedge clk) begin
             // =================================================================
             // S_WARMUP_LOAD – wait for tile(0,0) DMA load done.
             // =================================================================
+            S_FETCH_DESC: begin
+                pe_en    <= 1'b0;
+                pe_flush <= 1'b0;
+                if (cfg_abort) begin
+                    state <= S_IDLE;
+                    busy  <= 1'b0;
+                    desc_mode_run <= 1'b0;
+                end else if (desc_done) begin
+                    state <= S_DECODE_DESC;
+                end
+            end
+
+            S_DECODE_DESC: begin
+                pe_en          <= 1'b0;
+                pe_flush       <= 1'b0;
+                tile_i         <= 32'd0;
+                tile_j         <= 32'd0;
+                k_tile_idx     <= 32'd0;
+                wb_row         <= 3'd0;
+                ws_consume_cnt <= 16'd0;
+                tile_k_cycle   <= 16'd0;
+                if (desc_decode_error) begin
+                    busy          <= 1'b0;
+                    done          <= 1'b0;
+                    irq           <= 1'b0;
+                    desc_mode_run <= 1'b0;
+                    err_set_mask  <= desc_decode_err_mask;
+                    state         <= S_IDLE;
+                end else begin
+                    desc_next_addr  <= desc_next_word;
+                    desc_last_layer <= desc_last_layer_bit;
+                    state           <= S_DESC_LAUNCH;
+                end
+            end
+
+            S_DESC_LAUNCH: begin
+                pe_en    <= 1'b0;
+                pe_flush <= 1'b0;
+                w_ppb_clear  <= 1'b1;
+                a_ppb_clear  <= 1'b1;
+                r_fifo_clear <= 1'b1;
+                dma_w_addr   <= lk_w_addr;
+                dma_w_len    <= tile_len;
+                dma_a_addr   <= lk_a_addr;
+                dma_a_len    <= tile_len;
+                dma_a_ofm_mode <= lk_a_from_prev_ofm && tile_mode;
+                dma_a_ofm_stride <= lk_k_dim;
+                dma_a_ofm_m_base <= tile_m_base;
+                dma_a_ofm_k_base <= tile_k_base;
+                dma_a_ofm_k_len <= tile_k_len;
+                dma_a_ofm_active_rows <= tile_active_rows;
+                dma_a_ofm_fp16_mode <= (lk_mode == 2'b10);
+                dma_w_start  <= 1'b1;
+                dma_a_start  <= 1'b1;
+                dma_w_done_r <= 1'b0;
+                dma_a_done_r <= 1'b0;
+                dma_r_done_r <= 1'b0;
+                state        <= S_WARMUP_LOAD;
+            end
+
             S_WARMUP_LOAD: begin
                 pe_en    <= 1'b0;
                 pe_flush <= 1'b0;
@@ -447,8 +739,8 @@ always @(posedge clk) begin
             end
 
             // =================================================================
-            // S_WARMUP_WAIT – 1-cycle swap propagation.
-            // Launch prefetch for tile(0,1) unless tile(0,0) is the last tile.
+            // S_WARMUP_WAIT - 1-cycle swap propagation.
+            // Launch of the next prefetch is delayed to S_PRELOAD after swap.
             // =================================================================
             S_WARMUP_WAIT: begin
                 pe_stat        <= lk_stat[0];
@@ -456,31 +748,36 @@ always @(posedge clk) begin
                 ws_consume_cnt <= 16'd0;
                 tile_k_cycle   <= 16'd0;
 
-                if (is_last_tile) begin
-                    // Only one tile in the whole layer; no prefetch needed.
-                    state <= S_PRELOAD;
-                end else begin
-                    // Prefetch next tile into Pong bank
-                    dma_w_addr  <= pfetch_w_addr;
-                    dma_w_len   <= tile_len;
-                    dma_a_addr  <= pfetch_a_addr;
-                    dma_a_len   <= tile_len;
-                    dma_w_start <= 1'b1;
-                    dma_a_start <= 1'b1;
-                    dma_w_done_r <= 1'b0;
-                    dma_a_done_r <= 1'b0;
-                    state <= S_PRELOAD;
-                end
+                state <= S_PRELOAD;
             end
 
             // =================================================================
-            // S_PRELOAD – 1-cycle wait for PPBuf swap to propagate.
+            // S_PRELOAD - 1-cycle wait for PPBuf swap to propagate.
             // After this cycle, rd_sel/wr_sel/rd_fill are stable for PE.
             // =================================================================
             S_PRELOAD: begin
                 pe_en    <= 1'b0;
                 pe_flush <= 1'b0;
                 // pe_stat and pe_load_w are already set by previous state
+                // Launch the next prefetch one cycle after PPBuf swap so DMA
+                // samples the freshly reset writer bank rather than stale full.
+                if (!is_last_seq) begin
+                    dma_w_addr  <= pfetch_w_addr;
+                    dma_w_len   <= seq1_len_bytes;
+                    dma_a_addr  <= (lk_a_from_prev_ofm && tile_mode) ? lk_a_addr : pfetch_a_addr;
+                    dma_a_len   <= seq1_len_bytes;
+                    dma_a_ofm_mode <= lk_a_from_prev_ofm && tile_mode;
+                    dma_a_ofm_stride <= lk_k_dim;
+                    dma_a_ofm_m_base <= seq1_m_base;
+                    dma_a_ofm_k_base <= seq1_k_base;
+                    dma_a_ofm_k_len <= seq1_k_len_32[15:0];
+                    dma_a_ofm_active_rows <= seq1_active_rows;
+                    dma_a_ofm_fp16_mode <= (lk_mode == 2'b10);
+                    dma_w_start <= 1'b1;
+                    dma_a_start <= 1'b1;
+                    dma_w_done_r <= 1'b0;
+                    dma_a_done_r <= 1'b0;
+                end
                 state <= S_OVERLAP_COMPUTE;
             end
 
@@ -522,7 +819,22 @@ always @(posedge clk) begin
                         end else if (tile_k_cycle + 16'd1 >= tile_compute_cycles) begin
                             pe_en        <= 1'b0;
                             tile_k_cycle <= 16'd0;
-                            state        <= S_DRAIN;
+                            if (!k_tile_last) begin
+                                tile_i     <= seq1_i;
+                                tile_j     <= seq1_j;
+                                k_tile_idx <= seq1_k;
+                                if (dma_load_done) begin
+                                    w_ppb_swap   <= 1'b1;
+                                    a_ppb_swap   <= 1'b1;
+                                    dma_w_done_r <= 1'b0;
+                                    dma_a_done_r <= 1'b0;
+                                    state <= S_PRELOAD;
+                                end else begin
+                                    state <= S_WAIT_PREFETCH;
+                                end
+                            end else begin
+                                state <= S_DRAIN;
+                            end
                         end else begin
                             tile_k_cycle <= tile_k_cycle + 16'd1;
                         end
@@ -588,18 +900,41 @@ always @(posedge clk) begin
                     if (tile_mode && (wb_row + 3'd1 < tile_active_rows)) begin
                         wb_row <= wb_row + 3'd1;
                         state  <= S_WRITE_BACK;
-                    end else if (is_last_tile) begin
+                    end else if (is_last_seq) begin
                         wb_row <= 3'd0;
-                        state <= S_DONE;
+                        if (desc_mode_run) begin
+                            prev_ofm_valid <= 1'b1;
+                            prev_ofm_addr  <= lk_r_addr;
+                        end
+                        if (desc_count_exhausted) begin
+                            busy          <= 1'b0;
+                            done          <= 1'b0;
+                            irq           <= 1'b0;
+                            desc_mode_run <= 1'b0;
+                            err_set_mask  <= ERR_DESC_COUNT_EXHAUSTED;
+                            w_ppb_clear   <= 1'b1;
+                            a_ppb_clear   <= 1'b1;
+                            r_fifo_clear  <= 1'b1;
+                            state         <= S_IDLE;
+                        end else if (desc_can_fetch_next) begin
+                            desc_addr       <= desc_next_addr;
+                            desc_start      <= 1'b1;
+                            desc_left       <= desc_left - 32'd1;
+                            desc_next_addr  <= 32'd0;
+                            desc_last_layer <= 1'b0;
+                            w_ppb_clear     <= 1'b1;
+                            a_ppb_clear     <= 1'b1;
+                            r_fifo_clear    <= 1'b1;
+                            state           <= S_FETCH_DESC;
+                        end else begin
+                            state <= S_DONE;
+                        end
                     end else begin
                         wb_row <= 3'd0;
-                        // Compute next tile coordinates
-                        if (tile_j + 1 < tile_iter_n_count) begin
-                            tile_j <= tile_j + 1;
-                        end else begin
-                            tile_i <= tile_i + 1;
-                            tile_j <= 32'd0;
-                        end
+                        // Advance to the next m/n/k sequence.
+                        tile_i     <= seq1_i;
+                        tile_j     <= seq1_j;
+                        k_tile_idx <= seq1_k;
 
                         // Decide what to do based on prefetch status
                         if (dma_load_done) begin
@@ -613,19 +948,6 @@ always @(posedge clk) begin
                             tile_k_cycle   <= 16'd0;
                             dma_w_done_r   <= 1'b0;
                             dma_a_done_r   <= 1'b0;
-                            // Launch prefetch for the tile two steps ahead
-                            if (!next_is_last) begin
-                                dma_w_addr <= lk_w_addr +
-                                    ( (next_j_after_cur + 1 < tile_iter_n_count) ? (next_j_after_cur + 1) : 32'd0 )
-                                    * {16'b0, tile_len};
-                                dma_a_addr <= lk_a_addr +
-                                    ( (next_j_after_cur + 1 < tile_iter_n_count) ? next_i_after_cur : (next_i_after_cur + 1) )
-                                    * {16'b0, tile_len};
-                                dma_w_len  <= tile_len;
-                                dma_a_len  <= tile_len;
-                                dma_w_start <= 1'b1;
-                                dma_a_start <= 1'b1;
-                            end
                             state <= S_PRELOAD;  // 1-cycle swap propagation
                         end else begin
                             // Prefetch not yet done — wait in S_WAIT_PREFETCH
@@ -636,7 +958,7 @@ always @(posedge clk) begin
             end
 
             // =================================================================
-            // S_WAIT_PREFETCH – Wait for the in-flight prefetch DMA to finish,
+            // S_WAIT_PREFETCH - Wait for the in-flight prefetch DMA to finish,
             // then swap banks, wait S_PRELOAD, and enter compute.
             // =================================================================
             S_WAIT_PREFETCH: begin
@@ -654,19 +976,6 @@ always @(posedge clk) begin
                     tile_k_cycle   <= 16'd0;
                     dma_w_done_r   <= 1'b0;
                     dma_a_done_r   <= 1'b0;
-                    // Launch prefetch for tile two steps ahead (from current new tile)
-                    if (!next_is_last) begin
-                        dma_w_addr <= lk_w_addr +
-                            ( (next_j_after_cur + 1 < tile_iter_n_count) ? (next_j_after_cur + 1) : 32'd0 )
-                            * {16'b0, tile_len};
-                        dma_a_addr <= lk_a_addr +
-                            ( (next_j_after_cur + 1 < tile_iter_n_count) ? next_i_after_cur : (next_i_after_cur + 1) )
-                            * {16'b0, tile_len};
-                        dma_w_len  <= tile_len;
-                        dma_a_len  <= tile_len;
-                        dma_w_start <= 1'b1;
-                        dma_a_start <= 1'b1;
-                    end
                     state <= S_PRELOAD;  // 1-cycle swap propagation
                 end
             end
@@ -678,13 +987,16 @@ always @(posedge clk) begin
                 pe_en  <= 1'b0;
                 busy   <= 1'b0;
                 done   <= 1'b1;
-                irq    <= 1'b1;
+                irq    <= (!desc_mode_run) || lk_desc_irq_en;
                 // Reset counters; clear buffers for next layer
                 ws_consume_cnt <= 16'd0;
                 tile_k_cycle   <= 16'd0;
                 tile_i         <= 32'd0;
                 tile_j         <= 32'd0;
+                k_tile_idx     <= 32'd0;
                 wb_row         <= 3'd0;
+                desc_mode_run  <= 1'b0;
+                desc_left      <= 32'd0;
                 w_ppb_clear    <= 1'b1;
                 a_ppb_clear    <= 1'b1;
                 r_fifo_clear   <= 1'b1;

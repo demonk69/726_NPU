@@ -7,8 +7,8 @@
 //                               [3:2]=data_mode (00=INT8, 10=FP16),
 //                               [5:4]=stat_mode (00=WS,  01=OS),
 //                               bit6=irq_clr (W1C: write 1 to clear IRQ)
-//             0x04  STATUS    - bit0=busy, bit1=done
-//             0x08  INT_EN    - interrupt enable
+//             0x04  STATUS    - bit0=busy, bit1=done, bit2=error
+//             0x08  INT_EN    - bit0=done IRQ enable, bit1=error IRQ enable
 //             0x0C  INT_CLR   - interrupt clear (write-1-to-clear, alt path)
 //             0x10  M_DIM     - matrix M dimension
 //             0x14  N_DIM     - matrix N dimension
@@ -20,11 +20,26 @@
 //             0x34  CLK_DIV   - [2:0]=div_sel
 //             0x38  CG_EN     - clock gating enable
 //             0x3C  CFG_SHAPE - [1:0]=shape (00=4x4, 01=8x8, 10=16x16, 11=8x32)
+//             0x40  DESC_BASE - descriptor list base address
+//             0x44  DESC_COUNT- descriptor count / fetch limit
+//             0x48  PERF_CYCLES      - monitor cycles since reset
+//             0x4C  PERF_RD_BEATS    - AXI master read data beats
+//             0x50  PERF_WR_BEATS    - AXI master write data beats
+//             0x54  PERF_RD_BYTES    - AXI master read bytes
+//             0x58  PERF_WR_BYTES    - AXI master write bytes
+//             0x5C  PERF_RD_BW       - read bytes/cycle x1000
+//             0x60  PERF_WR_BW       - write bytes/cycle x1000
+//             0x64  PERF_RD_UTIL     - read data-channel utilization in bp
+//             0x68  PERF_WR_UTIL     - write data-channel utilization in bp
+//             0x6C  PERF_RD_BURSTS   - AXI master read burst count
+//             0x70  PERF_WR_BURSTS   - AXI master write burst count
+//             0x74  ERR_STATUS        - W1C error status from controller
 //
 //           IRQ Clear dual path:
 //             Path A: write 0x0C (INT_CLR) bit0 = 1  → clears int_pending
 //             Path B: write 0x00 (CTRL)    bit6 = 1  → also clears int_pending
 //                     (bit6 is W1C; subsequent reads return 0)
+//             CTRL bit7 is reserved for descriptor mode and is readable/writable.
 // =============================================================================
 
 `timescale 1ns/1ps
@@ -67,10 +82,28 @@ module npu_axi_lite (
     output reg  [2:0]            clk_div,
     output reg                   cg_en,
     output reg  [1:0]            cfg_shape, // shape select for reconfig array
+    output reg  [31:0]           desc_base,
+    output reg  [31:0]           desc_count,
     // Status from NPU controller
     input  wire                  status_busy,
     input  wire                  status_done,
+    input  wire                  status_error,
+    input  wire [31:0]           err_status,
+    output reg                   err_clear,
+    output reg  [31:0]           err_clear_mask,
     input  wire                  irq_flag,
+    // Performance counters from axi_monitor
+    input  wire [31:0]           perf_cycles,
+    input  wire [31:0]           perf_m_axi_rd_beats,
+    input  wire [31:0]           perf_m_axi_wr_beats,
+    input  wire [31:0]           perf_m_axi_rd_bytes,
+    input  wire [31:0]           perf_m_axi_wr_bytes,
+    input  wire [31:0]           perf_m_axi_rd_bw,
+    input  wire [31:0]           perf_m_axi_wr_bw,
+    input  wire [31:0]           perf_m_axi_rd_util,
+    input  wire [31:0]           perf_m_axi_wr_util,
+    input  wire [31:0]           perf_m_axi_rd_bursts,
+    input  wire [31:0]           perf_m_axi_wr_bursts,
     // Interrupt output
     output wire                  npu_irq
 );
@@ -81,6 +114,8 @@ module npu_axi_lite (
 reg [31:0] int_en_reg;
 reg [31:0] int_clr_reg;
 reg        int_pending;
+reg        irq_flag_d;
+reg        status_error_d;
 
 // ---------------------------------------------------------------------------
 // Write FSM
@@ -110,6 +145,7 @@ always @(posedge aclk) begin
     if (!aresetn) begin
         ctrl_reg  <= 0;
         int_en_reg <= 0;
+        int_clr_reg <= 0;
         m_dim     <= 0;
         n_dim     <= 0;
         k_dim     <= 0;
@@ -120,7 +156,13 @@ always @(posedge aclk) begin
         clk_div   <= 0;
         cg_en     <= 0;
         cfg_shape <= 2'b10;  // default: 16x16 mode
+        desc_base <= 32'd0;
+        desc_count <= 32'd0;
+        err_clear <= 1'b0;
+        err_clear_mask <= 32'd0;
     end else if (wr_en) begin
+        err_clear <= 1'b0;
+        err_clear_mask <= 32'd0;
         case (awaddr_q)
             32'h00: begin
                 if (w_strb[0]) begin
@@ -140,8 +182,17 @@ always @(posedge aclk) begin
             32'h34: if (w_strb[0]) clk_div <= wdata[2:0];
             32'h38: if (w_strb[0]) cg_en   <= wdata[0];
             32'h3C: if (w_strb[0]) cfg_shape <= wdata[1:0];
+            32'h40: if (w_strb[0]) desc_base <= wdata;
+            32'h44: if (w_strb[0]) desc_count <= wdata;
+            32'h74: begin
+                err_clear      <= 1'b1;
+                err_clear_mask <= wdata;
+            end
             default: ;
         endcase
+    end else begin
+        err_clear <= 1'b0;
+        err_clear_mask <= 32'd0;
     end
 end
 
@@ -166,7 +217,7 @@ reg [31:0] rdata_r;
 always @(*) begin
     case (araddr_q)
         32'h00: rdata_r = ctrl_reg;
-        32'h04: rdata_r = {30'b0, status_done, status_busy};
+        32'h04: rdata_r = {29'b0, status_error, status_done, status_busy};
         32'h08: rdata_r = int_en_reg;
         32'h0C: rdata_r = int_pending;
         32'h10: rdata_r = m_dim;
@@ -179,6 +230,20 @@ always @(*) begin
         32'h34: rdata_r = {29'b0, clk_div};
         32'h38: rdata_r = {31'b0, cg_en};
         32'h3C: rdata_r = {30'b0, cfg_shape};
+        32'h40: rdata_r = desc_base;
+        32'h44: rdata_r = desc_count;
+        32'h48: rdata_r = perf_cycles;
+        32'h4C: rdata_r = perf_m_axi_rd_beats;
+        32'h50: rdata_r = perf_m_axi_wr_beats;
+        32'h54: rdata_r = perf_m_axi_rd_bytes;
+        32'h58: rdata_r = perf_m_axi_wr_bytes;
+        32'h5C: rdata_r = perf_m_axi_rd_bw;
+        32'h60: rdata_r = perf_m_axi_wr_bw;
+        32'h64: rdata_r = perf_m_axi_rd_util;
+        32'h68: rdata_r = perf_m_axi_wr_util;
+        32'h6C: rdata_r = perf_m_axi_rd_bursts;
+        32'h70: rdata_r = perf_m_axi_wr_bursts;
+        32'h74: rdata_r = err_status;
         default: rdata_r = 32'hDEADBEEF;
     endcase
 end
@@ -192,13 +257,19 @@ assign rdata = rdata_r;
 //   Path A: write INT_CLR (0x0C) bit0 = 1
 //   Path B: write CTRL    (0x00) bit6 = 1  (W1C bit, see above)
 always @(posedge aclk) begin
-    if (!aresetn)
+    if (!aresetn) begin
         int_pending <= 0;
-    else begin
-        if (irq_flag && int_en_reg[0])
+        irq_flag_d <= 1'b0;
+        status_error_d <= 1'b0;
+    end else begin
+        irq_flag_d <= irq_flag;
+        status_error_d <= status_error;
+        if (irq_flag && !irq_flag_d && int_en_reg[0])
+            int_pending <= 1'b1;
+        if (status_error && !status_error_d && int_en_reg[1])
             int_pending <= 1'b1;
         // Path A: INT_CLR register
-        if (wr_en && awaddr_q == 32'h0C && int_clr_reg[0])
+        if (wr_en && awaddr_q == 32'h0C && wdata[0])
             int_pending <= 1'b0;
         // Path B: CTRL bit6 (irq_clr)
         if (wr_en && awaddr_q == 32'h00 && wdata[6])

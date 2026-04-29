@@ -25,6 +25,7 @@ $RtlSrc = @(
     "$RtlDir\common\axi_monitor.v",
     "$RtlDir\common\op_counter.v",
     "$RtlDir\buf\pingpong_buf.v",
+    "$RtlDir\buf\psum_out_buf.v",
     "$RtlDir\array\reconfig_pe_array.v",
     "$RtlDir\power\npu_power.v",
     "$RtlDir\ctrl\npu_ctrl.v",
@@ -43,6 +44,7 @@ function Run-Test {
         [string]$VvpOut,
         [string[]]$ExtraSrc,
         [string]$IncDir = "",
+        [string]$RunDir = "",
         [int]$ExpectedPass = -1
     )
     Write-Host ""
@@ -59,33 +61,39 @@ function Run-Test {
         return
     }
 
-    Push-Location $ProjectRoot
+    if (-not $RunDir) { $RunDir = $ProjectRoot }
+    Push-Location $RunDir
     $simOut = & vvp $VvpOut 2>&1
     Pop-Location
 
     $pass = ($simOut | Select-String "\[PASS\]").Count
     $fail = ($simOut | Select-String "\[FAIL\]").Count
     $timeout = ($simOut | Select-String "TIMEOUT").Count
+    $simError = ($simOut | Select-String "ERROR:").Count
 
     # Also check summary lines (matmul testbench style: "ALL N CHECKS PASSED")
     $summaryLine = ($simOut | Select-String "RESULT:|ALL.*PASS|ALL.*CHECKS PASSED|PASSED.*FAILED" | Select-Object -Last 1)
     if ($summaryLine) { Write-Host "  $($summaryLine.Line.Trim())" -ForegroundColor Cyan }
 
-    # Extract pass count from "ALL N CHECKS PASSED" if no [PASS] tags
-    if ($pass -eq 0 -and $fail -eq 0) {
-        $chkMatch = ($simOut | Select-String "ALL (\d+) CHECKS PASSED" | Select-Object -Last 1)
-        if ($chkMatch) { $pass = [int]$chkMatch.Matches[0].Groups[1].Value }
-        # Also handle "N PASSED, 0 FAILED" style
-        $r2Match = ($simOut | Select-String "(\d+) PASSED.*?(\d+) FAILED" | Select-Object -Last 1)
-        if ($r2Match -and $pass -eq 0) {
-            $pass = [int]$r2Match.Matches[0].Groups[1].Value
-            $fail = [int]$r2Match.Matches[0].Groups[2].Value
-        }
+    # Prefer explicit testbench summary counts when present.
+    $chkMatch = ($simOut | Select-String "ALL (\d+) CHECKS PASSED" | Select-Object -Last 1)
+    if ($chkMatch) {
+        $pass = [int]$chkMatch.Matches[0].Groups[1].Value
+        $fail = 0
+    }
+    $r2Match = ($simOut | Select-String "(\d+) PASSED.*?(\d+) FAILED" | Select-Object -Last 1)
+    if ($r2Match) {
+        $pass = [int]$r2Match.Matches[0].Groups[1].Value
+        $fail = [int]$r2Match.Matches[0].Groups[2].Value
     }
 
     if ($timeout -gt 0) {
         $fail += $timeout
         Write-Host "  [TIMEOUT detected]" -ForegroundColor Red
+    }
+    if ($simError -gt 0) {
+        $fail += $simError
+        Write-Host "  [Simulator ERROR detected]" -ForegroundColor Red
     }
 
     $status = if ($fail -eq 0 -and $pass -gt 0) { "PASS" } elseif ($fail -gt 0) { "FAIL" } else { "UNKNOWN" }
@@ -112,6 +120,76 @@ Run-Test -Name "fp16_e2e" `
 Run-Test -Name "multi_rc_comprehensive" `
     -VvpOut "$SimDir\reg_multi_rc.vvp" `
     -ExtraSrc @("$TbDir\tb_multi_rc_comprehensive.v")
+
+# ---- 2a0. DMA Read Burst ----
+Run-Test -Name "dma_read_burst" `
+    -VvpOut "$SimDir\reg_dma_read_burst.vvp" `
+    -ExtraSrc @("$TbDir\tb_dma_read_burst.v")
+
+# ---- 2a1. DMA Write Burst ----
+Run-Test -Name "dma_write_burst" `
+    -VvpOut "$SimDir\reg_dma_write_burst.vvp" `
+    -ExtraSrc @("$TbDir\tb_dma_write_burst.v")
+
+# ---- 2a2. DMA Mixed Burst Correctness ----
+Run-Test -Name "dma_burst" `
+    -VvpOut "$SimDir\reg_dma_burst.vvp" `
+    -ExtraSrc @("$TbDir\tb_dma_burst.v")
+
+# ---- 2a3. DMA Bandwidth Utilization ----
+Run-Test -Name "dma_perf" `
+    -VvpOut "$SimDir\reg_dma_perf.vvp" `
+    -ExtraSrc @("$TbDir\tb_dma_perf.v")
+
+# ---- 2a4. PSUM/OUT Buffer RMW ----
+Run-Test -Name "psum_out_buf" `
+    -VvpOut "$SimDir\reg_psum_out_buf.vvp" `
+    -ExtraSrc @("$TbDir\tb_psum_out_buf.v")
+
+# ---- 2a5. PE Array Accumulator Init ----
+Run-Test -Name "reconfig_pe_acc_init" `
+    -VvpOut "$SimDir\reg_reconfig_pe_acc_init.vvp" `
+    -ExtraSrc @("$TbDir\tb_reconfig_pe_acc_init.v")
+
+# ---- 2a6. Controller K-split Loop ----
+Run-Test -Name "npu_ctrl_ksplit" `
+    -VvpOut "$SimDir\reg_npu_ctrl_ksplit.vvp" `
+    -ExtraSrc @("$TbDir\tb_npu_ctrl_ksplit.v")
+
+# ---- 2a6a. Controller OS/WS direct dataflow branches ----
+Run-Test -Name "npu_ctrl_dataflow_modes" `
+    -VvpOut "$SimDir\reg_npu_ctrl_dataflow_modes.vvp" `
+    -ExtraSrc @("$TbDir\tb_npu_ctrl_dataflow_modes.v")
+
+# ---- 2a6b. Controller descriptor error status ----
+Run-Test -Name "npu_ctrl_error_status" `
+    -VvpOut "$SimDir\reg_npu_ctrl_error_status.vvp" `
+    -ExtraSrc @("$TbDir\tb_npu_ctrl_error_status.v")
+
+# ---- 2a7. End-to-end Tile K-split GEMM ----
+Run-Test -Name "npu_tile_ksplit_gemm" `
+    -VvpOut "$SimDir\reg_npu_tile_ksplit_gemm.vvp" `
+    -ExtraSrc @("$TbDir\tb_npu_tile_ksplit_gemm.v")
+
+# ---- 2a8. AXI-Lite descriptor submission registers ----
+Run-Test -Name "npu_axi_lite_desc" `
+    -VvpOut "$SimDir\reg_npu_axi_lite_desc.vvp" `
+    -ExtraSrc @("$TbDir\tb_npu_axi_lite_desc.v")
+
+# ---- 2a9. Descriptor fetch/decode two-layer sequence ----
+Run-Test -Name "npu_desc_two_layer" `
+    -VvpOut "$SimDir\reg_npu_desc_two_layer.vvp" `
+    -ExtraSrc @("$TbDir\tb_npu_desc_two_layer.v")
+
+# ---- 2a10. Descriptor OFM->IFM chained GEMM ----
+Run-Test -Name "npu_desc_ofm_chain" `
+    -VvpOut "$SimDir\reg_npu_desc_ofm_chain.vvp" `
+    -ExtraSrc @("$TbDir\tb_npu_desc_ofm_chain.v")
+
+# ---- 2a10. Top scalar smoke + perf counters ----
+Run-Test -Name "npu_scalar_smoke" `
+    -VvpOut "$SimDir\reg_npu_scalar_smoke.vvp" `
+    -ExtraSrc @("$TbDir\tb_npu_scalar_smoke.v")
 
 # ---- 2a. 4x4 Tile Writeback ----
 Run-Test -Name "npu_tile_writeback" `
@@ -144,6 +222,7 @@ foreach ($tc in $OsCases) {
     Run-Test -Name "os/$tc" `
         -VvpOut "$SimDir\reg_${tc}.vvp" `
         -IncDir $tcDir `
+        -RunDir $tcDir `
         -ExtraSrc @("$TbDir\matmul\tb_matmul_os.v")
 }
 
@@ -167,6 +246,7 @@ foreach ($tc in $WsCases) {
     Run-Test -Name "ws/$tc" `
         -VvpOut "$SimDir\reg_${tc}.vvp" `
         -IncDir $tcDir `
+        -RunDir $tcDir `
         -ExtraSrc @($WsTb)
 }
 

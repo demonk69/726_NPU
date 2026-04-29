@@ -117,6 +117,7 @@ $srcFiles = @(
     (Join-Path $RtlDir "axi\npu_dma.v")
     (Join-Path $RtlDir "buf\pingpong_buf.v")
     (Join-Path $RtlDir "common\fifo.v")
+    (Join-Path $RtlDir "common\axi_monitor.v")
     (Join-Path $RtlDir "pe\pe_top.v")
     (Join-Path $RtlDir "pe\fp16_add.v")
     (Join-Path $RtlDir "pe\fp16_mul.v")

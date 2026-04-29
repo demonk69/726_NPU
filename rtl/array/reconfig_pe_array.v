@@ -60,10 +60,13 @@ module reconfig_pe_array #(
     input  wire                          flush,
     input  wire                          load_w,
     input  wire                          swap_w,
+    input  wire                          acc_init_en,
     // data inputs
     input  wire [PHY_COLS*DATA_W-1:0]    w_in,        // weight: per-column
     input  wire [PHY_ROWS*DATA_W-1:0]    act_in,      // activation: per-row
     input  wire [PHY_COLS*ACC_W-1:0]     acc_in,      // initial psum (OS mode)
+    input  wire [PHY_ROWS*PHY_COLS*ACC_W-1:0] acc_init,
+    input  wire [PHY_ROWS*PHY_COLS-1:0]  acc_init_mask,
     // outputs (max width for 8x32 folded mode = 32 columns)
     output reg  [32*ACC_W-1:0]           acc_out,
     output reg  [31:0]                   valid_out,
@@ -240,6 +243,9 @@ generate
 
             wire pe_clk_en = row_active && col_active;
             assign pe_active_flat[r * PHY_COLS + c] = pe_clk_en;
+            wire pe_acc_init_en = acc_init_en &&
+                                  pe_clk_en &&
+                                  acc_init_mask[r * PHY_COLS + c];
 
             // ── Weight input selection ──
             // OS mode: weight from vertical shift chain w_v[r][c]
@@ -286,9 +292,11 @@ generate
                 .flush    (flush),
                 .load_w   (pe_load_w),
                 .swap_w   (swap_w),
+                .acc_init_en(pe_acc_init_en),
                 .w_in     (pe_w_in),
                 .a_in     (pe_a_in),
                 .acc_in   (pe_acc_in),
+                .acc_init (acc_init[(r*PHY_COLS+c)*ACC_W +: ACC_W]),
                 .acc_out  (acc_v[r+1][c]),
                 .valid_out(valid_v[r+1][c])
             );

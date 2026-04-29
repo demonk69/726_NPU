@@ -27,9 +27,12 @@ reg               stat_mode;
 reg               en;
 reg               flush;
 reg               load_w;                // NEW: WS weight latch
+reg               swap_w;
+reg               acc_init_en;
 reg  [DATA_W-1:0] w_in;
 reg  [DATA_W-1:0] a_in;
 reg  [ACC_W-1:0]  acc_in;
+reg  [ACC_W-1:0]  acc_init;
 wire [ACC_W-1:0]  acc_out;
 wire              valid_out;
 
@@ -47,9 +50,12 @@ pe_top #(
     .en       (en),
     .flush    (flush),
     .load_w   (load_w),
+    .swap_w   (swap_w),
+    .acc_init_en(acc_init_en),
     .w_in     (w_in),
     .a_in     (a_in),
     .acc_in   (acc_in),
+    .acc_init (acc_init),
     .acc_out  (acc_out),
     .valid_out(valid_out)
 );
@@ -65,12 +71,29 @@ always #(CLK_PERIOD/2) clk = ~clk;
 // ---------------------------------------------------------------------------
 task reset_dut;
 begin
-    rst_n = 0; en = 0; flush = 0; load_w = 0;
-    w_in = 0; a_in = 0; acc_in = 0;
+    rst_n = 0; en = 0; flush = 0; load_w = 0; swap_w = 0; acc_init_en = 0;
+    w_in = 0; a_in = 0; acc_in = 0; acc_init = 0;
     mode = 0; stat_mode = 0;
     repeat(4) @(posedge clk);
     rst_n = 1;
     @(posedge clk);
+end
+endtask
+
+task pulse_acc_init;
+    input [ACC_W-1:0] init_value;
+begin
+    @(posedge clk);
+    #1;
+    en = 0;
+    flush = 0;
+    load_w = 0;
+    acc_init = init_value;
+    acc_init_en = 1'b1;
+    @(posedge clk);
+    #1;
+    acc_init_en = 1'b0;
+    acc_init = 0;
 end
 endtask
 
@@ -541,6 +564,66 @@ initial begin
     check_result(acc_out, 32'd28, 143);
 
     en = 0;
+
+    // =======================================================================
+    // Test 15: INT8 OS accumulator init
+    // init=100, then 2*3 + 4*5 = 26, final=126.
+    // =======================================================================
+    $display("\n>>> Starting Test 15: INT8 OS Accumulator Init <<<");
+    reset_dut;
+    mode      = 0;
+    stat_mode = 1;
+
+    pulse_acc_init(32'd100);
+    drive_beat(16'd2, 16'd3, 32'd0, 1'b0);
+    drive_beat(16'd4, 16'd5, 32'd0, 1'b0);
+    @(posedge clk); #1; en=0; flush=0;
+    @(posedge clk); #1; en=0; flush=0;
+    drive_beat(16'd0, 16'd0, 32'd0, 1'b1);
+    @(posedge clk); #1; en=0; flush=0;
+    repeat(3) @(posedge clk); #1;
+    $display("[TEST 15 RESULT] Info: init=100, products=6+20");
+    check_result(acc_out, 32'd126, 15);
+
+    // =======================================================================
+    // Test 16: FP16 OS accumulator init
+    // init=1.5 FP32, then 2.0*2.0 = 4.0, final=5.5.
+    // =======================================================================
+    $display("\n>>> Starting Test 16: FP16 OS Accumulator Init <<<");
+    reset_dut;
+    mode      = 1;
+    stat_mode = 1;
+
+    pulse_acc_init(32'h3FC00000);
+    drive_beat(16'h4000, 16'h4000, 32'd0, 1'b0);
+    @(posedge clk); #1; en=0; flush=0;
+    @(posedge clk); #1; en=0; flush=0;
+    drive_beat(16'd0, 16'd0, 32'd0, 1'b1);
+    @(posedge clk); #1; en=0; flush=0;
+    repeat(3) @(posedge clk); #1;
+    $display("[TEST 16 RESULT] Info: init=1.5, product=4.0");
+    check_result(acc_out, 32'h40B00000, 16);
+
+    // =======================================================================
+    // Test 17: INT8 WS accumulator init
+    // init=10, load w=3, a=4, final=22.
+    // =======================================================================
+    $display("\n>>> Starting Test 17: INT8 WS Accumulator Init <<<");
+    reset_dut;
+    mode      = 0;
+    stat_mode = 0;
+
+    pulse_acc_init(32'd10);
+    @(posedge clk); #1;
+    w_in = 16'd3; a_in = 16'd4; acc_in = 32'd0;
+    flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1; en = 0; load_w = 0;
+    @(posedge clk); #1;
+    @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
+    @(posedge clk); #1; flush = 0; en = 0;
+    repeat(3) @(posedge clk); #1;
+    $display("[TEST 17 RESULT] Info: init=10, w=3, a=4");
+    check_result(acc_out, 32'd22, 17);
 
     // =======================================================================
     // Summary

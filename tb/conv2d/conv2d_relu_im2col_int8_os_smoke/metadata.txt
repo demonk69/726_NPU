@@ -1,0 +1,16 @@
+test_id=conv2d_relu_im2col_int8_os_smoke
+dtype=int8
+mode=OS
+on_the_fly=0
+batch=1
+ifm=5x5x2
+weight=3x2x3x3
+stride=1x1
+pad=1x1
+dilation=1x1
+ofm=5x5x3
+gemm=25x18x3
+w_addr=0x00010000
+a_addr=0x0001013c
+r_addr=0x00010430
+bias_addr=0x0001065c

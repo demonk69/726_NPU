@@ -50,18 +50,41 @@ module npu_dma #(
     input  wire        a_ppb_buf_empty,
     input  wire        a_ppb_drain_done,
     input  wire        a_ofm_mode,
+    input  wire        a_im2col_mode,
     input  wire [31:0] a_ofm_stride,
     input  wire [31:0] a_ofm_m_base,
     input  wire [31:0] a_ofm_k_base,
     input  wire [15:0] a_ofm_k_len,
     input  wire [2:0]  a_ofm_active_rows,
     input  wire        a_ofm_fp16_mode,
+    input  wire [31:0] a_im2col_m_index,
+    input  wire [15:0] a_im2col_k_len,
+    input  wire [15:0] a_im2col_ih,
+    input  wire [15:0] a_im2col_iw,
+    input  wire [15:0] a_im2col_cin,
+    input  wire [15:0] a_im2col_kh,
+    input  wire [15:0] a_im2col_kw,
+    input  wire [15:0] a_im2col_oh,
+    input  wire [15:0] a_im2col_ow,
+    input  wire [7:0]  a_im2col_stride_h,
+    input  wire [7:0]  a_im2col_stride_w,
+    input  wire [7:0]  a_im2col_pad_h,
+    input  wire [7:0]  a_im2col_pad_w,
+    input  wire [7:0]  a_im2col_dilation_h,
+    input  wire [7:0]  a_im2col_dilation_w,
+    input  wire        a_im2col_fp16_mode,
 
     // ---- Descriptor fetch ----
     input  wire        desc_start,
     input  wire [31:0] desc_base_addr,
     output reg         desc_done,
     output reg  [511:0] desc_words,
+
+    // ---- Bias fetch ----
+    input  wire        bias_start,
+    input  wire [31:0] bias_addr,
+    output reg         bias_done,
+    output reg  [31:0] bias_data,
 
     // ---- Channel 2: Result ----
     input  wire        r_start,
@@ -134,25 +157,34 @@ assign w_ppb_wr_data = m_axi_rdata;
 
 reg        a_ofm_wr_en;
 reg [DATA_W-1:0] a_ofm_wr_data;
+reg        a_im2col_wr_en;
+reg [DATA_W-1:0] a_im2col_wr_data;
 
 wire a_read_ppb_wr_en = (load_state == L_AREAD || (load_state == L_WA_READ && !load_reading_w))
                          && m_axi_rvalid && m_axi_rready && !a_ppb_full;
 
-assign a_ppb_wr_en = a_read_ppb_wr_en || (a_ofm_wr_en && !a_ppb_full);
-assign a_ppb_wr_data = a_ofm_wr_en ? a_ofm_wr_data : m_axi_rdata;
+assign a_ppb_wr_en = a_read_ppb_wr_en ||
+                     (a_ofm_wr_en && !a_ppb_full) ||
+                     (a_im2col_wr_en && !a_ppb_full);
+assign a_ppb_wr_data = a_ofm_wr_en ? a_ofm_wr_data :
+                       a_im2col_wr_en ? a_im2col_wr_data :
+                       m_axi_rdata;
 
 // ===========================================================================
 // Load-FSM states
 // ===========================================================================
-localparam [2:0] L_IDLE   = 3'd0;
-localparam [2:0] L_WREAD  = 3'd1;
-localparam [2:0] L_AREAD  = 3'd2;
-localparam [2:0] L_WA_READ= 3'd3;
-localparam [2:0] L_DESC   = 3'd4;
-localparam [2:0] L_A_OFM  = 3'd5;
-localparam [2:0] L_A_OFM_DONE = 3'd6;
+localparam [3:0] L_IDLE   = 4'd0;
+localparam [3:0] L_WREAD  = 4'd1;
+localparam [3:0] L_AREAD  = 4'd2;
+localparam [3:0] L_WA_READ= 4'd3;
+localparam [3:0] L_DESC   = 4'd4;
+localparam [3:0] L_A_OFM  = 4'd5;
+localparam [3:0] L_A_OFM_DONE = 4'd6;
+localparam [3:0] L_A_IM2COL = 4'd7;
+localparam [3:0] L_A_IM2COL_DONE = 4'd8;
+localparam [3:0] L_BIAS = 4'd9;
 
-reg [2:0] load_state;
+reg [3:0] load_state;
 reg [31:0] load_addr_cnt;
 reg [15:0] load_byte_cnt;
 reg [15:0] w_bytes_done, a_bytes_done;
@@ -163,6 +195,9 @@ reg [7:0]  load_arlen;
 reg        load_r_active;
 reg        load_a_after_w;
 reg        load_a_after_w_ofm;
+reg        load_a_after_w_im2col;
+reg        load_bias_after_data;
+reg [31:0] bias_addr_latch;
 
 reg [31:0] ofm_stride_latch;
 reg [31:0] ofm_base_latch;
@@ -176,6 +211,19 @@ reg [2:0]  ofm_lane_pos;
 reg [1:0]  ofm_emit_phase;
 reg [31:0] ofm_pack0;
 reg [31:0] ofm_pack1;
+
+reg [31:0] im2col_base_latch;
+reg [31:0] im2col_m_latch;
+reg [15:0] im2col_k_len_latch;
+reg [15:0] im2col_ih_latch, im2col_iw_latch, im2col_cin_latch;
+reg [15:0] im2col_kh_latch, im2col_kw_latch, im2col_oh_latch, im2col_ow_latch;
+reg [7:0]  im2col_stride_h_latch, im2col_stride_w_latch;
+reg [7:0]  im2col_pad_h_latch, im2col_pad_w_latch;
+reg [7:0]  im2col_dilation_h_latch, im2col_dilation_w_latch;
+reg        im2col_fp16_latch;
+reg [15:0] im2col_k_pos;
+reg [1:0]  im2col_lane_pos;
+reg [31:0] im2col_pack_word;
 
 localparam integer AXI_DATA_BYTES = DATA_W / 8;
 localparam integer AXI_BYTE_SHIFT = $clog2(DATA_W / 8);
@@ -199,6 +247,88 @@ wire [31:0] ofm_cur_addr =
     ofm_base_latch +
     ((((ofm_m_base_latch + {29'd0, ofm_lane_pos}) * ofm_stride_latch) +
       (ofm_k_base_latch + {16'd0, ofm_k_pos})) << AXI_BYTE_SHIFT);
+
+function [31:0] pack_im2col_elem;
+    input [31:0] cur_word;
+    input [1:0]  lane;
+    input        fp16_mode;
+    input [15:0] elem;
+    begin
+        pack_im2col_elem = cur_word;
+        if (fp16_mode) begin
+            if (lane[0] == 1'b0)
+                pack_im2col_elem[15:0] = elem;
+            else
+                pack_im2col_elem[31:16] = elem;
+        end else begin
+            case (lane)
+                2'd0: pack_im2col_elem[7:0]   = elem[7:0];
+                2'd1: pack_im2col_elem[15:8]  = elem[7:0];
+                2'd2: pack_im2col_elem[23:16] = elem[7:0];
+                default: pack_im2col_elem[31:24] = elem[7:0];
+            endcase
+        end
+    end
+endfunction
+
+wire [15:0] im2col_lanes_per_word = im2col_fp16_latch ? 16'd2 : 16'd4;
+wire [15:0] im2col_total_lanes =
+    im2col_fp16_latch ? ((im2col_k_len_latch + 16'd1) & 16'hfffe)
+                      : ((im2col_k_len_latch + 16'd3) & 16'hfffc);
+wire        im2col_lane_last =
+    im2col_fp16_latch ? (im2col_lane_pos[0] == 1'b1)
+                      : (im2col_lane_pos == 2'd3);
+wire        im2col_elem_last = (im2col_k_pos + 16'd1 >= im2col_total_lanes);
+wire        im2col_is_padding = (im2col_k_pos >= im2col_k_len_latch);
+
+wire [31:0] im2col_ohow = im2col_oh_latch * im2col_ow_latch;
+wire [31:0] im2col_spatial = (im2col_ohow == 32'd0) ? 32'd0 :
+                              (im2col_m_latch % im2col_ohow);
+wire [31:0] im2col_b_idx = (im2col_ohow == 32'd0) ? 32'd0 :
+                            (im2col_m_latch / im2col_ohow);
+wire [31:0] im2col_out_h = (im2col_ow_latch == 16'd0) ? 32'd0 :
+                            (im2col_spatial / im2col_ow_latch);
+wire [31:0] im2col_out_w = (im2col_ow_latch == 16'd0) ? 32'd0 :
+                            (im2col_spatial % im2col_ow_latch);
+wire [31:0] im2col_kernel_area = im2col_kh_latch * im2col_kw_latch;
+wire [31:0] im2col_c_idx = (im2col_kernel_area == 32'd0) ? 32'd0 :
+                            (im2col_k_pos / im2col_kernel_area);
+wire [31:0] im2col_kernel_rem = (im2col_kernel_area == 32'd0) ? 32'd0 :
+                                 (im2col_k_pos % im2col_kernel_area);
+wire [31:0] im2col_kh_idx = (im2col_kw_latch == 16'd0) ? 32'd0 :
+                             (im2col_kernel_rem / im2col_kw_latch);
+wire [31:0] im2col_kw_idx = (im2col_kw_latch == 16'd0) ? 32'd0 :
+                             (im2col_kernel_rem % im2col_kw_latch);
+
+wire signed [31:0] im2col_in_h_s =
+    $signed({1'b0, im2col_out_h * {24'd0, im2col_stride_h_latch}}) +
+    $signed({1'b0, im2col_kh_idx * {24'd0, im2col_dilation_h_latch}}) -
+    $signed({24'd0, im2col_pad_h_latch});
+wire signed [31:0] im2col_in_w_s =
+    $signed({1'b0, im2col_out_w * {24'd0, im2col_stride_w_latch}}) +
+    $signed({1'b0, im2col_kw_idx * {24'd0, im2col_dilation_w_latch}}) -
+    $signed({24'd0, im2col_pad_w_latch});
+
+wire im2col_in_bounds =
+    !im2col_is_padding &&
+    (im2col_in_h_s >= 0) && (im2col_in_w_s >= 0) &&
+    (im2col_in_h_s < $signed({16'd0, im2col_ih_latch})) &&
+    (im2col_in_w_s < $signed({16'd0, im2col_iw_latch}));
+
+wire [31:0] im2col_elem_index =
+    ((((im2col_b_idx * im2col_cin_latch) + im2col_c_idx) * im2col_ih_latch +
+      im2col_in_h_s[31:0]) * im2col_iw_latch) + im2col_in_w_s[31:0];
+wire [31:0] im2col_elem_addr =
+    im2col_base_latch + (im2col_fp16_latch ? (im2col_elem_index << 1)
+                                           : im2col_elem_index);
+wire [31:0] im2col_aligned_addr = {im2col_elem_addr[31:2], 2'b00};
+wire [15:0] im2col_r_elem =
+    im2col_fp16_latch ? (im2col_elem_addr[1] ? m_axi_rdata[31:16] : m_axi_rdata[15:0]) :
+                        {8'd0,
+                         (im2col_elem_addr[1:0] == 2'd0) ? m_axi_rdata[7:0] :
+                         (im2col_elem_addr[1:0] == 2'd1) ? m_axi_rdata[15:8] :
+                         (im2col_elem_addr[1:0] == 2'd2) ? m_axi_rdata[23:16] :
+                                                           m_axi_rdata[31:24]};
 
 wire [15:0] load_remaining_bytes =
     (load_target_len > load_target_done) ? (load_target_len - load_target_done) : 16'd0;
@@ -230,6 +360,8 @@ always @(posedge clk) begin
         w_bytes_done <= 0; a_bytes_done <= 0;
         desc_done <= 1'b0;
         desc_words <= 512'd0;
+        bias_done <= 1'b0;
+        bias_data <= 32'd0;
         desc_bytes_done <= 16'd0;
         desc_word_idx <= 5'd0;
         load_reading_w <= 1;
@@ -237,8 +369,13 @@ always @(posedge clk) begin
         load_r_active <= 1'b0;
         load_a_after_w <= 1'b0;
         load_a_after_w_ofm <= 1'b0;
+        load_a_after_w_im2col <= 1'b0;
+        load_bias_after_data <= 1'b0;
+        bias_addr_latch <= 32'd0;
         a_ofm_wr_en <= 1'b0;
         a_ofm_wr_data <= {DATA_W{1'b0}};
+        a_im2col_wr_en <= 1'b0;
+        a_im2col_wr_data <= {DATA_W{1'b0}};
         ofm_stride_latch <= 32'd0;
         ofm_base_latch <= 32'd0;
         ofm_m_base_latch <= 32'd0;
@@ -251,12 +388,26 @@ always @(posedge clk) begin
         ofm_emit_phase <= 2'd0;
         ofm_pack0 <= 32'd0;
         ofm_pack1 <= 32'd0;
+        im2col_base_latch <= 32'd0;
+        im2col_m_latch <= 32'd0;
+        im2col_k_len_latch <= 16'd0;
+        im2col_ih_latch <= 16'd0; im2col_iw_latch <= 16'd0; im2col_cin_latch <= 16'd0;
+        im2col_kh_latch <= 16'd0; im2col_kw_latch <= 16'd0; im2col_oh_latch <= 16'd0; im2col_ow_latch <= 16'd0;
+        im2col_stride_h_latch <= 8'd1; im2col_stride_w_latch <= 8'd1;
+        im2col_pad_h_latch <= 8'd0; im2col_pad_w_latch <= 8'd0;
+        im2col_dilation_h_latch <= 8'd1; im2col_dilation_w_latch <= 8'd1;
+        im2col_fp16_latch <= 1'b0;
+        im2col_k_pos <= 16'd0;
+        im2col_lane_pos <= 2'd0;
+        im2col_pack_word <= 32'd0;
         m_axi_arvalid <= 0; m_axi_rready <= 0;
     end else begin
         w_done <= 1'b0;
         a_done <= 1'b0;
         desc_done <= 1'b0;
+        bias_done <= 1'b0;
         a_ofm_wr_en <= 1'b0;
+        a_im2col_wr_en <= 1'b0;
         case (load_state)
             L_IDLE: begin
                 w_bytes_done <= 0; a_bytes_done <= 0;
@@ -268,17 +419,24 @@ always @(posedge clk) begin
                 load_byte_cnt <= 16'd0;
                 load_a_after_w <= 1'b0;
                 load_a_after_w_ofm <= 1'b0;
+                load_a_after_w_im2col <= 1'b0;
+                load_bias_after_data <= 1'b0;
                 ofm_emit_phase <= 2'd0;
                 ofm_lane_pos <= 3'd0;
                 ofm_k_pos <= 16'd0;
                 ofm_pack0 <= 32'd0;
                 ofm_pack1 <= 32'd0;
+                im2col_k_pos <= 16'd0;
+                im2col_lane_pos <= 2'd0;
+                im2col_pack_word <= 32'd0;
 
                 if (w_start && (w_len_bytes == 16'd0))
                     w_done <= 1'b1;
-                if (a_start && !a_ofm_mode && (a_len_bytes == 16'd0))
+                if (a_start && !a_ofm_mode && !a_im2col_mode && (a_len_bytes == 16'd0))
                     a_done <= 1'b1;
                 if (a_start && a_ofm_mode && (a_ofm_k_len == 16'd0))
+                    a_done <= 1'b1;
+                if (a_start && a_im2col_mode && (a_im2col_k_len == 16'd0))
                     a_done <= 1'b1;
 
                 // Result WB uses independent AW/W/B channels; read-side DMA can
@@ -296,8 +454,12 @@ always @(posedge clk) begin
                     w_bytes_done  <= 16'd0;
                     a_bytes_done  <= 16'd0;
                     load_a_after_w <= a_start && ((a_ofm_mode && (a_ofm_k_len != 16'd0)) ||
-                                                  (!a_ofm_mode && (a_len_bytes != 16'd0)));
+                                                  (a_im2col_mode && (a_im2col_k_len != 16'd0)) ||
+                                                  (!a_ofm_mode && !a_im2col_mode && (a_len_bytes != 16'd0)));
                     load_a_after_w_ofm <= a_ofm_mode;
+                    load_a_after_w_im2col <= a_im2col_mode;
+                    load_bias_after_data <= bias_start;
+                    bias_addr_latch <= bias_addr;
                     if (a_start && a_ofm_mode) begin
                         ofm_stride_latch <= a_ofm_stride;
                         ofm_base_latch <= a_base_addr;
@@ -306,6 +468,27 @@ always @(posedge clk) begin
                         ofm_k_len_latch <= a_ofm_k_len;
                         ofm_active_rows_latch <= a_ofm_active_rows;
                         ofm_fp16_latch <= a_ofm_fp16_mode;
+                    end else if (a_start && a_im2col_mode) begin
+                        im2col_base_latch <= a_base_addr;
+                        im2col_m_latch <= a_im2col_m_index;
+                        im2col_k_len_latch <= a_im2col_k_len;
+                        im2col_ih_latch <= a_im2col_ih;
+                        im2col_iw_latch <= a_im2col_iw;
+                        im2col_cin_latch <= a_im2col_cin;
+                        im2col_kh_latch <= a_im2col_kh;
+                        im2col_kw_latch <= a_im2col_kw;
+                        im2col_oh_latch <= a_im2col_oh;
+                        im2col_ow_latch <= a_im2col_ow;
+                        im2col_stride_h_latch <= a_im2col_stride_h;
+                        im2col_stride_w_latch <= a_im2col_stride_w;
+                        im2col_pad_h_latch <= a_im2col_pad_h;
+                        im2col_pad_w_latch <= a_im2col_pad_w;
+                        im2col_dilation_h_latch <= a_im2col_dilation_h;
+                        im2col_dilation_w_latch <= a_im2col_dilation_w;
+                        im2col_fp16_latch <= a_im2col_fp16_mode;
+                        im2col_k_pos <= 16'd0;
+                        im2col_lane_pos <= 2'd0;
+                        im2col_pack_word <= 32'd0;
                     end
                 end else if (a_start && a_ofm_mode && (a_ofm_k_len != 16'd0) && !a_ppb_full) begin
                     load_state       <= L_A_OFM;
@@ -324,11 +507,46 @@ always @(posedge clk) begin
                     ofm_emit_phase <= 2'd0;
                     ofm_pack0 <= 32'd0;
                     ofm_pack1 <= 32'd0;
+                    load_bias_after_data <= bias_start;
+                    bias_addr_latch <= bias_addr;
+                end else if (a_start && a_im2col_mode && (a_im2col_k_len != 16'd0) && !a_ppb_full) begin
+                    load_state <= L_A_IM2COL;
+                    load_addr_cnt <= a_base_addr;
+                    load_byte_cnt <= 16'd0;
+                    a_bytes_done <= 16'd0;
+                    im2col_base_latch <= a_base_addr;
+                    im2col_m_latch <= a_im2col_m_index;
+                    im2col_k_len_latch <= a_im2col_k_len;
+                    im2col_ih_latch <= a_im2col_ih;
+                    im2col_iw_latch <= a_im2col_iw;
+                    im2col_cin_latch <= a_im2col_cin;
+                    im2col_kh_latch <= a_im2col_kh;
+                    im2col_kw_latch <= a_im2col_kw;
+                    im2col_oh_latch <= a_im2col_oh;
+                    im2col_ow_latch <= a_im2col_ow;
+                    im2col_stride_h_latch <= a_im2col_stride_h;
+                    im2col_stride_w_latch <= a_im2col_stride_w;
+                    im2col_pad_h_latch <= a_im2col_pad_h;
+                    im2col_pad_w_latch <= a_im2col_pad_w;
+                    im2col_dilation_h_latch <= a_im2col_dilation_h;
+                    im2col_dilation_w_latch <= a_im2col_dilation_w;
+                    im2col_fp16_latch <= a_im2col_fp16_mode;
+                    im2col_k_pos <= 16'd0;
+                    im2col_lane_pos <= 2'd0;
+                    im2col_pack_word <= 32'd0;
+                    load_bias_after_data <= bias_start;
+                    bias_addr_latch <= bias_addr;
                 end else if (a_start && (a_len_bytes != 16'd0) && !a_ppb_full) begin
                     load_state    <= L_AREAD;
                     load_addr_cnt <= a_base_addr;
                     load_byte_cnt <= 16'd0;
                     a_bytes_done  <= 16'd0;
+                    load_bias_after_data <= bias_start;
+                    bias_addr_latch <= bias_addr;
+                end else if (bias_start) begin
+                    load_state <= L_BIAS;
+                    load_addr_cnt <= bias_addr;
+                    load_byte_cnt <= 16'd0;
                 end
             end
 
@@ -392,7 +610,9 @@ always @(posedge clk) begin
                             if (w_bytes_done + AXI_DATA_BYTES >= w_len_bytes) begin
                                 w_done <= 1'b1;
                                 if (load_a_after_w) begin
-                                    load_state    <= load_a_after_w_ofm ? L_A_OFM : L_AREAD;
+                                    load_state    <= load_a_after_w_ofm ? L_A_OFM :
+                                                     load_a_after_w_im2col ? L_A_IM2COL :
+                                                     L_AREAD;
                                     load_addr_cnt <= a_base_addr;
                                     a_bytes_done  <= 16'd0;
                                     ofm_k_pos     <= 16'd0;
@@ -400,12 +620,21 @@ always @(posedge clk) begin
                                     ofm_emit_phase <= 2'd0;
                                     ofm_pack0     <= 32'd0;
                                     ofm_pack1     <= 32'd0;
+                                    im2col_k_pos <= 16'd0;
+                                    im2col_lane_pos <= 2'd0;
+                                    im2col_pack_word <= 32'd0;
                                     load_a_after_w <= 1'b0;
                                     load_a_after_w_ofm <= 1'b0;
+                                    load_a_after_w_im2col <= 1'b0;
+                                end else if (load_bias_after_data) begin
+                                    load_state <= L_BIAS;
+                                    load_addr_cnt <= bias_addr_latch;
                                 end else begin
                                     load_state <= L_IDLE;
                                     load_a_after_w <= 1'b0;
                                     load_a_after_w_ofm <= 1'b0;
+                                    load_a_after_w_im2col <= 1'b0;
+                                    load_bias_after_data <= 1'b0;
                                 end
                             end
                         end
@@ -438,7 +667,12 @@ always @(posedge clk) begin
                             load_byte_cnt <= 16'd0;
                             if (a_bytes_done + AXI_DATA_BYTES >= a_len_bytes) begin
                                 a_done     <= 1'b1;
-                                load_state <= L_IDLE;
+                                if (load_bias_after_data) begin
+                                    load_state <= L_BIAS;
+                                    load_addr_cnt <= bias_addr_latch;
+                                end else begin
+                                    load_state <= L_IDLE;
+                                end
                             end
                         end
                     end
@@ -527,7 +761,111 @@ always @(posedge clk) begin
             // sees the last a_ofm_wr_en before the controller swaps banks.
             L_A_OFM_DONE: begin
                 a_done <= 1'b1;
-                load_state <= L_IDLE;
+                if (load_bias_after_data) begin
+                    load_state <= L_BIAS;
+                    load_addr_cnt <= bias_addr_latch;
+                end else begin
+                    load_state <= L_IDLE;
+                end
+            end
+
+            // T6.2: on-the-fly Conv2D im2col gather for direct scalar mode.
+            // The controller supplies the output row m; this FSM walks k over
+            // Cin/KH/KW, reads IFM[b,cin,ih,iw] when in bounds, emits zero for
+            // padding, and packs the generated A row into 32-bit PPBuf words.
+            L_A_IM2COL: begin
+                if (im2col_k_pos >= im2col_total_lanes) begin
+                    load_state <= L_A_IM2COL_DONE;
+                end else if (im2col_is_padding || !im2col_in_bounds) begin
+                    if (!im2col_lane_last || !a_ppb_full) begin
+                        if (im2col_lane_last) begin
+                            a_im2col_wr_en <= 1'b1;
+                            a_im2col_wr_data <= pack_im2col_elem(im2col_pack_word,
+                                                                  im2col_lane_pos,
+                                                                  im2col_fp16_latch,
+                                                                  16'd0);
+                            im2col_pack_word <= 32'd0;
+                            im2col_lane_pos <= 2'd0;
+                        end else begin
+                            im2col_pack_word <= pack_im2col_elem(im2col_pack_word,
+                                                                  im2col_lane_pos,
+                                                                  im2col_fp16_latch,
+                                                                  16'd0);
+                            im2col_lane_pos <= im2col_lane_pos + 1'b1;
+                        end
+                        im2col_k_pos <= im2col_k_pos + 1'b1;
+                        if (im2col_elem_last)
+                            load_state <= L_A_IM2COL_DONE;
+                    end
+                end else if (!m_axi_arvalid && !load_r_active && (!im2col_lane_last || !a_ppb_full)) begin
+                    load_addr_cnt <= im2col_aligned_addr;
+                    load_arlen    <= 8'd0;
+                    m_axi_arvalid <= 1'b1;
+                end else if (m_axi_arvalid && m_axi_arready) begin
+                    m_axi_arvalid <= 1'b0;
+                    load_r_active <= 1'b1;
+                    m_axi_rready  <= 1'b1;
+                end else if (load_r_active) begin
+                    m_axi_rready <= 1'b1;
+                    if (m_axi_rvalid && m_axi_rready && (!im2col_lane_last || !a_ppb_full)) begin
+                        load_r_active <= 1'b0;
+                        m_axi_rready  <= 1'b0;
+                        if (im2col_lane_last) begin
+                            a_im2col_wr_en <= 1'b1;
+                            a_im2col_wr_data <= pack_im2col_elem(im2col_pack_word,
+                                                                  im2col_lane_pos,
+                                                                  im2col_fp16_latch,
+                                                                  im2col_r_elem);
+                            im2col_pack_word <= 32'd0;
+                            im2col_lane_pos <= 2'd0;
+                        end else begin
+                            im2col_pack_word <= pack_im2col_elem(im2col_pack_word,
+                                                                  im2col_lane_pos,
+                                                                  im2col_fp16_latch,
+                                                                  im2col_r_elem);
+                            im2col_lane_pos <= im2col_lane_pos + 1'b1;
+                        end
+                        im2col_k_pos <= im2col_k_pos + 1'b1;
+                        if (im2col_elem_last)
+                            load_state <= L_A_IM2COL_DONE;
+                    end
+                end
+            end
+
+            L_A_IM2COL_DONE: begin
+                a_done <= 1'b1;
+                if (load_bias_after_data) begin
+                    load_state <= L_BIAS;
+                    load_addr_cnt <= bias_addr_latch;
+                end else begin
+                    load_state <= L_IDLE;
+                end
+            end
+
+            // T6.3: one-beat 32-bit bias fetch. The controller issues this
+            // alongside the current direct-scalar W/A load, and waits for
+            // bias_done before allowing compute to start.
+            L_BIAS: begin
+                if (!m_axi_arvalid && !load_r_active) begin
+                    m_axi_arvalid <= 1'b1;
+                    load_arlen    <= 8'd0;
+                end
+
+                if (m_axi_arvalid && m_axi_arready) begin
+                    m_axi_arvalid <= 1'b0;
+                    load_r_active <= 1'b1;
+                    m_axi_rready  <= 1'b1;
+                end else if (load_r_active) begin
+                    m_axi_rready <= 1'b1;
+                    if (m_axi_rvalid && m_axi_rready) begin
+                        bias_data <= m_axi_rdata;
+                        bias_done <= 1'b1;
+                        load_r_active <= 1'b0;
+                        m_axi_rready  <= 1'b0;
+                        load_bias_after_data <= 1'b0;
+                        load_state <= L_IDLE;
+                    end
+                end
             end
 
             // Reserved for a future interleaved read scheduler. Current T3.1 uses
@@ -712,6 +1050,6 @@ assign m_axi_wdata   = r_fifo_dout_int;
 assign m_axi_wlast   = (wb_state == WB_ACTIVE) && m_axi_wvalid && wb_cur_burst_last_beat;
 
 // Debug: combined state for testbench compatibility
-wire [3:0] dma_state = {wb_state, load_state};
+wire [5:0] dma_state = {wb_state, load_state};
 
 endmodule

@@ -1,0 +1,6 @@
+test_id=conv2d_two_layer_int8_os_default
+layer0=conv2d_otf_int8_os_bias_relu_quant
+layer1=conv2d_1x1_direct_int8_os_bias_relu_quant
+layer0_r_addr=0x0001021c
+layer1_a_addr=0x0001021c
+layer1_r_addr=0x00010568

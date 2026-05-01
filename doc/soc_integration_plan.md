@@ -87,20 +87,21 @@ wait_irq_or_poll_done();
 .PHY_COLS(...)
 ```
 
-SoC 当前仍不能作为通过基线，`scripts/run_soc_sim.ps1` 的剩余编译问题是：
+SoC smoke 当前已重新作为通过基线，`scripts/run_soc_sim.ps1` 的结果是：
 
 ```text
-dram_model.v: unable to bind axi_arlen
-soc_top.v: PicoRV32 PCPI ports do not match the referenced CPU module
+[PASS] SoC integration test PASSED
+Cycles: 247
+DRAM result area (0x1020): C00=19 C01=22 C10=43 C11=50
 ```
 
-修复顺序：
+已完成修复：
 
-1. 对齐 `dram_model` 的 AXI 端口和内部信号命名，确认是否需要接入 `arlen/awlen`。
-2. 对齐 PicoRV32 参考核实际暴露的 PCPI 端口，或关闭 SoC 中未使用的 PCPI 连接。
-3. 先运行 CPU 写寄存器 + NPU done 的空任务测试。
-4. 再运行 1-output INT8 dot product。
-5. 最后运行 4x4 GEMM tile。
+1. `dram_model` 接入 `axi_arlen`，并修正 AXI write burst 的 WLAST/address 推进。
+2. `soc_top` 对齐 PicoRV32 参考核实际暴露的 PCPI 端口。
+3. `axi_lite_bridge` 分离 AW/W 握手，适配当前 `npu_axi_lite` 的顺序 ready 行为。
+4. `soc_mem` 和 `dram_model` CPU 读口改为组合读，保证 PicoRV32 `mem_ready` 与 `mem_rdata` 同周期有效。
+5. `tb_soc.v` 在 marker PASS 后独立检查 DRAM result area，避免假阳性。
 
 ## AXI-Lite 桥
 

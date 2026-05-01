@@ -76,6 +76,9 @@ def float_to_fp16(f):
 def float_to_fp32_word(f):
     return struct.unpack('<I', struct.pack('<f', f))[0]
 
+def fp32_word_to_float(w):
+    return struct.unpack('<f', struct.pack('<I', w & 0xFFFFFFFF))[0]
+
 def write_hex(path, words):
     with open(path, 'w') as f:
         for w in words:
@@ -133,10 +136,112 @@ def gen_fp16_matmul(M, K, N, seed):
         C.append(row)
     return A, B, C
 
+def signed32(x):
+    x &= 0xFFFFFFFF
+    return x - 0x100000000 if x & 0x80000000 else x
+
+def gen_int32_bias(N, seed):
+    rng = random.Random(seed)
+    return [rng.randint(-128, 128) for _ in range(N)]
+
+def gen_fp32_bias(N, seed):
+    rng = random.Random(seed)
+    choices = [-2.0, -1.5, -1.0, -0.5, -0.25, 0.25, 0.5, 1.0, 1.5, 2.0]
+    return [rng.choice(choices) for _ in range(N)]
+
+def bias_to_words(bias, dtype):
+    if dtype == 'int8':
+        return [v & 0xFFFFFFFF for v in bias]
+    return [float_to_fp32_word(v) for v in bias]
+
+def apply_bias(C, bias, dtype):
+    if not bias:
+        return C
+
+    out = []
+    for row in C:
+        out_row = []
+        for j, val in enumerate(row):
+            if dtype == 'int8':
+                out_row.append((signed32(val) + bias[j]) & 0xFFFFFFFF)
+            else:
+                out_row.append(float_to_fp32_word(fp32_word_to_float(val) + bias[j]))
+        out.append(out_row)
+    return out
+
+def apply_activation(C, dtype, activation):
+    if activation == 'none':
+        return C
+
+    out = []
+    for row in C:
+        out_row = []
+        for val in row:
+            if dtype == 'int8':
+                signed = signed32(val)
+                if activation == 'relu':
+                    signed = max(signed, 0)
+                elif activation == 'relu6':
+                    signed = min(max(signed, 0), 6)
+                out_row.append(signed & 0xFFFFFFFF)
+            else:
+                fp = fp32_word_to_float(val)
+                if activation == 'relu':
+                    fp = max(fp, 0.0)
+                elif activation == 'relu6':
+                    fp = min(max(fp, 0.0), 6.0)
+                out_row.append(float_to_fp32_word(fp))
+        out.append(out_row)
+    return out
+
+def activation_ctrl_bits(activation):
+    if activation == 'relu':
+        return 0x400
+    if activation == 'relu6':
+        return 0x800
+    return 0
+
+def activation_mode_id(activation):
+    if activation == 'relu':
+        return 1
+    if activation == 'relu6':
+        return 2
+    return 0
+
+def quant_cfg_word(enabled, scale, shift, rounding):
+    if shift < 0 or shift > 31:
+        raise ValueError('quant shift must be in [0, 31]')
+    if scale < -32768 or scale > 32767:
+        raise ValueError('quant scale must fit signed 16-bit')
+    scale_u = scale & 0xFFFF
+    return (scale_u << 16) | ((shift & 0xFF) << 8) | (0x2 if rounding else 0) | (0x1 if enabled else 0)
+
+def apply_quant(C, dtype, enabled, scale, shift, rounding):
+    if not enabled:
+        return C
+    if dtype != 'int8':
+        raise ValueError('INT8 quant/saturate is only supported for dtype=int8')
+
+    out = []
+    for row in C:
+        out_row = []
+        for val in row:
+            scaled = signed32(val) * scale
+            if shift:
+                if rounding:
+                    off = 1 << (shift - 1)
+                    scaled += (off - 1) if scaled < 0 else off
+                scaled >>= shift
+            scaled = min(max(scaled, -128), 127)
+            out_row.append(scaled & 0xFFFFFFFF)
+        out.append(out_row)
+    return out
+
 # ---------------------------------------------------------------------------
 # Build DRAM image for matrix multiplication
 # ---------------------------------------------------------------------------
-def build_dram(A, B, C, M, K, N, dtype, w_base, a_base, r_base, b_col_stride=0, a_row_stride=0):
+def build_dram(A, B, C, M, K, N, dtype, w_base, a_base, r_base,
+               b_col_stride=0, a_row_stride=0, bias_words=None, bias_base=0):
     """Build DRAM image with A, B matrices and space for C results.
     b_col_stride: byte offset between B columns (0 = auto-compute K*elem_bytes).
     a_row_stride: byte offset between A rows (0 = auto-compute K*elem_bytes).
@@ -177,14 +282,22 @@ def build_dram(A, B, C, M, K, N, dtype, w_base, a_base, r_base, b_col_stride=0, 
             addr = r_base + (i*N + j) * 4
             dram[addr >> 2] = 0
 
+    if bias_words:
+        for j, word in enumerate(bias_words):
+            dram[(bias_base + j * 4) >> 2] = word & 0xFFFFFFFF
+
     return dram
 
 # ---------------------------------------------------------------------------
 # Generate test parameters
 # ---------------------------------------------------------------------------
-def generate(M, K, N, dtype, mode, seed, out_dir, test_id):
+def generate(M, K, N, dtype, mode, seed, out_dir, test_id, use_bias=False,
+             activation='none', quant=False, quant_scale=1, quant_shift=0,
+             quant_round=False):
     """Generate one matrix multiplication test."""
     elem_bytes = 1 if dtype == 'int8' else 2
+    if quant and dtype != 'int8':
+        raise ValueError('INT8 quant/saturate requires dtype=int8')
 
     # Address layout (word-aligned: 4-byte boundary)
     w_base = 0x10000
@@ -199,21 +312,28 @@ def generate(M, K, N, dtype, mode, seed, out_dir, test_id):
     # Generate matrices
     if dtype == 'int8':
         A, B, C = gen_int8_matmul(M, K, N, seed)
+        bias = gen_int32_bias(N, seed + 17) if use_bias else []
     else:
         A, B, C = gen_fp16_matmul(M, K, N, seed)
+        bias = gen_fp32_bias(N, seed + 17) if use_bias else []
+    expected_C = apply_quant(apply_activation(apply_bias(C, bias, dtype), dtype, activation),
+                             dtype, quant, quant_scale, quant_shift, quant_round)
+    bias_words = bias_to_words(bias, dtype) if use_bias else []
+    bias_base = r_base + (M * N * 4) + 0x100 if use_bias else 0
 
     # Word-aligned stride for B columns and A rows
     b_col_stride = b_col_bytes   # bytes between B columns (word-aligned DMA len)
     a_row_stride = a_row_bytes   # bytes between A rows (word-aligned DMA len)
 
     # Build DRAM (with strides)
-    dram = build_dram(A, B, C, M, K, N, dtype, w_base, a_base, r_base, b_col_stride, a_row_stride)
+    dram = build_dram(A, B, C, M, K, N, dtype, w_base, a_base, r_base,
+                      b_col_stride, a_row_stride, bias_words, bias_base)
 
     # Flatten C for expected output
     expected = []
     for i in range(M):
         for j in range(N):
-            expected.append(C[i][j])
+            expected.append(expected_C[i][j])
 
     # Compute DRAM array
     max_addr = max(dram.keys()) if dram else 0
@@ -230,6 +350,10 @@ def generate(M, K, N, dtype, mode, seed, out_dir, test_id):
     write_hex(os.path.join(sub_dir, 'expected.hex'), expected)
 
     ctrl = make_ctrl(dtype, mode)
+    if use_bias:
+        ctrl |= 0x200
+    ctrl |= activation_ctrl_bits(activation)
+    quant_cfg = quant_cfg_word(quant, quant_scale, quant_shift, quant_round)
     num_results = M * N
 
     # Write Verilog parameters
@@ -244,6 +368,14 @@ def generate(M, K, N, dtype, mode, seed, out_dir, test_id):
         f.write(f'`define W_ADDR 32\'h{w_base:08x}\n')
         f.write(f'`define A_ADDR 32\'h{a_base:08x}\n')
         f.write(f'`define R_ADDR 32\'h{r_base:08x}\n')
+        f.write(f'`define BIAS_ADDR 32\'h{bias_base:08x}\n')
+        f.write(f'`define BIAS_EN {1 if use_bias else 0}\n')
+        f.write(f'`define ACT_MODE {activation_mode_id(activation)}\n')
+        f.write(f'`define QUANT_EN {1 if quant else 0}\n')
+        f.write(f'`define QUANT_CFG 32\'h{quant_cfg:08x}\n')
+        f.write(f'`define QUANT_SCALE {quant_scale}\n')
+        f.write(f'`define QUANT_SHIFT {quant_shift}\n')
+        f.write(f'`define QUANT_ROUND {1 if quant_round else 0}\n')
         f.write(f'`define CTRL   32\'h{ctrl:02x}\n')
         f.write(f'`define DRAM_SIZE {max(max_addr + 1, 8192)}\n')
         f.write(f'`define IS_FP16 {1 if dtype == "fp16" else 0}\n')
@@ -251,7 +383,17 @@ def generate(M, K, N, dtype, mode, seed, out_dir, test_id):
 
     # Print summary
     print(f"  {test_id:30s} ({dtype:4s} {mode:2s}) M={M} K={K} N={N}")
-    print(f"    W_BASE=0x{w_base:08x}  A_BASE=0x{a_base:08x}  R_BASE=0x{r_base:08x}")
+    bias_part = f"  BIAS_BASE=0x{bias_base:08x}" if use_bias else ""
+    print(f"    W_BASE=0x{w_base:08x}  A_BASE=0x{a_base:08x}  R_BASE=0x{r_base:08x}{bias_part}")
+    if use_bias:
+        shown_bias = []
+        for v in bias[:min(N, 4)]:
+            shown_bias.append(str(v) if dtype == 'int8' else f"{v:.4f}")
+        print(f"    Bias[0:{len(shown_bias)}] = {', '.join(shown_bias)}")
+    if activation != 'none':
+        print(f"    Activation = {activation}")
+    if quant:
+        print(f"    Quant = scale {quant_scale}, shift {quant_shift}, round {1 if quant_round else 0}, saturate int8")
     print(f"    DRAM={max_addr+1} words, {num_results} expected results")
     # Print a few expected values
     for i in range(min(M, 3)):
@@ -283,6 +425,13 @@ def main():
     parser.add_argument('--dtype', choices=['int8', 'fp16'], default='int8', help='Custom data type')
     parser.add_argument('--mode', choices=['OS', 'WS'], default='OS', help='Custom dataflow mode')
     parser.add_argument('--test-id', default='', help='Custom output directory name')
+    parser.add_argument('--bias', action='store_true', help='Enable T6.3 32-bit bias addition')
+    parser.add_argument('--activation', choices=['none', 'relu', 'relu6'], default='none',
+                        help='Enable T6.4 direct-scalar activation')
+    parser.add_argument('--quant', action='store_true', help='Enable T6.5 INT8 quant/saturate')
+    parser.add_argument('--quant-scale', type=int, default=1, help='T6.5 signed 16-bit quant scale')
+    parser.add_argument('--quant-shift', type=int, default=0, help='T6.5 arithmetic right shift [0,31]')
+    parser.add_argument('--quant-round', action='store_true', help='T6.5 round before right shift')
     args = parser.parse_args()
 
     out_dir = os.path.dirname(os.path.abspath(__file__))
@@ -299,7 +448,9 @@ def main():
         if not test_id:
             test_id = f'{args.mode.lower()}_{args.dtype}_{args.m}x{args.k}x{args.n}'
         print("=== Custom Matrix Test ===")
-        generate(args.m, args.k, args.n, args.dtype, args.mode, seed_base+9000, out_dir, test_id)
+        generate(args.m, args.k, args.n, args.dtype, args.mode, seed_base+9000, out_dir,
+                 test_id, args.bias, args.activation, args.quant, args.quant_scale,
+                 args.quant_shift, args.quant_round)
     elif args.ws:
         # WS mode square matrix tests
         print("=== WS Square Matrix Tests ===")

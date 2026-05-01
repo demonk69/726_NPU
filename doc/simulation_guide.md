@@ -1,8 +1,8 @@
 # 仿真指南
 
-更新时间：2026-04-29
+更新时间：2026-05-01
 
-本文给出当前可复现的仿真入口和后续验证顺序。Phase 1 已恢复顶层标量兼容路径；Phase 2 已完成可验证的 4x4 tile-mode GEMM 路径；Phase 3 已完成 AXI read/write burst、perf counters 和带宽目标测试；T4.2-T4.5 已完成独立 PSUM/OUT buffer RMW、PE accumulator init、controller k_tile loop 单测和顶层 K-split GEMM golden；T5.1-T5.4 已完成 descriptor v1 ABI、AXI-Lite descriptor 提交寄存器、descriptor fetch/decode/next-layer 和 INT8 OFM->IFM 串联。16x16/8x32 高吞吐、外部 PSUM descriptor 流和多层卷积仍是后续任务。
+本文给出当前可复现的仿真入口和后续验证顺序。Phase 1 已恢复顶层标量兼容路径；Phase 2 已完成可验证的 4x4 tile-mode GEMM 路径；Phase 3 已完成 AXI read/write burst、perf counters 和带宽目标测试；T4.2-T4.5 已完成独立 PSUM/OUT buffer RMW、PE accumulator init、controller k_tile loop 单测和顶层 K-split GEMM golden；T5.1-T5.5 已完成 descriptor v1 ABI、AXI-Lite descriptor 提交寄存器、descriptor fetch/decode/next-layer、INT8 OFM->IFM 串联和 IRQ/error status；T6.1 已完成 DRAM 预展开 Conv2D im2col golden 仿真；T6.2 已完成 direct scalar on-the-fly Conv2D im2col 仿真；T6.3-T6.5 已完成 direct scalar bias、ReLU/ReLU6 和 INT8 quant/saturate 后处理；T6.6 已完成两层 Conv2D E2E；SoC smoke 已恢复。16x16/8x32 高吞吐和 descriptor 化卷积仍是后续任务。
 
 ## 工具
 
@@ -330,7 +330,137 @@ custom_fp16_os_16x16x16 -> ALL 256 CHECKS PASSED
 
 - 自动生成 A/B/C golden、DRAM image 和 `test_params.vh`。
 - 编译并运行 direct scalar matmul 路径，可选 `-Dtype int8/fp16` 和 `-Mode OS/WS`。
+- K 不是 32-bit word 对齐时，direct scalar 预取 stride 已按 word-aligned 行/列跨度推进；`25x18x3` INT8 OS 已通过。
 - 当前用于功能正确性测试，不代表 4x4 tile/descriptor 高吞吐大矩阵路径已经完成。
+
+### T6.1 Conv2D im2col case
+
+```powershell
+$env:Path = 'E:\iverilog\bin;' + $env:Path
+powershell -ExecutionPolicy Bypass -File scripts\run_conv2d_im2col_case.ps1 `
+  -Mode OS -Name conv2d_im2col_int8_os_default
+```
+
+当前结果：
+
+```text
+conv2d_im2col_int8_os_default  -> ALL 75 CHECKS PASSED
+conv2d_im2col_int8_ws_default  -> ALL 75 CHECKS PASSED
+conv2d_im2col_fp16_os_default  -> ALL 75 CHECKS PASSED
+scripts/run_regression.ps1     -> TOTAL: 2286 PASS, 0 FAIL
+```
+
+用途：
+
+- 用 `tb/conv2d/gen_conv2d_im2col_data.py` 生成 IFM/weight、DRAM 中的 `A_im2col[M,K]` 和 `W_col[K,N]`。
+- 默认 case 是 `B=1, IFM=5x5, Cin=2, KHxKW=3x3, Cout=3, pad=1`，映射到 `M=25, K=18, N=3`。
+- `expected.hex` 是 Conv2D golden；testbench 仍复用 direct matmul checker。
+- 这是 T6.1 的 DRAM 预展开方案，不是 T6.2 的硬件 on-the-fly im2col。
+
+### T6.2 Conv2D on-the-fly im2col case
+
+```powershell
+$env:Path = 'E:\iverilog\bin;' + $env:Path
+powershell -ExecutionPolicy Bypass -File scripts\run_conv2d_otf_case.ps1 `
+  -Mode OS -Name conv2d_otf_int8_os_default
+```
+
+当前结果：
+
+```text
+conv2d_otf_int8_os_default  -> ALL 75 CHECKS PASSED
+conv2d_otf_int8_ws_default  -> ALL 75 CHECKS PASSED
+conv2d_otf_fp16_os_default  -> ALL 75 CHECKS PASSED
+scripts/run_regression.ps1  -> TOTAL: 2286 PASS, 0 FAIL
+```
+
+用途：
+
+- DRAM 中只保存 raw NCHW IFM 和 `W_col[K,N]`，不再保存完整 `A_im2col[M,K]` 中间矩阵。
+- `CTRL[8]` 启用 direct scalar on-the-fly im2col，`0x80..0x94` 提供 IFM/OFM/kernel/stride/pad/dilation 参数。
+- `npu_dma` 按 `m -> b/oh/ow`、`k -> cin/kh/kw` 生成 IFM 地址，padding 或越界位置写 0，并按 INT8/FP16 打包到 A PPBuf。
+- 当前该路径只覆盖 direct scalar、非 tile mode；tile/descriptor 主线仍保持现有 GEMM/tile-pack 路径。
+
+### T6.3/T6.4 Bias and activation cases
+
+```powershell
+$env:Path = 'E:\iverilog\bin;' + $env:Path
+powershell -ExecutionPolicy Bypass -File scripts\run_matmul_case.ps1 `
+  -M 3 -K 5 -N 4 -Dtype int8 -Mode OS -Bias -Activation relu
+
+powershell -ExecutionPolicy Bypass -File scripts\run_conv2d_otf_case.ps1 `
+  -Dtype int8 -Mode OS -Bias -Activation relu
+```
+
+当前结果：
+
+```text
+matmul_relu_int8_os_3x5x4        -> ALL 12 CHECKS PASSED
+matmul_relu6_int8_ws_3x5x4       -> ALL 12 CHECKS PASSED
+matmul_relu_fp16_os_3x4x3        -> ALL 9 CHECKS PASSED
+matmul_relu6_fp16_ws_2x3x2       -> ALL 4 CHECKS PASSED
+conv2d_relu_otf_int8_os_default  -> ALL 75 CHECKS PASSED
+conv2d_relu6_otf_int8_ws_default -> ALL 75 CHECKS PASSED
+conv2d_relu6_otf_fp16_os_default -> ALL 75 CHECKS PASSED
+scripts/run_regression.ps1       -> TOTAL: 2286 PASS, 0 FAIL
+```
+
+用途：
+
+- `-Bias` 生成 32-bit per-output-column bias，配置 `BIAS_ADDR(0x98)` 和 `CTRL[9]`。
+- `-Activation relu|relu6` 配置 `CTRL[11:10]`，后处理顺序为 accumulator -> optional bias -> activation。
+- INT8 ReLU6 clamp 到 signed int32 `[0,6]`；FP16 ReLU6 clamp 到 FP32 `[0.0,6.0]`。
+- 当前该路径只覆盖 direct scalar、非 tile mode；tile/descriptor 主线仍待接入后处理。
+
+### T6.5 INT8 quant/saturate cases
+
+```powershell
+$env:Path = 'E:\iverilog\bin;' + $env:Path
+powershell -ExecutionPolicy Bypass -File scripts\run_matmul_case.ps1 `
+  -M 3 -K 5 -N 4 -Dtype int8 -Mode OS -Bias -Activation relu `
+  -Quant -QuantScale 3 -QuantShift 5 -QuantRound
+
+powershell -ExecutionPolicy Bypass -File scripts\run_conv2d_otf_case.ps1 `
+  -Dtype int8 -Mode OS -Bias -Activation relu `
+  -Quant -QuantScale 2 -QuantShift 3 -QuantRound
+```
+
+当前结果：
+
+```text
+matmul_quant_int8_os_3x5x4           -> ALL 12 CHECKS PASSED
+matmul_quant_int8_ws_3x5x4           -> ALL 12 CHECKS PASSED
+conv2d_quant_otf_int8_os_default     -> ALL 75 CHECKS PASSED
+conv2d_quant_otf_int8_ws_default     -> ALL 75 CHECKS PASSED
+scripts/run_regression.ps1           -> TOTAL: 2286 PASS, 0 FAIL
+```
+
+用途：
+
+- `-Quant` 写 `QUANT_CFG(0x9C)` 并启用 direct scalar INT8 quant/saturate。
+- `-QuantScale <q>` 配置 signed 16-bit scale，`-QuantShift <s>` 配置 arithmetic right shift，`-QuantRound` 在 shift 前启用 signed rounding。
+- 后处理顺序为 accumulator -> optional bias -> activation -> optional quantize/saturate；输出为 sign-extended signed int8 word。
+- 当前该路径只覆盖 INT8 direct scalar、非 tile mode；FP16 和 tile/descriptor 主线忽略 `QUANT_CFG`。
+
+### T6.6 two-layer Conv2D E2E
+
+```powershell
+$env:Path = 'E:\iverilog\bin;' + $env:Path
+powershell -ExecutionPolicy Bypass -File scripts\run_conv2d_two_layer_case.ps1
+```
+
+当前结果：
+
+```text
+conv2d_two_layer_int8_os_default -> ALL 48 CHECKS PASSED
+scripts/run_regression.ps1       -> TOTAL: 2286 PASS, 0 FAIL
+```
+
+用途：
+
+- layer0 使用 raw NCHW IFM、direct scalar on-the-fly im2col、bias、ReLU 和 INT8 quant/saturate，写出 sign-extended int8 OFM。
+- layer1 直接把 layer0 `R_ADDR` 作为 `A_ADDR`，验证层间量化输出能被下一层消费。
+- testbench 同时检查 layer0 中间 OFM 和 layer1 最终 golden。
 
 ### Top K-split GEMM golden
 
@@ -517,22 +647,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_full_sim.ps1
 
 当前结果：编译成功，仿真完成。
 
-## 当前失败入口
-
-### `run_soc_sim.ps1`
+## SoC smoke
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_soc_sim.ps1
 ```
 
-当前已修复项目根目录和旧 `.ROWS/.COLS` 问题，但 SoC 编译仍失败，主要错误类别是：
+当前结果：
 
 ```text
-dram_model.v: unable to bind axi_arlen
-soc_top.v: PicoRV32 PCPI ports do not match the referenced CPU module
+[PASS] SoC integration test PASSED
+Cycles: 247
+DRAM result area (0x1020): C00=19 C01=22 C10=43 C11=50
 ```
 
-该问题归入 SoC 集成阶段，不阻塞 Phase 2 的 4x4 tile 数据通路设计。
+`run_soc_sim.ps1` 默认不生成 VCD；需要波形时使用 `-DumpVcd`，需要 CPU/NPU 详细日志时使用 `-VerboseLog`。
 
 ## 推荐新增测试
 
@@ -555,8 +684,14 @@ soc_top.v: PicoRV32 PCPI ports do not match the referenced CPU module
 | `tb_npu_desc_ofm_chain.v` | descriptor bit23 下 layer0 OFM 作为 layer1 IFM | DONE/T5.4 |
 | `tb_npu_tile_gemm.v` + `tb/tile4/int8_4x4x4` | 使用 T2.1 tile-pack 的 4x4 INT8 GEMM tile | DONE/T2.5 |
 | `tb_npu_tile_gemm.v` + `tb/tile4/fp16_4x4x4` | 使用 T2.1 tile-pack 的 4x4 FP16 GEMM tile | DONE/T2.6 |
-| `tb_conv2d_relu.v` | 卷积 + 激活 | T6.4 |
-| `tb_soc_smoke.v` | CPU 配置 NPU 并读回结果 | S2 |
+| `scripts/run_conv2d_im2col_case.ps1` | DRAM 预展开 Conv2D im2col 后复用 direct matmul checker 对 Conv2D golden | DONE/T6.1 |
+| `scripts/run_conv2d_otf_case.ps1` | raw IFM on-the-fly im2col 后复用 direct matmul checker 对 Conv2D golden | DONE/T6.2 |
+| `scripts/run_matmul_case.ps1 -Bias -Activation ...` | direct scalar GEMM bias/ReLU/ReLU6 后处理 | DONE/T6.3/T6.4 |
+| `scripts/run_conv2d_otf_case.ps1 -Bias -Activation ...` | direct scalar Conv2D on-the-fly bias/ReLU/ReLU6 后处理 | DONE/T6.3/T6.4 |
+| `scripts/run_matmul_case.ps1 -Quant ...` | direct scalar GEMM INT8 quant/saturate 后处理 | DONE/T6.5 |
+| `scripts/run_conv2d_otf_case.ps1 -Quant ...` | direct scalar Conv2D on-the-fly INT8 quant/saturate 后处理 | DONE/T6.5 |
+| `scripts/run_conv2d_two_layer_case.ps1` | 两层 Conv2D 端到端，layer0 OFM 作为 layer1 IFM | DONE/T6.6 |
+| `scripts/run_soc_sim.ps1` | CPU 配置 NPU 并读回结果 | DONE/SoC smoke |
 
 ## RTL 源列表建议
 
@@ -602,8 +737,10 @@ rtl/top/npu_top.v
 14. descriptor 两任务顺序执行通过。
 15. descriptor 层间 OFM/IFM 串联通过。
 16. 预展开 im2col 的卷积通过。
-17. 修复 SoC 编译并完成 CPU 启动 NPU smoke。
-18. FPGA smoke test。
+17. on-the-fly im2col 的卷积通过。
+18. 两层 Conv2D E2E 通过。
+19. SoC 编译和 CPU 启动 NPU smoke 通过。
+20. FPGA smoke test。
 
 ## T2.1 4x4 测试数据约定
 

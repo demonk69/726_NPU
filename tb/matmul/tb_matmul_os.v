@@ -18,6 +18,52 @@ module tb_matmul_os;
 // ---------------------------------------------------------------------------
 `include "test_params.vh"
 
+`ifndef CONV_IM2COL
+`define CONV_IM2COL 0
+`endif
+`ifndef CONV_IFM_SHAPE
+`define CONV_IFM_SHAPE 32'h0
+`endif
+`ifndef CONV_CHANNELS
+`define CONV_CHANNELS 32'h0
+`endif
+`ifndef CONV_KERNEL
+`define CONV_KERNEL 32'h0
+`endif
+`ifndef CONV_OUT_SHAPE
+`define CONV_OUT_SHAPE 32'h0
+`endif
+`ifndef CONV_STRIDE_PAD
+`define CONV_STRIDE_PAD 32'h0
+`endif
+`ifndef CONV_DILATION
+`define CONV_DILATION 32'h0
+`endif
+`ifndef BIAS_EN
+`define BIAS_EN 0
+`endif
+`ifndef BIAS_ADDR
+`define BIAS_ADDR 32'h0
+`endif
+`ifndef ACT_MODE
+`define ACT_MODE 0
+`endif
+`ifndef QUANT_EN
+`define QUANT_EN 0
+`endif
+`ifndef QUANT_CFG
+`define QUANT_CFG 32'h0001_0000
+`endif
+`ifndef QUANT_SCALE
+`define QUANT_SCALE 1
+`endif
+`ifndef QUANT_SHIFT
+`define QUANT_SHIFT 0
+`endif
+`ifndef QUANT_ROUND
+`define QUANT_ROUND 0
+`endif
+
 parameter ROWS   = 1;
 parameter COLS   = 1;
 parameter DATA_W = 16;
@@ -35,6 +81,14 @@ localparam REG_K_DIM  = 32'h18;
 localparam REG_W_ADDR = 32'h20;
 localparam REG_A_ADDR = 32'h24;
 localparam REG_R_ADDR = 32'h28;
+localparam REG_CONV_IFM_SHAPE  = 32'h80;
+localparam REG_CONV_CHANNELS   = 32'h84;
+localparam REG_CONV_KERNEL     = 32'h88;
+localparam REG_CONV_OUT_SHAPE  = 32'h8C;
+localparam REG_CONV_STRIDE_PAD = 32'h90;
+localparam REG_CONV_DILATION   = 32'h94;
+localparam REG_BIAS_ADDR       = 32'h98;
+localparam REG_QUANT_CFG       = 32'h9C;
 
 // ---------------------------------------------------------------------------
 // DRAM and Expected arrays
@@ -314,6 +368,20 @@ task do_matmul_test;
         axi_write(REG_W_ADDR, w_addr);
         axi_write(REG_A_ADDR, a_addr);
         axi_write(REG_R_ADDR, r_addr);
+        if (`CONV_IM2COL) begin
+            axi_write(REG_CONV_IFM_SHAPE,  `CONV_IFM_SHAPE);
+            axi_write(REG_CONV_CHANNELS,   `CONV_CHANNELS);
+            axi_write(REG_CONV_KERNEL,     `CONV_KERNEL);
+            axi_write(REG_CONV_OUT_SHAPE,  `CONV_OUT_SHAPE);
+            axi_write(REG_CONV_STRIDE_PAD, `CONV_STRIDE_PAD);
+            axi_write(REG_CONV_DILATION,   `CONV_DILATION);
+        end
+        if (`BIAS_EN) begin
+            axi_write(REG_BIAS_ADDR, `BIAS_ADDR);
+        end
+        if (`QUANT_EN) begin
+            axi_write(REG_QUANT_CFG, `QUANT_CFG);
+        end
 
         // Debug: verify register writes took effect
         axi_read(REG_M_DIM, rdata_tmp); $display("    M_DIM readback = %0d", rdata_tmp);
@@ -389,6 +457,17 @@ initial begin
              `M_DIM, `K_DIM, `K_DIM, `N_DIM, `M_DIM, `N_DIM);
     $display("  Data type: %0s", `IS_FP16 ? "FP16" : "INT8");
     $display("  CTRL=0x%08h  IS_OS=%0d", `CTRL, `IS_OS);
+    if (`CONV_IM2COL)
+        $display("  T6.2 on-the-fly Conv2D im2col enabled");
+    if (`BIAS_EN)
+        $display("  T6.3 bias enabled: BIAS_ADDR=0x%08h", `BIAS_ADDR);
+    if (`ACT_MODE == 1)
+        $display("  T6.4 activation enabled: ReLU");
+    else if (`ACT_MODE == 2)
+        $display("  T6.4 activation enabled: ReLU6");
+    if (`QUANT_EN)
+        $display("  T6.5 INT8 quant enabled: scale=%0d shift=%0d round=%0d cfg=0x%08h",
+                 `QUANT_SCALE, `QUANT_SHIFT, `QUANT_ROUND, `QUANT_CFG);
     $display("################################################################");
 
     do_matmul_test(

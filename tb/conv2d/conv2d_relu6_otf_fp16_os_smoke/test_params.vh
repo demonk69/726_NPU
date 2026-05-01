@@ -1,0 +1,34 @@
+// Auto-generated: conv2d_relu6_otf_fp16_os_smoke (fp16 OS)
+// T6.2 Conv2D uses on-the-fly hardware im2col gather from IFM.
+// Conv2D: B=1 IFM=5x5 Cin=2 KHxKW=3x3 Cout=3 OHxOW=5x5
+// GEMM: A_im2col[25x18] x W_col[18x3]
+`define NUM_RESULTS 75
+`define M_DIM 25
+`define N_DIM 3
+`define K_DIM 18
+`define W_ADDR 32'h00010000
+`define A_ADDR 32'h0001016c
+`define R_ADDR 32'h000102d0
+`define BIAS_ADDR 32'h000104fc
+`define BIAS_EN 1
+`define ACT_MODE 2
+`define CTRL   32'hb19
+`define DRAM_SIZE 16706
+`define IS_FP16 1
+`define IS_OS   1
+`define CONV_BATCH 1
+`define CONV_IH 5
+`define CONV_IW 5
+`define CONV_CIN 2
+`define CONV_COUT 3
+`define CONV_KH 3
+`define CONV_KW 3
+`define CONV_OH 5
+`define CONV_OW 5
+`define CONV_IM2COL 1
+`define CONV_IFM_SHAPE 32'h00050005
+`define CONV_CHANNELS 32'h00010002
+`define CONV_KERNEL 32'h00030003
+`define CONV_OUT_SHAPE 32'h00050005
+`define CONV_STRIDE_PAD 32'h01010101
+`define CONV_DILATION 32'h00000101

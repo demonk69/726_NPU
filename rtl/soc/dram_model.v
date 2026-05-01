@@ -30,7 +30,7 @@ module dram_model #(
     input  wire [3:0]                cpu_wstrb,
     input  wire [31:0]               cpu_addr,
     input  wire [31:0]               cpu_wdata,
-    output reg  [31:0]               cpu_rdata,
+    output wire [31:0]               cpu_rdata,
 
     // ---- Port 2: NPU DMA side (AXI4 slave) ----
     // AW
@@ -49,6 +49,7 @@ module dram_model #(
     input  wire                      axi_bready,
     // AR
     input  wire [31:0]               axi_araddr,
+    input  wire [7:0]                axi_arlen,
     input  wire                      axi_arvalid,
     output wire                      axi_arready,
     // R
@@ -70,83 +71,58 @@ reg [DATA_W-1:0] mem [0:WORDS-1];
 // Port 1: CPU read/write
 // ---------------------------------------------------------------------------
 assign cpu_ready = 1'b1;  // CPU port always ready (no backpressure in sim)
+assign cpu_rdata = mem[cpu_addr[ADDR_W+1:2]];
 
 always @(posedge clk) begin
-    if (cpu_valid) begin
-        if (cpu_we) begin
-            if (cpu_wstrb[0]) mem[cpu_addr[ADDR_W+1:2]][ 7: 0] <= cpu_wdata[ 7: 0];
-            if (cpu_wstrb[1]) mem[cpu_addr[ADDR_W+1:2]][15: 8] <= cpu_wdata[15: 8];
-            if (cpu_wstrb[2]) mem[cpu_addr[ADDR_W+1:2]][23:16] <= cpu_wdata[23:16];
-            if (cpu_wstrb[3]) mem[cpu_addr[ADDR_W+1:2]][31:24] <= cpu_wdata[31:24];
-        end else begin
-            cpu_rdata <= mem[cpu_addr[ADDR_W+1:2]];
-        end
+    if (cpu_valid && cpu_we) begin
+        if (cpu_wstrb[0]) mem[cpu_addr[ADDR_W+1:2]][ 7: 0] <= cpu_wdata[ 7: 0];
+        if (cpu_wstrb[1]) mem[cpu_addr[ADDR_W+1:2]][15: 8] <= cpu_wdata[15: 8];
+        if (cpu_wstrb[2]) mem[cpu_addr[ADDR_W+1:2]][23:16] <= cpu_wdata[23:16];
+        if (cpu_wstrb[3]) mem[cpu_addr[ADDR_W+1:2]][31:24] <= cpu_wdata[31:24];
     end
 end
 
 // ---------------------------------------------------------------------------
 // Port 2: AXI4 Write (AW + W + B)
 // ---------------------------------------------------------------------------
-reg aw_q;
-reg [31:0] awaddr_q;
-
-assign axi_awready = !aw_q;
-
-always @(posedge clk) begin
-    if (!rst_n) aw_q <= 0;
-    else if (axi_awvalid && !aw_q) aw_q <= 1;
-    else if (axi_wvalid && axi_wready) aw_q <= 0;
-end
-
-always @(posedge clk) begin
-    if (axi_awvalid && !aw_q)
-        awaddr_q <= axi_awaddr;
-end
-
-assign axi_wready = aw_q;
-
-// Write response
-reg b_q;
-assign axi_bvalid = b_q;
-assign axi_bresp  = 2'b00;
-
-always @(posedge clk) begin
-    if (!rst_n) b_q <= 0;
-    else if (aw_q && axi_wvalid && axi_wlast) b_q <= 1;
-    else if (b_q && axi_bready) b_q <= 0;
-end
-
-// Write data to memory
+reg        wr_active;
 reg [31:0] w_addr_cnt;
+reg        b_q;
+
+assign axi_awready = !wr_active;
+assign axi_wready  = wr_active;
+assign axi_bvalid  = b_q;
+assign axi_bresp   = 2'b00;
+
+wire do_axi_write = wr_active && axi_wvalid && axi_wready;
+
 always @(posedge clk) begin
-    if (!rst_n)
-        w_addr_cnt <= 0;
-    else begin
-        if (aw_q && axi_awvalid && !aw_q)
+    if (!rst_n) begin
+        wr_active  <= 1'b0;
+        w_addr_cnt <= 32'd0;
+        b_q        <= 1'b0;
+    end else begin
+        if (!wr_active && axi_awvalid) begin
+            wr_active  <= 1'b1;
             w_addr_cnt <= axi_awaddr;
-        else if (aw_q && axi_wvalid && axi_wready)
-            w_addr_cnt <= w_addr_cnt + DATA_W/8;
-    end
-end
+        end
 
-// AXI write data → memory (combinational to accept same-cycle)
-wire do_axi_write = aw_q && axi_wvalid && axi_wready;
+        if (do_axi_write) begin
+            if (axi_wstrb[0]) mem[w_addr_cnt[ADDR_W+1:2]][ 7: 0] <= axi_wdata[ 7: 0];
+            if (axi_wstrb[1]) mem[w_addr_cnt[ADDR_W+1:2]][15: 8] <= axi_wdata[15: 8];
+            if (axi_wstrb[2]) mem[w_addr_cnt[ADDR_W+1:2]][23:16] <= axi_wdata[23:16];
+            if (axi_wstrb[3]) mem[w_addr_cnt[ADDR_W+1:2]][31:24] <= axi_wdata[31:24];
 
-// Use an intermediate register for address to avoid simulation race
-reg [31:0] w_addr_r;
-always @(posedge clk) begin
-    if (!rst_n)
-        w_addr_r <= 0;
-    else
-        w_addr_r <= w_addr_cnt;
-end
+            if (axi_wlast) begin
+                wr_active <= 1'b0;
+                b_q       <= 1'b1;
+            end else begin
+                w_addr_cnt <= w_addr_cnt + DATA_W/8;
+            end
+        end
 
-always @(posedge clk) begin
-    if (do_axi_write) begin
-        if (axi_wstrb[0]) mem[w_addr_r[ADDR_W+1:2]][ 7: 0] <= axi_wdata[ 7: 0];
-        if (axi_wstrb[1]) mem[w_addr_r[ADDR_W+1:2]][15: 8] <= axi_wdata[15: 8];
-        if (axi_wstrb[2]) mem[w_addr_r[ADDR_W+1:2]][23:16] <= axi_wdata[23:16];
-        if (axi_wstrb[3]) mem[w_addr_r[ADDR_W+1:2]][31:24] <= axi_wdata[31:24];
+        if (b_q && axi_bready)
+            b_q <= 1'b0;
     end
 end
 

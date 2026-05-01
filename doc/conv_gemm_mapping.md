@@ -1,6 +1,6 @@
 # 卷积到 GEMM 的映射
 
-更新时间：2026-04-28
+更新时间：2026-05-01
 
 适用于普通 dense Conv2D（`groups=1`）：把每个 batch 中的每个输出空间位置展开成 GEMM 的一行，把每个输出通道的卷积核展开成 GEMM 的一列。
 
@@ -75,6 +75,7 @@ iw = ow * stride_w + kw * dilation_w - pad_w
 A_im2col[m,k] = (0 <= ih < IH and 0 <= iw < IW) ? IFM[b,cin,ih,iw] : 0
 W_col[k,n]    = WEIGHT[cout,cin,kh,kw]
 C[m,n]        = sum_k A_im2col[m,k] * W_col[k,n]
+Y[m,n]        = quant(activation(C[m,n] + bias[n]))  // optional T6.3-T6.5 direct scalar postprocess
 ```
 
 如果输出存为 NHWC：
@@ -91,7 +92,7 @@ OFM[b,cout,oh,ow] = C[(b * OH + oh) * OW + ow, cout]
 
 ## 和当前 RTL 的关系
 
-当前 T2.4-T2.6 已验证的是 4x4 GEMM tile 核心，不是完整硬件 im2col 前端。也就是说，testbench/脚本先把卷积或矩阵数据准备成 `A[M,K]` 和 `W[K,N]` 的 tile-pack 流，再交给 NPU 计算。
+当前 T2.4-T2.6 已验证的是 4x4 GEMM tile 核心。T6.1 已把第一版 Conv2D 仿真落在 testbench/software 预展开方案上：脚本先生成 `A_im2col[M,K]` 和 `W_col[K,N]` 的 DRAM 数据，再交给 direct matmul 路径校验 Conv2D golden。T6.2 已在 direct scalar 路径实现 raw IFM on-the-fly im2col：DRAM 只保存 NCHW IFM，DMA 按下面的 `A_im2col[m,k]` 公式生成 A 行。T6.3-T6.5 已在 direct scalar 输出上支持 32-bit bias、ReLU/ReLU6 和 INT8 quant/saturate，后处理顺序为 dot -> bias -> activation -> quant；T6.6 已验证 layer0 量化 OFM 可直接作为 layer1 A 输入；tile/descriptor 主线仍待接入。
 
 当前 4x4 tile-pack 约定：
 
@@ -118,4 +119,4 @@ w_seen_by_row_r[c,t] = (0 <= t-r < K) ? W_TILE[n_tile][t-r][c] : 0
 
 所以 PE(r,c) 在 `t = k + r` 时同时看到 `A[m0+r,k]` 和 `W[k,n0+c]`。如果 A row 不做这个错拍，row 1/2/3 会把 `A[m0+r,k]` 和错误的 `W[k-r,n0+c]` 对上，结果会错。
 
-后续 T6 的 on-the-fly im2col 会把上面的 `A_im2col[m,k]` 地址计算搬进硬件地址发生器，避免在 DRAM 中保存完整展开矩阵。
+T6.2 已把上面的 `A_im2col[m,k]` 地址计算搬进 direct scalar DMA 地址发生器，避免在 DRAM 中保存完整展开矩阵；T6.3-T6.5 已把 direct scalar 的 `C[m,n]` 后处理扩展到 bias、ReLU/ReLU6 和 INT8 quant/saturate；T6.6 已完成 direct scalar 两层 Conv2D E2E。后续还需要把同一 im2col 和 postprocess 语义接到 tile/descriptor 卷积主线。

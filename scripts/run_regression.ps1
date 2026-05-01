@@ -250,6 +250,273 @@ foreach ($tc in $WsCases) {
         -ExtraSrc @($WsTb)
 }
 
+# ---- 5. T6.1 Conv2D im2col tests ----
+# These cases keep im2col pre-expanded in DRAM/test data and reuse the direct
+# matmul checker with Conv2D golden expected output.
+$ConvDir = "$TbDir\conv2d"
+$ConvCases = @(
+    @{ Name="conv2d_im2col_int8_os_default"; Dtype="int8"; Mode="OS"; Tb="$TbDir\matmul\tb_matmul_os.v" },
+    @{ Name="conv2d_im2col_int8_ws_default"; Dtype="int8"; Mode="WS"; Tb=$WsTb },
+    @{ Name="conv2d_im2col_fp16_os_default"; Dtype="fp16"; Mode="OS"; Tb="$TbDir\matmul\tb_matmul_os.v" }
+)
+
+foreach ($case in $ConvCases) {
+    $tc = $case.Name
+    Write-Host ""
+    Write-Host "--- [generate conv2d_im2col/$tc] ---" -ForegroundColor Cyan
+    $genOut = & python "$ConvDir\gen_conv2d_im2col_data.py" `
+        --dtype $case.Dtype --mode $case.Mode --test-id $tc 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [GEN FAIL] $genOut" -ForegroundColor Red
+        $TotalFail++
+        $Results += [PSCustomObject]@{ Name="conv2d_im2col/$tc"; Status="GEN FAIL"; Pass=0; Fail=1 }
+        continue
+    }
+
+    $tcDir = "$ConvDir\$tc"
+    Run-Test -Name "conv2d_im2col/$tc" `
+        -VvpOut "$SimDir\reg_${tc}.vvp" `
+        -IncDir $tcDir `
+        -RunDir $tcDir `
+        -ExtraSrc @($case.Tb)
+}
+
+# ---- 6. T6.2 Conv2D on-the-fly im2col tests ----
+# These cases keep only raw NCHW IFM in DRAM. DMA gathers A_im2col rows on the
+# fly from the Conv2D shape registers while W_col remains packed in DRAM.
+$ConvOtfCases = @(
+    @{ Name="conv2d_otf_int8_os_default"; Dtype="int8"; Mode="OS"; Tb="$TbDir\matmul\tb_matmul_os.v" },
+    @{ Name="conv2d_otf_int8_ws_default"; Dtype="int8"; Mode="WS"; Tb=$WsTb },
+    @{ Name="conv2d_otf_fp16_os_default"; Dtype="fp16"; Mode="OS"; Tb="$TbDir\matmul\tb_matmul_os.v" }
+)
+
+foreach ($case in $ConvOtfCases) {
+    $tc = $case.Name
+    Write-Host ""
+    Write-Host "--- [generate conv2d_otf/$tc] ---" -ForegroundColor Cyan
+    $genOut = & python "$ConvDir\gen_conv2d_im2col_data.py" `
+        --on-the-fly --dtype $case.Dtype --mode $case.Mode --test-id $tc 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [GEN FAIL] $genOut" -ForegroundColor Red
+        $TotalFail++
+        $Results += [PSCustomObject]@{ Name="conv2d_otf/$tc"; Status="GEN FAIL"; Pass=0; Fail=1 }
+        continue
+    }
+
+    $tcDir = "$ConvDir\$tc"
+    Run-Test -Name "conv2d_otf/$tc" `
+        -VvpOut "$SimDir\reg_${tc}.vvp" `
+        -IncDir $tcDir `
+        -RunDir $tcDir `
+        -ExtraSrc @($case.Tb)
+}
+
+# ---- 7. T6.3 Bias addition tests ----
+# Bias is a 32-bit per-output-channel vector read through BIAS_ADDR and added
+# to the direct scalar accumulator before each output dot product.
+$MatmulBiasCases = @(
+    @{ Name="matmul_bias_int8_os_3x5x4"; Dtype="int8"; Mode="OS"; M=3; K=5; N=4; Tb="$TbDir\matmul\tb_matmul_os.v" },
+    @{ Name="matmul_bias_int8_ws_3x5x4"; Dtype="int8"; Mode="WS"; M=3; K=5; N=4; Tb=$WsTb },
+    @{ Name="matmul_bias_fp16_os_3x4x3"; Dtype="fp16"; Mode="OS"; M=3; K=4; N=3; Tb="$TbDir\matmul\tb_matmul_os.v" },
+    @{ Name="matmul_bias_fp16_ws_2x3x2"; Dtype="fp16"; Mode="WS"; M=2; K=3; N=2; Tb=$WsTb }
+)
+
+foreach ($case in $MatmulBiasCases) {
+    $tc = $case.Name
+    Write-Host ""
+    Write-Host "--- [generate matmul_bias/$tc] ---" -ForegroundColor Cyan
+    $genOut = & python "$TbDir\matmul\gen_matmul_data.py" --custom `
+        --m $case.M --k $case.K --n $case.N `
+        --dtype $case.Dtype --mode $case.Mode --bias --test-id $tc 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [GEN FAIL] $genOut" -ForegroundColor Red
+        $TotalFail++
+        $Results += [PSCustomObject]@{ Name="matmul_bias/$tc"; Status="GEN FAIL"; Pass=0; Fail=1 }
+        continue
+    }
+
+    $tcDir = "$TbDir\matmul\$tc"
+    Run-Test -Name "matmul_bias/$tc" `
+        -VvpOut "$SimDir\reg_${tc}.vvp" `
+        -IncDir $tcDir `
+        -RunDir $tcDir `
+        -ExtraSrc @($case.Tb)
+}
+
+$ConvBiasCases = @(
+    @{ Name="conv2d_bias_otf_int8_os_default"; Dtype="int8"; Mode="OS"; Tb="$TbDir\matmul\tb_matmul_os.v" },
+    @{ Name="conv2d_bias_otf_int8_ws_default"; Dtype="int8"; Mode="WS"; Tb=$WsTb },
+    @{ Name="conv2d_bias_otf_fp16_os_default"; Dtype="fp16"; Mode="OS"; Tb="$TbDir\matmul\tb_matmul_os.v" }
+)
+
+foreach ($case in $ConvBiasCases) {
+    $tc = $case.Name
+    Write-Host ""
+    Write-Host "--- [generate conv2d_bias_otf/$tc] ---" -ForegroundColor Cyan
+    $genOut = & python "$ConvDir\gen_conv2d_im2col_data.py" `
+        --on-the-fly --bias --dtype $case.Dtype --mode $case.Mode --test-id $tc 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [GEN FAIL] $genOut" -ForegroundColor Red
+        $TotalFail++
+        $Results += [PSCustomObject]@{ Name="conv2d_bias_otf/$tc"; Status="GEN FAIL"; Pass=0; Fail=1 }
+        continue
+    }
+
+    $tcDir = "$ConvDir\$tc"
+    Run-Test -Name "conv2d_bias_otf/$tc" `
+        -VvpOut "$SimDir\reg_${tc}.vvp" `
+        -IncDir $tcDir `
+        -RunDir $tcDir `
+        -ExtraSrc @($case.Tb)
+}
+
+# ---- 8. T6.4 ReLU/ReLU6 activation tests ----
+# Direct scalar postprocess order is accumulator -> optional bias -> activation.
+$MatmulActCases = @(
+    @{ Name="matmul_relu_int8_os_3x5x4"; Dtype="int8"; Mode="OS"; M=3; K=5; N=4; Act="relu"; Tb="$TbDir\matmul\tb_matmul_os.v" },
+    @{ Name="matmul_relu6_int8_ws_3x5x4"; Dtype="int8"; Mode="WS"; M=3; K=5; N=4; Act="relu6"; Tb=$WsTb },
+    @{ Name="matmul_relu_fp16_os_3x4x3"; Dtype="fp16"; Mode="OS"; M=3; K=4; N=3; Act="relu"; Tb="$TbDir\matmul\tb_matmul_os.v" },
+    @{ Name="matmul_relu6_fp16_ws_2x3x2"; Dtype="fp16"; Mode="WS"; M=2; K=3; N=2; Act="relu6"; Tb=$WsTb }
+)
+
+foreach ($case in $MatmulActCases) {
+    $tc = $case.Name
+    Write-Host ""
+    Write-Host "--- [generate matmul_act/$tc] ---" -ForegroundColor Cyan
+    $genOut = & python "$TbDir\matmul\gen_matmul_data.py" --custom `
+        --m $case.M --k $case.K --n $case.N `
+        --dtype $case.Dtype --mode $case.Mode --bias --activation $case.Act --test-id $tc 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [GEN FAIL] $genOut" -ForegroundColor Red
+        $TotalFail++
+        $Results += [PSCustomObject]@{ Name="matmul_act/$tc"; Status="GEN FAIL"; Pass=0; Fail=1 }
+        continue
+    }
+
+    $tcDir = "$TbDir\matmul\$tc"
+    Run-Test -Name "matmul_act/$tc" `
+        -VvpOut "$SimDir\reg_${tc}.vvp" `
+        -IncDir $tcDir `
+        -RunDir $tcDir `
+        -ExtraSrc @($case.Tb)
+}
+
+$ConvActCases = @(
+    @{ Name="conv2d_relu_otf_int8_os_default"; Dtype="int8"; Mode="OS"; Act="relu"; Tb="$TbDir\matmul\tb_matmul_os.v" },
+    @{ Name="conv2d_relu6_otf_int8_ws_default"; Dtype="int8"; Mode="WS"; Act="relu6"; Tb=$WsTb },
+    @{ Name="conv2d_relu6_otf_fp16_os_default"; Dtype="fp16"; Mode="OS"; Act="relu6"; Tb="$TbDir\matmul\tb_matmul_os.v" }
+)
+
+foreach ($case in $ConvActCases) {
+    $tc = $case.Name
+    Write-Host ""
+    Write-Host "--- [generate conv2d_act_otf/$tc] ---" -ForegroundColor Cyan
+    $genOut = & python "$ConvDir\gen_conv2d_im2col_data.py" `
+        --on-the-fly --bias --activation $case.Act --dtype $case.Dtype --mode $case.Mode --test-id $tc 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [GEN FAIL] $genOut" -ForegroundColor Red
+        $TotalFail++
+        $Results += [PSCustomObject]@{ Name="conv2d_act_otf/$tc"; Status="GEN FAIL"; Pass=0; Fail=1 }
+        continue
+    }
+
+    $tcDir = "$ConvDir\$tc"
+    Run-Test -Name "conv2d_act_otf/$tc" `
+        -VvpOut "$SimDir\reg_${tc}.vvp" `
+        -IncDir $tcDir `
+        -RunDir $tcDir `
+        -ExtraSrc @($case.Tb)
+}
+
+# ---- 9. T6.5 INT8 quant/saturate tests ----
+# Direct scalar postprocess order is accumulator -> optional bias -> activation
+# -> optional INT8 quantize/saturate. Quant writes sign-extended int8 words.
+$MatmulQuantCases = @(
+    @{ Name="matmul_quant_int8_os_3x5x4"; Mode="OS"; M=3; K=5; N=4; Scale=3; Shift=5; Round=$true;  Act="relu"; Tb="$TbDir\matmul\tb_matmul_os.v" },
+    @{ Name="matmul_quant_int8_ws_3x5x4"; Mode="WS"; M=3; K=5; N=4; Scale=1; Shift=3; Round=$false; Act="none"; Tb=$WsTb }
+)
+
+foreach ($case in $MatmulQuantCases) {
+    $tc = $case.Name
+    Write-Host ""
+    Write-Host "--- [generate matmul_quant/$tc] ---" -ForegroundColor Cyan
+    $roundArg = @()
+    if ($case.Round) { $roundArg = @("--quant-round") }
+    $genOut = & python "$TbDir\matmul\gen_matmul_data.py" --custom `
+        --m $case.M --k $case.K --n $case.N `
+        --dtype int8 --mode $case.Mode --bias --activation $case.Act `
+        --quant --quant-scale $case.Scale --quant-shift $case.Shift @roundArg --test-id $tc 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [GEN FAIL] $genOut" -ForegroundColor Red
+        $TotalFail++
+        $Results += [PSCustomObject]@{ Name="matmul_quant/$tc"; Status="GEN FAIL"; Pass=0; Fail=1 }
+        continue
+    }
+
+    $tcDir = "$TbDir\matmul\$tc"
+    Run-Test -Name "matmul_quant/$tc" `
+        -VvpOut "$SimDir\reg_${tc}.vvp" `
+        -IncDir $tcDir `
+        -RunDir $tcDir `
+        -ExtraSrc @($case.Tb)
+}
+
+$ConvQuantCases = @(
+    @{ Name="conv2d_quant_otf_int8_os_default"; Mode="OS"; Scale=2; Shift=3; Round=$true;  Act="relu"; Tb="$TbDir\matmul\tb_matmul_os.v" },
+    @{ Name="conv2d_quant_otf_int8_ws_default"; Mode="WS"; Scale=1; Shift=2; Round=$false; Act="none"; Tb=$WsTb }
+)
+
+foreach ($case in $ConvQuantCases) {
+    $tc = $case.Name
+    Write-Host ""
+    Write-Host "--- [generate conv2d_quant_otf/$tc] ---" -ForegroundColor Cyan
+    $roundArg = @()
+    if ($case.Round) { $roundArg = @("--quant-round") }
+    $genOut = & python "$ConvDir\gen_conv2d_im2col_data.py" `
+        --on-the-fly --bias --activation $case.Act --dtype int8 --mode $case.Mode `
+        --quant --quant-scale $case.Scale --quant-shift $case.Shift @roundArg --test-id $tc 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [GEN FAIL] $genOut" -ForegroundColor Red
+        $TotalFail++
+        $Results += [PSCustomObject]@{ Name="conv2d_quant_otf/$tc"; Status="GEN FAIL"; Pass=0; Fail=1 }
+        continue
+    }
+
+    $tcDir = "$ConvDir\$tc"
+    Run-Test -Name "conv2d_quant_otf/$tc" `
+        -VvpOut "$SimDir\reg_${tc}.vvp" `
+        -IncDir $tcDir `
+        -RunDir $tcDir `
+        -ExtraSrc @($case.Tb)
+}
+
+# ---- 10. T6.6 Two-layer Conv2D end-to-end test ----
+# Layer0 writes quantized OFM to DRAM; layer1 consumes the same address as its
+# A matrix and the testbench checks both the intermediate and final outputs.
+$ConvTwoLayerCases = @(
+    @{ Name="conv2d_two_layer_int8_os_default"; Tb="$ConvDir\tb_conv2d_two_layer.v" }
+)
+
+foreach ($case in $ConvTwoLayerCases) {
+    $tc = $case.Name
+    Write-Host ""
+    Write-Host "--- [generate conv2d_two_layer/$tc] ---" -ForegroundColor Cyan
+    $genOut = & python "$ConvDir\gen_conv2d_two_layer_data.py" --test-id $tc 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [GEN FAIL] $genOut" -ForegroundColor Red
+        $TotalFail++
+        $Results += [PSCustomObject]@{ Name="conv2d_two_layer/$tc"; Status="GEN FAIL"; Pass=0; Fail=1 }
+        continue
+    }
+
+    $tcDir = "$ConvDir\$tc"
+    Run-Test -Name "conv2d_two_layer/$tc" `
+        -VvpOut "$SimDir\reg_${tc}.vvp" `
+        -IncDir $tcDir `
+        -RunDir $tcDir `
+        -ExtraSrc @($case.Tb)
+}
+
 # ---- Summary ----
 Write-Host ""
 Write-Host "======================================================" -ForegroundColor Cyan

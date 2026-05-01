@@ -46,6 +46,10 @@ localparam NPU_BASE     = 32'h0200_0000;
 localparam DRAM_BASE    = 32'h0000_1000;
 localparam PASS_MARKER  = 32'h0000_00AA;
 localparam FAIL_MARKER  = 32'h0000_00FF;
+`ifndef FW_WORDS
+`define FW_WORDS 42
+`endif
+localparam FW_LAST_WORD = `FW_WORDS - 1;
 
 // ---------------------------------------------------------------------------
 // Signals
@@ -81,6 +85,7 @@ always #(CLK_PERIOD/2) clk = ~clk;
 // ---------------------------------------------------------------------------
 initial begin
     rst_n = 0;
+    cycle_count = 0;
     #100;
     rst_n = 1;
 end
@@ -92,7 +97,7 @@ initial begin
     // Load test firmware (machine code hex)
     // Note: vvp runs from the sim/ directory, so use ../tb/ prefix.
     // Alternatively, copy soc_test.hex into sim/ before running.
-    $readmemh("../tb/soc_test.hex", u_soc.u_sram.mem);
+    $readmemh("../tb/soc_test.hex", u_soc.u_sram.mem, 0, FW_LAST_WORD);
 end
 
 // ---------------------------------------------------------------------------
@@ -133,7 +138,9 @@ end
 // Timeout counter
 // ---------------------------------------------------------------------------
 always @(posedge clk) begin
-    if (rst_n)
+    if (!rst_n)
+        cycle_count <= 0;
+    else
         cycle_count <= cycle_count + 1;
 end
 
@@ -173,8 +180,20 @@ initial begin
                 if (pass_seen) begin
                     $display("");
                     $display("========================================");
-                    $display("  [PASS] SoC integration test PASSED!");
+                    if (u_soc.u_dram.mem[32'h1020 >> 2]        === 32'd19 &&
+                        u_soc.u_dram.mem[(32'h1020+4) >> 2]    === 32'd22 &&
+                        u_soc.u_dram.mem[(32'h1020+8) >> 2]    === 32'd43 &&
+                        u_soc.u_dram.mem[(32'h1020+12) >> 2]   === 32'd50) begin
+                        $display("  [PASS] SoC integration test PASSED!");
+                    end else begin
+                        $display("  [FAIL] SoC marker PASS but result memory mismatched!");
+                    end
                     $display("  Cycles: %0d", cycle_count);
+                    $display("  DRAM result area (0x1020): C00=%0d C01=%0d C10=%0d C11=%0d",
+                        $signed(u_soc.u_dram.mem[32'h1020 >> 2]),
+                        $signed(u_soc.u_dram.mem[(32'h1020+4) >> 2]),
+                        $signed(u_soc.u_dram.mem[(32'h1020+8) >> 2]),
+                        $signed(u_soc.u_dram.mem[(32'h1020+12) >> 2]));
                     $display("========================================");
                     $finish;
                 end
@@ -217,13 +236,16 @@ end
 // Waveform dump
 // ---------------------------------------------------------------------------
 initial begin
+`ifdef DUMP_VCD
     $dumpfile("soc_sim.vcd");
     $dumpvars(0, tb_soc);
+`endif
 end
 
 // ---------------------------------------------------------------------------
 // Debug: trace CPU activity
 // ---------------------------------------------------------------------------
+`ifdef SOC_VERBOSE
 integer dbg_cnt;
 initial begin : dbg_trace
     wait (rst_n);
@@ -241,10 +263,12 @@ initial begin : dbg_trace
         end
     end
 end
+`endif
 
 // ---------------------------------------------------------------------------
 // Periodic NPU status monitor
 // ---------------------------------------------------------------------------
+`ifdef SOC_VERBOSE
 initial begin : npu_monitor
     wait (rst_n);
     // wait until CTRL is written (NPU start)
@@ -259,5 +283,6 @@ initial begin : npu_monitor
             u_soc.u_npu.status_done);
     end
 end
+`endif
 
 endmodule

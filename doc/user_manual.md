@@ -1,6 +1,6 @@
 # 使用说明
 
-更新时间：2026-04-29
+更新时间：2026-05-01
 
 本文面向 CPU 侧软件和 testbench。当前实现还处于原型阶段，寄存器直配模式可用于调试；多层卷积建议按 descriptor 模式设计。
 
@@ -25,6 +25,8 @@
 - AXI-Lite `DESC_BASE(0x40)`、`DESC_COUNT(0x44)` 和 `CTRL[7] desc_mode` 可写入并读回。
 - 第一版 descriptor fetch/decode/next-layer 已接入：支持多个 `GEMM_TILEPACK + INT8/FP16 + OS + 4x4 + TILE_PACKED` descriptor 顺序执行。
 - T5.4 已支持 descriptor 链中后一层使用上一层 32-bit row-major OFM 作为 IFM：`desc_ctrl[23]=IFM_FROM_PREV_OFM` 时，DMA 会把上一层 OFM gather/repack 成当前 4-lane A tile stream。当前已验证 INT8 4x4 GEMM 串联。
+- T6.2 已支持 direct scalar on-the-fly Conv2D im2col：`CTRL[8]` 置位后，DRAM 只需保存 raw NCHW IFM 和 `W_col`，DMA 按卷积参数生成 A 行并写入 A PPBuf。
+- T6.3-T6.6 已支持 direct scalar 32-bit bias、ReLU/ReLU6、INT8 quant/saturate 和两层 Conv2D E2E：`BIAS_ADDR(0x98)` 指向每输出列一个 32-bit bias word，`CTRL[9]` 启用 bias，`CTRL[11:10]` 选择 activation，`QUANT_CFG(0x9C)` 配置量化；T6.6 验证 layer0 量化 OFM 可直接作为 layer1 输入。
 
 不能依赖：
 
@@ -73,6 +75,14 @@ NPU 基地址建议：
 | `0x6C` | `PERF_RD_BURSTS` | DMA AXI read burst count |
 | `0x70` | `PERF_WR_BURSTS` | DMA AXI write burst count |
 | `0x74` | `ERR_STATUS` | W1C error status |
+| `0x80` | `CONV_IFM_SHAPE` | `[15:0]=IH, [31:16]=IW` |
+| `0x84` | `CONV_CHANNELS` | `[15:0]=Cin, [31:16]=Batch` |
+| `0x88` | `CONV_KERNEL` | `[15:0]=KH, [31:16]=KW` |
+| `0x8C` | `CONV_OUT_SHAPE` | `[15:0]=OH, [31:16]=OW` |
+| `0x90` | `CONV_STRIDE_PAD` | `[7:0]=stride_h, [15:8]=stride_w, [23:16]=pad_h, [31:24]=pad_w` |
+| `0x94` | `CONV_DILATION` | `[7:0]=dilation_h, [15:8]=dilation_w` |
+| `0x98` | `BIAS_ADDR` | direct scalar bias vector base，每输出列一个 32-bit word |
+| `0x9C` | `QUANT_CFG` | direct scalar INT8 quant：bit0 enable，bit1 round，`[15:8]` right shift，`[31:16]` signed scale |
 
 `CTRL` 编码：
 
@@ -83,6 +93,9 @@ bit[3:2] data mode: 00=INT8, 10=FP16
 bit[5:4] dataflow: 00=WS, 01=OS
 bit6     irq clear
 bit7     desc_mode: 0=direct register mode, 1=descriptor mode; T5.3 起由 controller fetch/decode descriptor
+bit8     conv_im2col: direct scalar on-the-fly Conv2D im2col enable; tile/descriptor mode 当前忽略
+bit9     bias_en: direct scalar 32-bit bias enable; tile/descriptor mode 当前忽略
+bit[11:10] activation: 00=none, 01=ReLU, 10=ReLU6; tile/descriptor mode 当前忽略
 ```
 
 `STATUS` 编码：
@@ -112,6 +125,79 @@ bit3 IFM_PREV_MISSING
 | INT8 + OS + start | `0x11` |
 | FP16 + WS + start | `0x09` |
 | FP16 + OS + start | `0x19` |
+| INT8 + WS + Conv2D on-the-fly + start | `0x101` |
+| INT8 + OS + Conv2D on-the-fly + start | `0x111` |
+| FP16 + OS + Conv2D on-the-fly + start | `0x119` |
+| INT8 + OS + bias + start | `0x211` |
+| INT8 + OS + ReLU + start | `0x411` |
+| INT8 + OS + bias + ReLU + start | `0x611` |
+| INT8 + OS + bias + ReLU6 + start | `0xA11` |
+| FP16 + OS + Conv2D on-the-fly + bias + ReLU6 + start | `0xB19` |
+
+### Direct Conv2D on-the-fly im2col
+
+T6.2 的 direct Conv2D 路径复用 direct scalar matmul checker。CPU 仍需配置 GEMM 维度：
+
+```text
+M_DIM = Batch * OH * OW
+N_DIM = Cout
+K_DIM = Cin * KH * KW
+A_ADDR = raw IFM base, NCHW contiguous: IFM[b][cin][ih][iw]
+W_ADDR = W_col base, column-major with the same direct scalar 32-bit aligned column stride
+R_ADDR = output C/OFM base, 32-bit accumulator row-major C[M,N]
+CTRL[8] = 1
+ARR_CFG[7] = 0
+```
+
+DMA 内部生成：
+
+```text
+m -> b, oh, ow
+k -> cin, kh, kw
+ih = oh * stride_h + kh * dilation_h - pad_h
+iw = ow * stride_w + kw * dilation_w - pad_w
+A[m,k] = in_bounds ? IFM[b,cin,ih,iw] : 0
+```
+
+当前限制：T6.2 只覆盖 direct scalar、非 tile mode；descriptor `OP=CONV2D_IM2COL` 尚未映射到该硬件路径，tile-pack/4x4 主线仍使用已有 GEMM/tile-pack 数据流。
+
+### Direct scalar bias, activation, INT8 quant and two-layer Conv2D
+
+T6.3-T6.6 的后处理和两层 Conv2D E2E 只覆盖 direct scalar、非 tile mode。CPU 配置方式：
+
+```text
+BIAS_ADDR = bias vector base
+CTRL[9] = 1     // enable bias
+CTRL[11:10] = 01 for ReLU, 10 for ReLU6
+QUANT_CFG[0] = 1       // enable INT8 quant/saturate
+QUANT_CFG[1] = 1       // optional signed rounding before shift
+QUANT_CFG[15:8] = S    // arithmetic right shift, 0..31
+QUANT_CFG[31:16] = Q   // signed 16-bit scale
+```
+
+Bias 布局：
+
+```text
+bias[j] at BIAS_ADDR + j * 4
+```
+
+执行语义：
+
+```text
+acc = dot(A[m,:], W[:,j])
+if CTRL[9]: acc = acc + bias[j]
+if CTRL[11:10] == 01: acc = ReLU(acc)
+if CTRL[11:10] == 10: acc = ReLU6(acc)
+if QUANT_CFG[0] and INT8:
+    q = acc * signed_scale
+    if QUANT_CFG[1] and S > 0: q = signed_round(q, S)
+    q = q >>> S
+    q = clamp(q, -128, 127)
+    acc = sign_extend(q[7:0])
+write R_ADDR + (m*N+j)*4
+```
+
+INT8 direct scalar 未开启 quant 时仍输出 signed 32-bit accumulator word；开启 quant 后输出 sign-extended signed int8 word，范围为 `[-128,127]`。FP16 direct scalar 输出是 FP32 word，ReLU6 clamp 到 `[0.0,6.0]`，`QUANT_CFG` 对 FP16 无效。当前 tile/descriptor 主线尚未接入该 postprocess。
 
 ## 当前 GEMM 数据布局意图
 
@@ -220,7 +306,7 @@ T5.1 固定 descriptor v1 ABI：每个 descriptor 是 16 个 32-bit little-endia
 | 11 | `channel_shape` | `[15:0]=Cin, [31:16]=Cout` | GEMM 可写 0；conv 中 `Cout` 应等于 `N` |
 | 12 | `kernel_stride` | `[7:0]=KH, [15:8]=KW, [23:16]=stride_h, [31:24]=stride_w` | GEMM 可写 0；conv/im2col 使用 |
 | 13 | `pad_dilation` | `[7:0]=pad_h, [15:8]=pad_w, [23:16]=dilation_h, [31:24]=dilation_w` | GEMM 可写 0；默认 dilation 为 1 |
-| 14 | `post_cfg` | `[3:0]=activation, [7:4]=quant_mode, [15:8]=out_shift, [31:16]=reserved` | 当前后处理尚未实现，未使用字段写 0 |
+| 14 | `post_cfg` | `[3:0]=activation, [7:4]=quant_mode, [15:8]=out_shift, [31:16]=reserved` | descriptor/tile 后处理尚未实现，未使用字段写 0 |
 | 15 | `next_desc` | `[31:0]` | 下一个 descriptor byte address；0 表示 descriptor 链结束 |
 
 ### `desc_ctrl` bit layout
@@ -421,7 +507,7 @@ descriptor i+1:
   npu_dma packs lanes r=0..3 into the A PPBuf tile stream
 ```
 
-当前该路径用于 INT8 链式 GEMM/FC 验证：DMA 取上一层 32-bit OFM word 的低 8 bit 作为下一层 INT8 lane，再由 PPBuf 符号扩展。真实网络仍需要后续 bias/activation/quant，确保写入 OFM 的值就是下一层期望的数据格式。
+当前该路径用于 INT8 链式 GEMM/FC 验证：DMA 取上一层 32-bit OFM word 的低 8 bit 作为下一层 INT8 lane，再由 PPBuf 符号扩展。真实网络仍需要把后处理接入 tile/descriptor 主线，并补齐 quant/format conversion，确保写入 OFM 的值就是下一层期望的数据格式。
 
 CPU descriptor 提交流程：
 
@@ -480,4 +566,4 @@ OFM_ADDR(i,j)  = OFM_BASE  + (i * N + j) * 4
 powershell -ExecutionPolicy Bypass -File scripts\run_sim.ps1
 ```
 
-同时运行 `tb_npu_scalar_smoke.v`、`tb_dma_read_burst.v`、`tb_dma_write_burst.v`、`tb_dma_burst.v`、`tb_dma_perf.v`、`tb_psum_out_buf.v`、`tb_reconfig_pe_acc_init.v`、`tb_npu_ctrl_ksplit.v`、`tb_npu_ctrl_dataflow_modes.v`、`tb_npu_ctrl_error_status.v`、`tb_npu_tile_ksplit_gemm.v`、`tb_npu_axi_lite_desc.v`、`tb_npu_desc_two_layer.v`、`tb_npu_desc_ofm_chain.v`、`tb_pingpong_buf_vec.v`、`tb_npu_ctrl_tile.v`、`tb_npu_tile_writeback.v`、`tb_npu_tile_gemm.v` 和 `tb_comprehensive.v`。需要临时验证大矩阵功能时，使用 `scripts/run_matmul_case.ps1` 生成并运行 direct scalar matmul case。T5.5 已补齐 IRQ/error status；当前 tile/descriptor 主线是 OS，direct scalar matmul 回归覆盖 OS 和 WS。下一步进入外部 PSUM surface、bias/activation/quant 或卷积前端。
+同时运行 `tb_npu_scalar_smoke.v`、`tb_dma_read_burst.v`、`tb_dma_write_burst.v`、`tb_dma_burst.v`、`tb_dma_perf.v`、`tb_psum_out_buf.v`、`tb_reconfig_pe_acc_init.v`、`tb_npu_ctrl_ksplit.v`、`tb_npu_ctrl_dataflow_modes.v`、`tb_npu_ctrl_error_status.v`、`tb_npu_tile_ksplit_gemm.v`、`tb_npu_axi_lite_desc.v`、`tb_npu_desc_two_layer.v`、`tb_npu_desc_ofm_chain.v`、`tb_pingpong_buf_vec.v`、`tb_npu_ctrl_tile.v`、`tb_npu_tile_writeback.v`、`tb_npu_tile_gemm.v` 和 `tb_comprehensive.v`。需要临时验证大矩阵功能时，使用 `scripts/run_matmul_case.ps1` 生成并运行 direct scalar matmul case；需要验证 T6.1 DRAM 预展开卷积时，使用 `scripts/run_conv2d_im2col_case.ps1`；需要验证 T6.2 raw IFM on-the-fly im2col 时，使用 `scripts/run_conv2d_otf_case.ps1`；需要验证 T6.3-T6.5 后处理时，加 `-Bias -Activation relu|relu6 -Quant -QuantScale <q> -QuantShift <s> [-QuantRound]`；需要验证 T6.6 两层 Conv2D E2E 时，使用 `scripts/run_conv2d_two_layer_case.ps1`。SoC smoke 使用 `scripts/run_soc_sim.ps1`，默认无 VCD，`-DumpVcd` 可选。T5.5 已补齐 IRQ/error status；T6.1/T6.2 已完成两种 Conv2D im2col golden；T6.3-T6.6 已完成 direct scalar bias、ReLU/ReLU6、INT8 quant/saturate 和两层 Conv2D E2E；当前 tile/descriptor 主线是 OS，direct scalar matmul/Conv2D 回归覆盖 OS 和 WS。下一步进入 descriptor 化卷积或 16x16/8x32 高吞吐阵列。

@@ -1,6 +1,6 @@
 # 当前实现状态
 
-更新时间：2026-04-29
+更新时间：2026-05-01
 
 
 
@@ -39,15 +39,23 @@ $env:Path = 'E:\iverilog\bin;' + $env:Path
 | `tb/tb_npu_ctrl_dataflow_modes.v` | PASS | direct scalar OS/WS controller 分支均可跑到 done，WS `pe_load_w` 覆盖 K 个周期 |
 | `tb/tb_npu_ctrl_error_status.v` | PASS | controller 可锁存 desc_count=0、unsupported descriptor、descriptor count exhausted 并由 W1C 清除 |
 | `scripts/run_matmul_case.ps1` | PASS | 自定义 direct matmul 可生成并运行大矩阵：32x32x32 INT8 OS/WS 均 1024 checks PASS，16x16x16 FP16 OS 256 checks PASS |
+| `scripts/run_conv2d_im2col_case.ps1` | PASS | T6.1 DRAM 预展开 Conv2D im2col：默认 1x5x5x2, 3x3, Cout=3 case 在 INT8 OS/WS 和 FP16 OS 下均 75 checks PASS |
+| `scripts/run_conv2d_otf_case.ps1` | PASS | T6.2 on-the-fly Conv2D im2col：DRAM 只保存 raw NCHW IFM，默认 case 在 INT8 OS/WS 和 FP16 OS 下均 75 checks PASS |
+| `scripts/run_matmul_case.ps1 -Bias` | PASS | T6.3 direct scalar 32-bit bias：INT8 OS/WS 和 FP16 OS/WS targeted case 均通过 |
+| `scripts/run_matmul_case.ps1 -Bias -Activation relu/relu6` | PASS | T6.4 direct scalar activation：INT8/FP16、OS/WS 的 ReLU/ReLU6 targeted case 均通过 |
+| `scripts/run_conv2d_otf_case.ps1 -Bias -Activation relu/relu6` | PASS | T6.4 Conv2D on-the-fly 后处理：INT8 OS ReLU、INT8 WS ReLU6、FP16 OS ReLU6 均 75 checks PASS |
+| `scripts/run_matmul_case.ps1 -Quant` | PASS | T6.5 direct scalar INT8 quant/saturate：OS/WS targeted case 均通过 |
+| `scripts/run_conv2d_otf_case.ps1 -Quant` | PASS | T6.5 Conv2D on-the-fly INT8 quant/saturate：OS/WS targeted case 均 75 checks PASS |
+| `scripts/run_conv2d_two_layer_case.ps1` | PASS | T6.6 两层 Conv2D E2E：layer0 量化 OFM 直接作为 layer1 A 输入，layer0+layer1 共 48 checks PASS |
 | `tb/tb_npu_tile_ksplit_gemm.v` | PASS | 顶层 4x4x10 INT8 OS GEMM 可按 4/4/2 K-split 累加，最终结果等于未切分 golden |
 | `tb/tb_npu_axi_lite_desc.v` | PASS | AXI-Lite descriptor 寄存器、STATUS busy/done/error、done/error IRQ 和 ERR_STATUS W1C 可用 |
 | `tb/tb_npu_desc_two_layer.v` | PASS | descriptor mode 可顺序 fetch/decode 两个 4x4 INT8 OS tile GEMM descriptor，并在 LAST_LAYER 后 done |
 | `tb/tb_npu_desc_ofm_chain.v` | PASS | descriptor bit23 可让第二层使用第一层 32-bit row-major OFM 作为 IFM，DMA 完成 INT8 gather/repack |
 | `tb/tb_npu_scalar_smoke.v` | PASS | 标量路径可用，且 AXI perf counters 寄存器可读 |
-| `scripts/run_regression.ps1` | 1078 PASS / 12 FAIL | 新增 OS/WS dataflow 单测通过；剩余失败集中在旧 matmul 2x3x2 OS/WS case |
+| `scripts/run_regression.ps1` | 2286 PASS / 0 FAIL | direct scalar matmul、T6.1/T6.2 Conv2D、T6.3 bias、T6.4 ReLU/ReLU6、T6.5 INT8 quant/saturate 和 T6.6 两层 Conv2D E2E 默认 case 均通过 |
 | 当前源列表手工编译运行 `tb_comprehensive.v` | 28 PASS / 0 FAIL | Phase 1 顶层标量兼容路径已恢复 |
 | `scripts/run_full_sim.ps1` | 编译和仿真完成 | 脚本源列表与 testbench 参数已对齐 |
-| `scripts/run_soc_sim.ps1` | 编译失败 | `dram_model.v` 的 `axi_arlen` 绑定问题和 PicoRV32 PCPI 端口不匹配 |
+| `scripts/run_soc_sim.ps1` | PASS | PicoRV32 配置 NPU 完成 2x2 INT8 GEMM，testbench 独立确认 `C00=19 C01=22 C10=43 C11=50` |
 
 ## 当前已经具备
 
@@ -81,17 +89,23 @@ $env:Path = 'E:\iverilog\bin;' + $env:Path
 28. T5.4 已增加 `desc_ctrl[23] IFM_FROM_PREV_OFM`：`npu_ctrl` 记录上一层 `ofm_addr`，下一层置位后由 `npu_dma` 从上一层 row-major 32-bit OFM gather/repack 为 4-lane INT8 A tile stream。
 29. T5.5 已接入 done/error 可见性：`STATUS[2]`、`INT_EN/INT_CLR`、`ERR_STATUS(0x74)` W1C 和 controller descriptor 错误锁存可用。
 30. 仿真口径已明确：4x4 tile、K-split、descriptor 主线当前基于 OS；direct scalar matmul 回归同时覆盖 OS 和 WS，`tb_npu_ctrl_dataflow_modes.v` 额外显式覆盖 OS/WS 控制分支。
-31. `scripts/run_matmul_case.ps1` 可按参数生成并运行 direct scalar 大矩阵功能测试，已验证 32x32x32 INT8 OS/WS 和 16x16x16 FP16 OS。
+31. `scripts/run_matmul_case.ps1` 可按参数生成并运行 direct scalar 大矩阵功能测试，已验证 32x32x32 INT8 OS/WS、16x16x16 FP16 OS，以及 K 非 32-bit 对齐的 25x18x3 INT8 OS。
+32. T6.1 已完成第一版 DRAM 预展开 im2col 仿真：`tb/conv2d/gen_conv2d_im2col_data.py` 生成 IFM/weight、`A_im2col`、`W_col`、DRAM image 和 Conv2D golden，`scripts/run_conv2d_im2col_case.ps1` 复用 direct matmul testbench 做端到端校验。
+33. T6.2 已完成 direct scalar on-the-fly im2col：`CTRL[8]` 启用后，`npu_dma` 从 raw NCHW IFM 按 Conv2D 窗口地址 gather A 行并写入 A PPBuf，不再要求 DRAM 保存完整 `A_im2col` 中间矩阵；`scripts/run_conv2d_otf_case.ps1` 已覆盖默认 INT8 OS/WS 和 FP16 OS case。
+34. T6.3 已完成 direct scalar 32-bit bias：`BIAS_ADDR(0x98)` 指向每输出列一个 32-bit bias word，`CTRL[9]` 启用后 controller 对当前输出列 fetch bias，作为 scalar PE accumulator init。
+35. T6.4 已完成 direct scalar ReLU/ReLU6：`CTRL[11:10]` 为 `00=none, 01=ReLU, 10=ReLU6`，`npu_top` 在 scalar result FIFO 前执行 activation。
+36. T6.5 已完成 direct scalar INT8 quant/saturate：`QUANT_CFG(0x9C)` bit0 启用，bit1 选择 signed rounding，`[15:8]` 为 arithmetic right shift，`[31:16]` 为 signed scale；语义顺序为 accumulator -> optional bias -> activation -> optional quantize/saturate，量化输出为 sign-extended signed int8 word。
+37. T6.6 已完成两层 Conv2D 端到端仿真：layer0 使用 direct scalar on-the-fly im2col + bias + ReLU + INT8 quant，layer1 直接消费 layer0 `R_ADDR`，最终 golden 正确。
+38. SoC smoke 已恢复：`soc_top`、`dram_model`、`axi_lite_bridge`、`soc_mem` 与 PicoRV32 ready/rdata/PCPI/AXI burst 接口已对齐，`run_soc_sim.ps1` 默认无 VCD、`-DumpVcd` 可选。
 
 ## 当前关键差距
 
 1. 当前 4x4 tile-mode GEMM 已通过 INT8/FP16 基础验证，但 8x8/16x16/8x32 还没有宽向量供数和完整写回验证。
 2. 顶层 K-split GEMM golden 已通过；外部 PSUM surface 的 DMA read/writeback 尚未接入多层 descriptor 流。
-3. Descriptor v1 fetch/decode/next-layer 已具备第一版：支持 `OP=GEMM_TILEPACK`、`DTYPE=INT8/FP16`、`DATAFLOW=OS`、`SHAPE=4x4`、`TILE_PACKED=1` 映射到现有 tile GEMM 数据通路；T5.4 已验证 INT8 层间 OFM 作为下一层 IFM；T5.5 已让 unsupported descriptor 和 descriptor count exhausted 等错误对 CPU 可见。外部 PSUM surface、FP16 OFM 格式转换、bias/activation/quant 仍未接入 descriptor 流。
+3. Descriptor v1 fetch/decode/next-layer 已具备第一版：支持 `OP=GEMM_TILEPACK`、`DTYPE=INT8/FP16`、`DATAFLOW=OS`、`SHAPE=4x4`、`TILE_PACKED=1` 映射到现有 tile GEMM 数据通路；T5.4 已验证 INT8 层间 OFM 作为下一层 IFM；T5.5 已让 unsupported descriptor 和 descriptor count exhausted 等错误对 CPU 可见。外部 PSUM surface、FP16 OFM 格式转换、bias/activation/quant 进入 descriptor/tile 主线仍未接入。
 4. DMA 读写 burst、混合 8/16 beat 正确性、基础带宽计数和 60%/80% 利用率目标报告已具备；后续若要冲 80% write util，需要允许多 outstanding write burst 或重叠 B response 间隔。
 5. `npu_power` 输出没有接入 PE 主时钟路径。
-6. SoC 仿真仍存在 DRAM 模型信号绑定和 PicoRV32 PCPI 端口不匹配。
-7. 当前没有硬件 on-the-fly im2col 地址发生器；卷积需要先由软件/testbench 预展开或预打包为 GEMM/tile 流。
+6. T6.2-T6.6 已有 direct scalar on-the-fly im2col、bias、ReLU/ReLU6、INT8 quant/saturate 和两层 Conv2D E2E，但 tile/descriptor 主线尚未使用这些路径；descriptor 侧 `OP=CONV2D_IM2COL` 和多层卷积后处理仍未接入。
 
 ## 不应继续引用的旧结论
 
@@ -99,7 +113,7 @@ $env:Path = 'E:\iverilog\bin;' + $env:Path
 |---|---|
 | `tb_comprehensive` 失败 2/28 PASS | 已过期，当前是 28/28 PASS |
 | 全量回归 903 PASS | 当前不能作为事实引用 |
-| SoC 集成已验证 | 当前需要重新修复和验证 |
+| SoC 集成已验证 | 旧的未带独立结果检查结论已过期；当前 smoke 已重新修复并通过 |
 | 4x4 tile 结果还没有从阵列写回 | 已过期，T2.4 已完成 serializer 和 row-wise writeback |
 | 16x16/8x32 已完成高吞吐矩阵乘 | 阵列存在，但顶层尚未喂满更大形态，也缺少完整验证 |
 | DMA 读通道固定 `ARLEN=0` | 已过期，T3.1 已支持 INCR read burst |
@@ -109,4 +123,4 @@ $env:Path = 'E:\iverilog\bin;' + $env:Path
 
 ## 当前一句话定位
 
-这是一个具备 PE 算术、NPU 外围框架、可验证 4x4 tile GEMM 路径、顶层 K-split GEMM golden、DMA read/write burst、混合 burst 正确性测试、AXI perf counters、带宽利用率报告、PSUM/OUT buffer RMW 模块、accumulator-init PE array、controller k_tile loop、descriptor v1 ABI、AXI-Lite descriptor 提交寄存器、descriptor 多任务顺序执行、INT8 OFM->IFM 两层串联以及 IRQ/error status 的原型。下一阶段重点是外部 PSUM surface、多层卷积和 16x16 高吞吐阵列。
+这是一个具备 PE 算术、NPU 外围框架、可验证 4x4 tile GEMM 路径、顶层 K-split GEMM golden、DMA read/write burst、混合 burst 正确性测试、AXI perf counters、带宽利用率报告、PSUM/OUT buffer RMW 模块、accumulator-init PE array、controller k_tile loop、descriptor v1 ABI、AXI-Lite descriptor 提交寄存器、descriptor 多任务顺序执行、INT8 OFM->IFM 两层串联、IRQ/error status、DRAM 预展开 Conv2D im2col、direct scalar on-the-fly Conv2D im2col、bias、ReLU/ReLU6 和 INT8 quant/saturate 后处理的原型。下一阶段重点是两层卷积端到端、descriptor 化卷积和 16x16 高吞吐阵列。

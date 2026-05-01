@@ -98,8 +98,10 @@ localparam TILE_LANES = 4;
 // Wires: register file → controller
 // ---------------------------------------------------------------------------
 wire [31:0] ctrl_reg, m_dim_r, n_dim_r, k_dim_r;
-wire [31:0] w_addr_r, a_addr_r, r_addr_r;
+wire [31:0] w_addr_r, a_addr_r, r_addr_r, bias_addr_r, quant_cfg_r;
 wire [31:0] desc_base_r, desc_count_r;
+wire [31:0] conv_ifm_shape_r, conv_channels_r, conv_kernel_r;
+wire [31:0] conv_out_shape_r, conv_stride_pad_r, conv_dilation_r;
 wire [7:0]  arr_cfg_r;
 wire [2:0]  clk_div_r;
 wire [1:0]  cfg_shape_r;
@@ -149,12 +151,20 @@ npu_axi_lite u_axi_lite (
     .w_addr     (w_addr_r),
     .a_addr     (a_addr_r),
     .r_addr     (r_addr_r),
+    .bias_addr  (bias_addr_r),
+    .quant_cfg  (quant_cfg_r),
     .arr_cfg    (arr_cfg_r),
     .clk_div    (clk_div_r),
     .cg_en      (cg_en_r),
     .cfg_shape  (cfg_shape_r),
     .desc_base  (desc_base_r),
     .desc_count (desc_count_r),
+    .conv_ifm_shape(conv_ifm_shape_r),
+    .conv_channels(conv_channels_r),
+    .conv_kernel(conv_kernel_r),
+    .conv_out_shape(conv_out_shape_r),
+    .conv_stride_pad(conv_stride_pad_r),
+    .conv_dilation(conv_dilation_r),
     .status_busy(status_busy),
     .status_done(status_done),
     .status_error(status_error),
@@ -180,24 +190,38 @@ npu_axi_lite u_axi_lite (
 // NPU Controller
 // ---------------------------------------------------------------------------
 wire dma_w_start, dma_a_start, dma_r_start;
-wire dma_w_done,  dma_a_done,  dma_r_done;
+wire dma_w_done,  dma_a_done,  dma_bias_done, dma_r_done;
 wire [31:0] dma_w_addr, dma_a_addr, dma_r_addr;
 wire [15:0] dma_w_len,  dma_a_len,  dma_r_len;
+wire dma_bias_start;
+wire [31:0] dma_bias_addr;
+wire [31:0] dma_bias_data;
 wire dma_a_ofm_mode;
+wire dma_a_im2col_mode;
 wire [31:0] dma_a_ofm_stride;
 wire [31:0] dma_a_ofm_m_base;
 wire [31:0] dma_a_ofm_k_base;
 wire [15:0] dma_a_ofm_k_len;
 wire [2:0]  dma_a_ofm_active_rows;
 wire dma_a_ofm_fp16_mode;
+wire [31:0] dma_a_im2col_m_index;
+wire [15:0] dma_a_im2col_k_len;
+wire [15:0] dma_a_im2col_ih, dma_a_im2col_iw, dma_a_im2col_cin;
+wire [15:0] dma_a_im2col_kh, dma_a_im2col_kw, dma_a_im2col_oh, dma_a_im2col_ow;
+wire [7:0]  dma_a_im2col_stride_h, dma_a_im2col_stride_w;
+wire [7:0]  dma_a_im2col_pad_h, dma_a_im2col_pad_w;
+wire [7:0]  dma_a_im2col_dilation_h, dma_a_im2col_dilation_w;
+wire        dma_a_im2col_fp16_mode;
 wire desc_fetch_start, desc_fetch_done;
 wire [31:0] desc_fetch_addr;
 wire [511:0] desc_fetch_words;
 wire pe_en, pe_flush, pe_mode, pe_stat;
-wire pe_load_w, pe_swap_w;   // WS mode weight control
+wire pe_load_w, pe_swap_w, pe_acc_init_en;   // WS mode weight control and accumulator init
 wire ctrl_w_ppb_swap, ctrl_a_ppb_swap, ctrl_w_ppb_clear, ctrl_a_ppb_clear;
 wire ctrl_r_fifo_clear;
 wire [1:0] ctrl_cfg_shape;
+wire [1:0] ctrl_post_act_mode;
+wire [31:0] ctrl_post_quant_cfg;
 wire ctrl_tile_mode, ctrl_vec_consume;
 wire [31:0] ctrl_tile_m_base, ctrl_tile_n_base; // global C tile origin: m0/n0
 wire [3:0] ctrl_tile_row_valid, ctrl_tile_col_valid; // valid r/c lanes for edge tiles
@@ -222,15 +246,25 @@ npu_ctrl #(
     .w_addr       (w_addr_r),
     .a_addr       (a_addr_r),
     .r_addr       (r_addr_r),
+    .bias_addr    (bias_addr_r),
+    .quant_cfg    (quant_cfg_r),
     .arr_cfg      (arr_cfg_r),
     .desc_base    (desc_base_r),
     .desc_count   (desc_count_r),
+    .conv_ifm_shape(conv_ifm_shape_r),
+    .conv_channels(conv_channels_r),
+    .conv_kernel  (conv_kernel_r),
+    .conv_out_shape(conv_out_shape_r),
+    .conv_stride_pad(conv_stride_pad_r),
+    .conv_dilation(conv_dilation_r),
     .desc_start   (desc_fetch_start),
     .desc_addr    (desc_fetch_addr),
     .desc_done    (desc_fetch_done),
     .desc_words   (desc_fetch_words),
     .cfg_shape_in (cfg_shape_r),
     .cfg_shape_latched(ctrl_cfg_shape),
+    .post_act_mode(ctrl_post_act_mode),
+    .post_quant_cfg(ctrl_post_quant_cfg),
     .tile_mode    (ctrl_tile_mode),
     .vec_consume  (ctrl_vec_consume),
     .tile_m_base  (ctrl_tile_m_base),
@@ -258,12 +292,32 @@ npu_ctrl #(
     .dma_a_addr   (dma_a_addr),
     .dma_a_len    (dma_a_len),
     .dma_a_ofm_mode(dma_a_ofm_mode),
+    .dma_a_im2col_mode(dma_a_im2col_mode),
     .dma_a_ofm_stride(dma_a_ofm_stride),
     .dma_a_ofm_m_base(dma_a_ofm_m_base),
     .dma_a_ofm_k_base(dma_a_ofm_k_base),
     .dma_a_ofm_k_len(dma_a_ofm_k_len),
     .dma_a_ofm_active_rows(dma_a_ofm_active_rows),
     .dma_a_ofm_fp16_mode(dma_a_ofm_fp16_mode),
+    .dma_a_im2col_m_index(dma_a_im2col_m_index),
+    .dma_a_im2col_k_len(dma_a_im2col_k_len),
+    .dma_a_im2col_ih(dma_a_im2col_ih),
+    .dma_a_im2col_iw(dma_a_im2col_iw),
+    .dma_a_im2col_cin(dma_a_im2col_cin),
+    .dma_a_im2col_kh(dma_a_im2col_kh),
+    .dma_a_im2col_kw(dma_a_im2col_kw),
+    .dma_a_im2col_oh(dma_a_im2col_oh),
+    .dma_a_im2col_ow(dma_a_im2col_ow),
+    .dma_a_im2col_stride_h(dma_a_im2col_stride_h),
+    .dma_a_im2col_stride_w(dma_a_im2col_stride_w),
+    .dma_a_im2col_pad_h(dma_a_im2col_pad_h),
+    .dma_a_im2col_pad_w(dma_a_im2col_pad_w),
+    .dma_a_im2col_dilation_h(dma_a_im2col_dilation_h),
+    .dma_a_im2col_dilation_w(dma_a_im2col_dilation_w),
+    .dma_a_im2col_fp16_mode(dma_a_im2col_fp16_mode),
+    .dma_bias_start(dma_bias_start),
+    .dma_bias_done (dma_bias_done),
+    .dma_bias_addr (dma_bias_addr),
     .dma_r_start  (dma_r_start),
     .dma_r_done   (dma_r_done),
     .dma_r_addr   (dma_r_addr),
@@ -274,6 +328,7 @@ npu_ctrl #(
     .pe_stat      (pe_stat),
     .pe_load_w    (pe_load_w),
     .pe_swap_w    (pe_swap_w),
+    .pe_acc_init_en(pe_acc_init_en),
     .w_ppb_ready  (u_w_ppb.buf_ready),
     .w_ppb_empty  (u_w_ppb.buf_empty),
     .a_ppb_ready  (u_a_ppb.buf_ready),
@@ -395,17 +450,39 @@ npu_dma #(
     .a_ppb_buf_empty(a_ppb_buf_empty_int),
     .a_ppb_drain_done(1'b1),
     .a_ofm_mode    (dma_a_ofm_mode),
+    .a_im2col_mode (dma_a_im2col_mode),
     .a_ofm_stride  (dma_a_ofm_stride),
     .a_ofm_m_base  (dma_a_ofm_m_base),
     .a_ofm_k_base  (dma_a_ofm_k_base),
     .a_ofm_k_len   (dma_a_ofm_k_len),
     .a_ofm_active_rows(dma_a_ofm_active_rows),
     .a_ofm_fp16_mode(dma_a_ofm_fp16_mode),
+    .a_im2col_m_index(dma_a_im2col_m_index),
+    .a_im2col_k_len(dma_a_im2col_k_len),
+    .a_im2col_ih(dma_a_im2col_ih),
+    .a_im2col_iw(dma_a_im2col_iw),
+    .a_im2col_cin(dma_a_im2col_cin),
+    .a_im2col_kh(dma_a_im2col_kh),
+    .a_im2col_kw(dma_a_im2col_kw),
+    .a_im2col_oh(dma_a_im2col_oh),
+    .a_im2col_ow(dma_a_im2col_ow),
+    .a_im2col_stride_h(dma_a_im2col_stride_h),
+    .a_im2col_stride_w(dma_a_im2col_stride_w),
+    .a_im2col_pad_h(dma_a_im2col_pad_h),
+    .a_im2col_pad_w(dma_a_im2col_pad_w),
+    .a_im2col_dilation_h(dma_a_im2col_dilation_h),
+    .a_im2col_dilation_w(dma_a_im2col_dilation_w),
+    .a_im2col_fp16_mode(dma_a_im2col_fp16_mode),
     // Descriptor fetch
     .desc_start     (desc_fetch_start),
     .desc_base_addr (desc_fetch_addr),
     .desc_done      (desc_fetch_done),
     .desc_words     (desc_fetch_words),
+    // Bias fetch
+    .bias_start     (dma_bias_start),
+    .bias_addr      (dma_bias_addr),
+    .bias_done      (dma_bias_done),
+    .bias_data      (dma_bias_data),
     // Result channel
     .r_start        (dma_r_start),
     .r_base_addr    (dma_r_addr),
@@ -627,6 +704,8 @@ assign pe_acc_init_mask = {PHY_ROWS*PHY_COLS{1'b0}};
 // back through the array serializer below.
 wire scalar_pe_en = (!ctrl_tile_mode) && pe_consume;
 wire [ACC_W-1:0] scalar_result;
+wire [ACC_W-1:0] scalar_act_result;
+wire [ACC_W-1:0] scalar_post_result;
 wire             scalar_valid;
 
 pe_top #(
@@ -641,14 +720,107 @@ pe_top #(
     .flush    (pe_flush),
     .load_w   (pe_load_w),
     .swap_w   (pe_swap_w),
-    .acc_init_en(1'b0),
+    .acc_init_en(pe_acc_init_en && !ctrl_tile_mode),
     .w_in     (pe_w_data),
     .a_in     (pe_a_data),
     .acc_in   ({ACC_W{1'b0}}),
-    .acc_init ({ACC_W{1'b0}}),
+    .acc_init (dma_bias_data),
     .acc_out  (scalar_result),
     .valid_out(scalar_valid)
 );
+
+function [31:0] apply_scalar_activation;
+    input [31:0] value;
+    input        is_fp16;
+    input [1:0]  act_mode;
+    reg signed [31:0] value_s;
+    begin
+        value_s = value;
+        if (act_mode == 2'b01) begin
+            if (is_fp16)
+                apply_scalar_activation = value[31] ? 32'd0 : value;
+            else
+                apply_scalar_activation = (value_s < 0) ? 32'd0 : value;
+        end else if (act_mode == 2'b10) begin
+            if (is_fp16) begin
+                if (value[31])
+                    apply_scalar_activation = 32'd0;
+                else if (value > 32'h40c0_0000)
+                    apply_scalar_activation = 32'h40c0_0000; // 6.0f
+                else
+                    apply_scalar_activation = value;
+            end else begin
+                if (value_s < 0)
+                    apply_scalar_activation = 32'd0;
+                else if (value_s > 32'sd6)
+                    apply_scalar_activation = 32'd6;
+                else
+                    apply_scalar_activation = value;
+            end
+        end else begin
+            apply_scalar_activation = value;
+        end
+    end
+endfunction
+
+function [31:0] apply_scalar_quant;
+    input [31:0] value;
+    input        is_fp16;
+    input [31:0] quant_cfg;
+    reg          quant_en;
+    reg          round_en;
+    reg [7:0]    shift_u;
+    reg signed [15:0] scale_s;
+    reg signed [63:0] value_s;
+    reg signed [63:0] scale_ext_s;
+    reg signed [63:0] prod_s;
+    reg signed [63:0] rounded_s;
+    reg signed [63:0] shifted_s;
+    reg signed [63:0] round_offset_s;
+    reg signed [7:0]  q8_s;
+    begin
+        quant_en = quant_cfg[0];
+        round_en = quant_cfg[1];
+        shift_u = quant_cfg[15:8];
+        scale_s = quant_cfg[31:16];
+
+        if (!quant_en || is_fp16) begin
+            apply_scalar_quant = value;
+        end else begin
+            value_s = {{32{value[31]}}, value};
+            scale_ext_s = {{48{scale_s[15]}}, scale_s};
+            prod_s = value_s * scale_ext_s;
+            rounded_s = prod_s;
+
+            if (round_en && (shift_u != 8'd0) && (shift_u < 8'd63)) begin
+                round_offset_s = 64'sd1 <<< (shift_u - 8'd1);
+                rounded_s = prod_s[63] ? (prod_s + round_offset_s - 64'sd1)
+                                       : (prod_s + round_offset_s);
+            end
+
+            if (shift_u >= 8'd63)
+                shifted_s = rounded_s[63] ? -64'sd1 : 64'sd0;
+            else
+                shifted_s = rounded_s >>> shift_u[5:0];
+
+            if (shifted_s > 64'sd127)
+                q8_s = 8'sd127;
+            else if (shifted_s < -64'sd128)
+                q8_s = -8'sd128;
+            else
+                q8_s = shifted_s[7:0];
+
+            apply_scalar_quant = {{24{q8_s[7]}}, q8_s[7:0]};
+        end
+    end
+endfunction
+
+assign scalar_act_result = apply_scalar_activation(scalar_result,
+                                                   pe_mode,
+                                                   ctrl_post_act_mode);
+assign scalar_post_result = apply_scalar_quant(scalar_act_result,
+                                               pe_mode,
+                                               ctrl_post_quant_cfg);
 
 // WS load row indicator (for debug/status)
 wire [3:0] ws_load_row_status;
@@ -733,7 +905,7 @@ always @(posedge sys_clk) begin
     end
 end
 
-assign r_fifo_din   = ctrl_tile_mode ? tile_result_buf[tile_ser_idx] : scalar_result;
+assign r_fifo_din   = ctrl_tile_mode ? tile_result_buf[tile_ser_idx] : scalar_post_result;
 assign r_fifo_wr_en = ctrl_tile_mode ? tile_ser_fire
                                      : (scalar_valid && !r_fifo_full);
 

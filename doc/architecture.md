@@ -1,6 +1,6 @@
 # NPU 目标架构方案
 
-更新时间：2026-04-29
+更新时间：2026-05-01
 
 本文描述项目应收敛到的目标架构，并标注当前 RTL 与目标之间的差距。评分要求以 4x4 脉动阵列、AXI-Lite/Burst AXI、DMA、低功耗、RTL/FPGA 验证为基础；动态可重构阵列和更高带宽/算力作为优化项。
 
@@ -27,7 +27,7 @@
 | OS / WS | output stationary / weight stationary。OS 让 C/PSUM 留在 PE accumulator 内，WS 让 W 留在 PE 内。当前 4x4 tile 主路径是 OS。 |
 | row-skew | OS 脉动阵列中，为了让 row `r` 和 weight wavefront 对齐，A lane 会比 row 0 延迟 `r` 拍送入。 |
 | accumulator init | 在计算开始前给 PE accumulator 写入初值。用于 bias 或从外部 PSUM surface 恢复上一个 k_tile 的部分和。 |
-| post-process | 最后一个 k_tile 后对 32-bit accumulator 做 bias、activation、quant/saturate 等处理，再写成目标 OFM 格式。当前 RTL 主要验证 32-bit 写回。 |
+| post-process | 最后一个 k_tile 后对 32-bit accumulator 做 bias、activation、quant/saturate 等处理，再写成目标 OFM 格式。当前 direct scalar 路径已验证 bias、ReLU/ReLU6 和 INT8 quant/saturate；tile/descriptor 主线仍主要验证 32-bit 写回。 |
 
 ## 设计原则
 
@@ -99,7 +99,7 @@ CPU -> AXI4-Lite DESC_BASE/DESC_COUNT/CTRL[7]
 7. `reconfig_pe_array`/`pe_top` 执行乘加。4x4 OS 路径中，PE(r,c) 对应 `C[m0+r,n0+c]`，K 方向的乘积累加留在 PE accumulator 内。
 8. serializer/result FIFO 把 16 个 PE 输出转换成 row-major 写回序列。一般矩阵不能假设 16 word 全局连续，所以写回按有效 row 发短 burst。
 
-T5.4 后，descriptor 链表已经可以顺序执行多个 4x4 OS tile-pack GEMM descriptor，并支持后一层用上一层 32-bit row-major OFM 作为 IFM。该路径由 `desc_ctrl[23] IFM_FROM_PREV_OFM` 触发：controller 记录上一层 `ofm_addr`，DMA 按 `A[m0+r,k]` 从上一层 OFM surface gather 4 个 row lane，再 repack 到 A PPBuf。当前已验证 INT8 4x4 GEMM 串联；外部 PSUM surface 的 read/modify/write 和完整 bias/activation/quant 仍属于后续工作。
+T5.4 后，descriptor 链表已经可以顺序执行多个 4x4 OS tile-pack GEMM descriptor，并支持后一层用上一层 32-bit row-major OFM 作为 IFM。该路径由 `desc_ctrl[23] IFM_FROM_PREV_OFM` 触发：controller 记录上一层 `ofm_addr`，DMA 按 `A[m0+r,k]` 从上一层 OFM surface gather 4 个 row lane，再 repack 到 A PPBuf。当前已验证 INT8 4x4 GEMM 串联；direct scalar 路径已验证 bias、ReLU/ReLU6 和 INT8 quant/saturate；外部 PSUM surface 的 read/modify/write 以及 tile/descriptor 后处理仍属于后续工作。
 
 ## 卷积到 GEMM 的映射
 
@@ -141,7 +141,7 @@ W_col[k,n]    = WEIGHT[cout,cin,kh,kw]
 C[m,n]        = OFM[b,oh,ow,cout]  // NHWC 视角；NCHW 只改变外部存储顺序
 ```
 
-建议不要在 DRAM 中完整物理展开 im2col。更好的方式是 DMA/地址发生器按窗口顺序读取 IFM，并在片上形成 `A_BUF` tile。第一阶段为了降低复杂度，可以先由 CPU/脚本在 DRAM 中预展开 im2col，等 GEMM 路径正确后再做 on-the-fly im2col。
+建议不要在 DRAM 中完整物理展开 im2col。T6.1 已先由 CPU/脚本在 DRAM 中预展开 `A_im2col`；T6.2 已把 direct scalar 路径的 A 侧地址计算搬进 DMA，`CTRL[8]` 置位后，DMA 从 raw NCHW IFM 按 `m/k` 计算窗口地址，padding/越界位置写 0，并在片上形成当前 A 行。T6.3-T6.5 在同一 direct scalar 路径上支持 `bias[j]`、ReLU/ReLU6 和 INT8 quant/saturate，执行顺序为 dot -> bias -> activation -> quant/saturate。T6.6 已验证 layer0 的量化 OFM 可直接作为 layer1 输入。当前 on-the-fly im2col 和后处理仍限于 direct scalar、非 tile/descriptor 路径。
 
 ## Descriptor
 
@@ -286,6 +286,16 @@ C_row_major(i,j) = R_ADDR + (i * N + j) * 4				//4是由于输出为了防止精
 elem_bytes = 1 for INT8
 elem_bytes = 2 for FP16
 ```
+
+当前 direct scalar 仿真为了让 DMA 以 32-bit word 读取，A 的每一行和 W 的每一列在 DRAM 中都按 4-byte 对齐保存：
+
+```text
+stride_bytes = align4(K * elem_bytes)
+A_direct(i,k) = A_ADDR + i * stride_bytes + k * elem_bytes
+W_direct(k,j) = W_ADDR + j * stride_bytes + k * elem_bytes
+```
+
+也就是说，direct scalar 的 W 物理布局是按列连续存放；T6.1/T6.2 的 `W_col[K,N]` 使用同一布局。T6.2 只把 A 侧从预展开 `A_im2col` 改为 raw IFM on-the-fly gather；T6.3-T6.5 的 bias/ReLU/ReLU6/INT8 quant 发生在 direct scalar 输出写入 result FIFO 前；T6.6 的两层 Conv2D E2E 复用该 32-bit word-aligned 输出布局；tile-pack 路径仍使用下面的 4-lane tile 流格式。
 
 ### Phase 2 片上 tile-pack 格式
 
@@ -735,8 +745,8 @@ raw = 2.0 GB/s
 | 4-lane A/W buffer | T2.2/T2.3 已增加 `rd_vec`/`rd_vec_en`，并由 controller 的 `vec_consume` 推进 | 保持回归 |
 | 4x4 tile 计数和 mask | T2.3 已通过 `ARR_CFG[7]` 启用 tile planner，支持 M/N 边界 mask | 保持回归 |
 | 4x4 真并行 tile | T2.4/T2.5/T2.6 已完成 serializer/writeback 和 4x4 INT8/FP16 golden 测试 | 保持回归 |
-| 多层卷积 | descriptor v1 ABI、AXI-Lite 提交寄存器、controller fetch/decode/next-layer 和 T5.4 INT8 OFM->IFM 串联已具备；单 tile 内 k_tile loop 和顶层 K-split GEMM golden 已完成，外部 PSUM surface 还未接入 descriptor 流 | 增加外部 PSUM read/write、bias/activation/quant 和更完整的 conv 地址生成 |
+| 多层卷积 | descriptor v1 ABI、AXI-Lite 提交寄存器、controller fetch/decode/next-layer 和 T5.4 INT8 OFM->IFM 串联已具备；T6.2 已有 direct scalar raw IFM on-the-fly im2col；T6.3-T6.5 已有 direct scalar bias、ReLU/ReLU6 和 INT8 quant/saturate；T6.6 已验证 direct scalar 两层 Conv2D E2E；单 tile 内 k_tile loop 和顶层 K-split GEMM golden 已完成，外部 PSUM surface 还未接入 descriptor 流 | 增加外部 PSUM read/write，并把 Conv2D im2col 与后处理接入 tile/descriptor 主线 |
 | AXI burst | T3.1-T3.5 已完成读写通道 INCR burst、4KB 边界切分、AXI perf counters、混合正确性测试和带宽目标报告 | 后续若冲更高 write util，需多 outstanding 或 B response 重叠 |
 | 16x16/8x32 | 阵列模块存在 | 补齐供数、valid 对齐、写回 |
 | 低功耗 | 行为模块存在但未接入 | 使用 clock enable/BUFGCE/ICG 接入 |
-| SoC 验证 | `npu_top` 参数已对齐；当前卡在 DRAM `axi_arlen` 和 PicoRV32 PCPI 端口 | 先修 SoC 编译，再跑 CPU 启动 NPU smoke |
+| SoC 验证 | `run_soc_sim.ps1` 已通过；PicoRV32 配置 NPU 完成 2x2 INT8 GEMM，结果 `19,22,43,50` | 扩展到 descriptor/Conv2D 系统级 smoke |

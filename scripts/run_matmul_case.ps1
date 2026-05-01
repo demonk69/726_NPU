@@ -17,13 +17,25 @@ param(
     [string]$Dtype = "int8",
     [ValidateSet("OS", "WS")]
     [string]$Mode = "OS",
-    [string]$Name = ""
+    [string]$Name = "",
+    [switch]$Bias,
+    [ValidateSet("none", "relu", "relu6")]
+    [string]$Activation = "none",
+    [switch]$Quant,
+    [ValidateRange(-32768, 32767)]
+    [int]$QuantScale = 1,
+    [ValidateRange(0, 31)]
+    [int]$QuantShift = 0,
+    [switch]$QuantRound
 )
 
 $ErrorActionPreference = "Stop"
 
 if ($M -le 0 -or $K -le 0 -or $N -le 0) {
     throw "M, K, and N must be positive."
+}
+if ($Quant -and $Dtype -ne "int8") {
+    throw "T6.5 INT8 quant/saturate requires -Dtype int8."
 }
 
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -36,10 +48,25 @@ if (-not (Test-Path $SimDir)) { New-Item -ItemType Directory -Path $SimDir | Out
 
 if (-not $Name) {
     $Name = ("custom_{0}_{1}_{2}x{3}x{4}" -f $Dtype, $Mode.ToLower(), $M, $K, $N)
+    if ($Bias) { $Name = "${Name}_bias" }
+    if ($Activation -ne "none") { $Name = "${Name}_${Activation}" }
+    if ($Quant) {
+        $Name = "${Name}_quant_s${QuantScale}_sh${QuantShift}"
+        if ($QuantRound) { $Name = "${Name}_rnd" }
+    }
 }
 
 Write-Host "Generating $Name ($Dtype $Mode, M=$M K=$K N=$N)" -ForegroundColor Cyan
-& python "$MatmulDir\gen_matmul_data.py" --custom --m $M --k $K --n $N --dtype $Dtype --mode $Mode --test-id $Name
+$BiasArg = @()
+if ($Bias) { $BiasArg = @("--bias") }
+$QuantArg = @()
+if ($Quant) { $QuantArg = @("--quant") }
+if ($QuantRound) { $QuantArg += "--quant-round" }
+$GenArgs = @("--custom", "--m", $M, "--k", $K, "--n", $N,
+             "--dtype", $Dtype, "--mode", $Mode, "--test-id", $Name,
+             "--activation", $Activation,
+             "--quant-scale", $QuantScale, "--quant-shift", $QuantShift) + $BiasArg + $QuantArg
+& python "$MatmulDir\gen_matmul_data.py" @GenArgs
 if ($LASTEXITCODE -ne 0) { throw "Failed to generate matmul data." }
 
 $CaseDir = Join-Path $MatmulDir $Name

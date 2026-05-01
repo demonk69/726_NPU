@@ -44,9 +44,10 @@ scripts/run_sim.ps1      -> PASS=19 FAIL=0
 tb_npu_scalar_smoke.v    -> PASS
 tb_comprehensive.v       -> ALL 28 TESTS PASSED
 scripts/run_full_sim.ps1 -> compile and simulation completed
+scripts/run_soc_sim.ps1  -> PASS，2x2 INT8 GEMM result = 19,22,43,50
 ```
 
-剩余 SoC 编译问题不属于 L0 标量数据通路：`dram_model.v` 中 `axi_arlen` 未绑定，PicoRV32 PCPI 端口与参考核不匹配。
+SoC smoke 已重新修复并通过；此前 `dram_model.v` 中 `axi_arlen` 未绑定、PicoRV32 PCPI 端口不匹配、AXI-lite bridge AW/W 握手和 SoC ready/rdata 时序问题均已处理。
 
 ### L1：真实 4x4 tile
 

@@ -38,7 +38,7 @@ scripts/run_sim.ps1      -> PASS=19 FAIL=0
 tb_npu_scalar_smoke.v    -> PASS
 tb_comprehensive.v       -> ALL 28 TESTS PASSED
 scripts/run_full_sim.ps1 -> compile and simulation completed
-scripts/run_soc_sim.ps1  -> still blocked by dram_model axi_arlen and PicoRV32 PCPI issues
+scripts/run_soc_sim.ps1  -> PASS，CPU configures NPU, NPU writes 2x2 INT8 GEMM result, CPU/testbench verify
 ```
 
 ## 阶段 2：实现真实 4x4 GEMM tile
@@ -643,12 +643,12 @@ scripts/run_regression.ps1 -> 1075 PASS / 12 FAIL
 
 | ID | 状态 | 任务 | 主要文件 | 验收标准 |
 |---|---|---|---|---|
-| T6.1 | TODO | 第一版使用 DRAM 预展开 im2col | `tb/`, `scripts/` | conv golden 通过 |
-| T6.2 | TODO | 增加 on-the-fly im2col 地址发生器 | `rtl/ctrl/`, `rtl/axi/` | 不需要完整 im2col 中间矩阵 |
-| T6.3 | TODO | 增加 bias 加法 | `rtl/top/` | bias 后结果正确 |
-| T6.4 | TODO | 增加 ReLU/ReLU6 | `rtl/top/` | 激活输出正确 |
-| T6.5 | TODO | INT8 quant/saturate | `rtl/top/` | 输出范围和缩放正确 |
-| T6.6 | TODO | 两层卷积端到端测试 | `tb/` | layer0 输出被 layer1 使用，最终结果正确 |
+| T6.1 | DONE | 第一版使用 DRAM 预展开 im2col | `tb/`, `scripts/` | conv golden 通过 |
+| T6.2 | DONE | 增加 on-the-fly im2col 地址发生器 | `rtl/ctrl/`, `rtl/axi/` | 不需要完整 im2col 中间矩阵 |
+| T6.3 | DONE | 增加 bias 加法 | `rtl/top/`, `rtl/ctrl/`, `rtl/axi/`, `tb/`, `scripts/` | bias 后结果正确 |
+| T6.4 | DONE | 增加 ReLU/ReLU6 | `rtl/top/`, `rtl/ctrl/`, `tb/`, `scripts/` | 激活输出正确 |
+| T6.5 | DONE | INT8 quant/saturate | `rtl/top/`, `rtl/ctrl/`, `rtl/axi/`, `tb/`, `scripts/` | 输出范围和缩放正确 |
+| T6.6 | DONE | 两层卷积端到端测试 | `tb/`, `scripts/` | layer0 输出被 layer1 使用，最终结果正确 |
 
 ## 阶段 7：16x16、8x32 和性能优化
 
@@ -673,10 +673,120 @@ scripts/run_regression.ps1 -> 1075 PASS / 12 FAIL
 
 ## 推荐执行顺序
 
-当前 T2.1-T2.6、T3.1-T3.5、T4.1-T4.5、T5.1-T5.5 已完成。下一步进入卷积前端和后处理，不要先做 16x16 性能优化。建议顺序：
+T6.1 实现记录：
+
+- 新增 `tb/conv2d/gen_conv2d_im2col_data.py`，生成 dense Conv2D 的 IFM/weight、`A_im2col[M,K]`、`W_col[K,N]`、DRAM image、`expected.hex` 和 `test_params.vh`。
+- 新增 `scripts/run_conv2d_im2col_case.ps1`，可按参数生成并运行单个 Conv2D im2col case，复用 direct matmul testbench 对 Conv2D golden。
+- 修正 direct scalar 路径的 32-bit 对齐 stride：K 不是 4-byte 对齐时，下一行 A 和下一列 W 的预取地址按 word-aligned DMA row/column stride 推进；旧 `2x3x2` 非方阵 matmul case 已恢复通过。
+- `scripts/run_regression.ps1` 已接入 T6.1 默认 case：INT8 OS、INT8 WS、FP16 OS。
+
+T6.1 验证记录：
 
 ```text
-T6.1
+scripts/run_conv2d_im2col_case.ps1 -Mode OS -Name conv2d_im2col_int8_os_default  -> ALL 75 CHECKS PASSED
+scripts/run_conv2d_im2col_case.ps1 -Mode WS -Name conv2d_im2col_int8_ws_default  -> ALL 75 CHECKS PASSED
+scripts/run_conv2d_im2col_case.ps1 -Dtype fp16 -Mode OS -Name conv2d_im2col_fp16_os_default -> ALL 75 CHECKS PASSED
+scripts/run_regression.ps1 -> TOTAL: 1315 PASS, 0 FAIL
 ```
 
-当 controller 已支持 descriptor fetch/decode/next-layer，并且 T5.4 已验证上一层 OFM 可作为下一层 IFM 后，下一步应补 `ERR_STATUS`/IRQ 语义，使 descriptor count exhausted、unsupported descriptor、非法配置等情况可由 CPU 轮询或中断观察。
+T6.2 实现记录：
+
+- 在 `npu_axi_lite` 增加 direct Conv2D on-the-fly im2col 配置寄存器：`0x80..0x94` 分别描述 IFM shape、batch/Cin、kernel、OFM shape、stride/pad、dilation；`CTRL[8]` 作为 direct scalar on-the-fly im2col enable。
+- `npu_ctrl` 在 direct scalar、非 tile mode 下锁存 Conv2D 参数，并在每个输出行 `m` 的 A load 中向 DMA 传递 `m_index`、`k_len` 和卷积 shape/stride/pad/dilation；descriptor/tile 主线暂不启用该路径。
+- `npu_dma` 新增 `A_IM2COL` 读目标：DRAM 中只保存原始 NCHW IFM，DMA 按 `m -> b/oh/ow`、`k -> cin/kh/kw` 计算 IFM 地址，padding 或越界位置写 0，并按 INT8/FP16 32-bit word 打包写入 A PPBuf。
+- `tb/conv2d/gen_conv2d_im2col_data.py --on-the-fly` 生成 raw IFM + W_col 的 DRAM image、Conv2D golden 和 direct Conv2D 寄存器参数；新增 `scripts/run_conv2d_otf_case.ps1`。
+- `scripts/run_regression.ps1` 已接入 T6.2 默认 case：INT8 OS、INT8 WS、FP16 OS。
+- 补齐独立 DMA testbench 对新增 `a_im2col_*` 端口的 0 连接，避免普通 A 读单测中未连接输入变成 `x/z`。
+
+T6.2 验证记录：
+
+```text
+scripts/run_conv2d_otf_case.ps1 -Mode OS -Name conv2d_otf_int8_os_default -> ALL 75 CHECKS PASSED
+scripts/run_conv2d_otf_case.ps1 -Mode WS -Name conv2d_otf_int8_ws_default -> ALL 75 CHECKS PASSED
+scripts/run_conv2d_otf_case.ps1 -Dtype fp16 -Mode OS -Name conv2d_otf_fp16_os_default -> ALL 75 CHECKS PASSED
+tb_dma_read_burst/tb_dma_write_burst/tb_dma_burst/tb_dma_perf -> PASS
+```
+
+T6.3 实现记录：
+
+- `npu_axi_lite` 新增 `BIAS_ADDR(0x98)`，`CTRL[9]` 作为 direct scalar bias enable。
+- `npu_ctrl` 在 direct scalar、非 tile mode 下为每个输出列 `j` 发起 `bias_addr + j*4` 的 bias fetch，并等待 `dma_bias_done` 后再进入 compute。
+- `npu_dma` 新增 one-beat 32-bit bias fetch 目标，和当前 W/A load 串行使用读通道，返回的 `bias_data` 作为 scalar PE `acc_init`。
+- `tb/matmul/gen_matmul_data.py --bias` 和 `tb/conv2d/gen_conv2d_im2col_data.py --bias` 生成 32-bit bias vector、带 bias 的 expected 和 `BIAS_ADDR/BIAS_EN` 参数。
+- `scripts/run_matmul_case.ps1 -Bias`、`scripts/run_conv2d_im2col_case.ps1 -Bias`、`scripts/run_conv2d_otf_case.ps1 -Bias` 可单独运行 T6.3 case；`scripts/run_regression.ps1` 已接入 direct matmul bias 和 on-the-fly Conv2D bias 默认 case。
+
+T6.3 验证记录：
+
+```text
+scripts/run_matmul_case.ps1 -M 3 -K 5 -N 4 -Dtype int8 -Mode OS -Bias -> ALL 12 CHECKS PASSED
+scripts/run_matmul_case.ps1 -M 3 -K 5 -N 4 -Dtype int8 -Mode WS -Bias -> ALL 12 CHECKS PASSED
+scripts/run_matmul_case.ps1 -M 3 -K 4 -N 3 -Dtype fp16 -Mode OS -Bias -> ALL 9 CHECKS PASSED
+scripts/run_matmul_case.ps1 -M 2 -K 3 -N 2 -Dtype fp16 -Mode WS -Bias -> ALL 4 CHECKS PASSED
+scripts/run_conv2d_otf_case.ps1 -Dtype int8 -Mode OS -Bias -> ALL 75 CHECKS PASSED
+scripts/run_conv2d_otf_case.ps1 -Dtype int8 -Mode WS -Bias -> ALL 75 CHECKS PASSED
+scripts/run_conv2d_otf_case.ps1 -Dtype fp16 -Mode OS -Bias -> ALL 75 CHECKS PASSED
+scripts/run_regression.ps1 -> TOTAL: 1802 PASS, 0 FAIL
+```
+
+T6.4 实现记录：
+
+- `CTRL[11:10]` 定义 direct scalar activation mode：`00=none`、`01=ReLU`、`10=ReLU6`；controller 在 start 时锁存并输出给 top。
+- `npu_top` 在 direct scalar result FIFO 前执行 activation，顺序为 accumulator -> optional bias -> activation；tile/descriptor 主线暂不启用。
+- INT8 输出仍是 32-bit accumulator word，ReLU6 语义为 signed int32 clamp 到 `[0,6]`；FP16 输出为 FP32 word，ReLU6 clamp 到 `[0.0,6.0]`。
+- `tb/matmul/gen_matmul_data.py --activation relu|relu6` 和 `tb/conv2d/gen_conv2d_im2col_data.py --activation relu|relu6` 生成 activation 后 expected。
+- `scripts/run_matmul_case.ps1`、`scripts/run_conv2d_im2col_case.ps1`、`scripts/run_conv2d_otf_case.ps1` 新增 `-Activation none|relu|relu6`；`scripts/run_regression.ps1` 已接入 T6.4 direct scalar matmul 和 Conv2D on-the-fly case。
+
+T6.4 验证记录：
+
+```text
+scripts/run_matmul_case.ps1 -M 3 -K 5 -N 4 -Dtype int8 -Mode OS -Bias -Activation relu -> ALL 12 CHECKS PASSED
+scripts/run_matmul_case.ps1 -M 3 -K 5 -N 4 -Dtype int8 -Mode WS -Bias -Activation relu6 -> ALL 12 CHECKS PASSED
+scripts/run_matmul_case.ps1 -M 3 -K 4 -N 3 -Dtype fp16 -Mode OS -Bias -Activation relu -> ALL 9 CHECKS PASSED
+scripts/run_matmul_case.ps1 -M 2 -K 3 -N 2 -Dtype fp16 -Mode WS -Bias -Activation relu6 -> ALL 4 CHECKS PASSED
+scripts/run_conv2d_otf_case.ps1 -Dtype int8 -Mode OS -Bias -Activation relu -> ALL 75 CHECKS PASSED
+scripts/run_conv2d_otf_case.ps1 -Dtype int8 -Mode WS -Bias -Activation relu6 -> ALL 75 CHECKS PASSED
+scripts/run_conv2d_otf_case.ps1 -Dtype fp16 -Mode OS -Bias -Activation relu6 -> ALL 75 CHECKS PASSED
+scripts/run_regression.ps1 -> TOTAL: 2064 PASS, 0 FAIL
+```
+
+T6.5 实现记录：
+
+- `npu_axi_lite` 新增 `QUANT_CFG(0x9C)`：bit0 enable，bit1 round enable，`[15:8]` arithmetic right shift，`[31:16]` signed scale。
+- `npu_ctrl` 在 direct scalar start 时锁存 `QUANT_CFG`，tile mode 和 FP16 路径默认关闭 quant。
+- `npu_top` 在 direct scalar result FIFO 前执行 INT8 quant/saturate，顺序为 accumulator -> optional bias -> activation -> optional quantize/saturate；输出为 sign-extended signed int8 word。
+- 量化口径为 `scaled = value * signed_scale`，可选 signed rounding 后算术右移，再饱和到 `[-128, 127]`。
+- `tb/matmul/gen_matmul_data.py --quant --quant-scale --quant-shift --quant-round` 和 `tb/conv2d/gen_conv2d_im2col_data.py --quant ...` 生成量化后的 expected。
+- `scripts/run_matmul_case.ps1`、`scripts/run_conv2d_im2col_case.ps1`、`scripts/run_conv2d_otf_case.ps1` 新增 `-Quant/-QuantScale/-QuantShift/-QuantRound`；`scripts/run_regression.ps1` 已接入 T6.5 direct scalar matmul 和 Conv2D on-the-fly case。
+
+T6.5 验证记录：
+
+```text
+scripts/run_matmul_case.ps1 -M 3 -K 5 -N 4 -Dtype int8 -Mode OS -Bias -Activation relu -Quant -QuantScale 3 -QuantShift 5 -QuantRound -> ALL 12 CHECKS PASSED
+scripts/run_matmul_case.ps1 -M 3 -K 5 -N 4 -Dtype int8 -Mode WS -Bias -Quant -QuantScale 1 -QuantShift 3 -> ALL 12 CHECKS PASSED
+scripts/run_conv2d_otf_case.ps1 -Dtype int8 -Mode OS -Bias -Activation relu -Quant -QuantScale 2 -QuantShift 3 -QuantRound -> ALL 75 CHECKS PASSED
+scripts/run_conv2d_otf_case.ps1 -Dtype int8 -Mode WS -Bias -Quant -QuantScale 1 -QuantShift 2 -> ALL 75 CHECKS PASSED
+scripts/run_regression.ps1 -> TOTAL: 2238 PASS, 0 FAIL
+```
+
+T6.6 实现记录：
+
+- 新增 `tb/conv2d/gen_conv2d_two_layer_data.py` 生成两层 INT8 Conv2D E2E 数据：layer0 为 raw NCHW IFM + on-the-fly im2col + bias + ReLU + INT8 quant，layer1 直接使用 layer0 `R_ADDR` 作为 `A_ADDR`。
+- 新增 `tb/conv2d/tb_conv2d_two_layer.v`，在同一个 DRAM 模型中顺序运行两层，先检查 layer0 量化 OFM，再检查 layer1 最终 golden。
+- 新增 `scripts/run_conv2d_two_layer_case.ps1`，并将默认 case 接入 `scripts/run_regression.ps1`。
+- 同步修复 SoC 系统仿真：`dram_model` 支持 `axi_arlen` 和 AXI write burst，`soc_top` 的 PicoRV32 PCPI 端口对齐参考核，`axi_lite_bridge` 分离 AW/W 握手，SoC SRAM/DRAM CPU 读口改为组合读以匹配 PicoRV32 ready/rdata 时序；`run_soc_sim.ps1` 默认关闭 VCD，`-DumpVcd` 可选。
+
+T6.6 验证记录：
+
+```text
+scripts/run_conv2d_two_layer_case.ps1 -> ALL 48 CHECKS PASSED
+scripts/run_regression.ps1 -> TOTAL: 2286 PASS, 0 FAIL
+scripts/run_soc_sim.ps1 -> [PASS] SoC integration test PASSED, Cycles: 247, C00=19 C01=22 C10=43 C11=50
+```
+
+当前 T2.1-T2.6、T3.1-T3.5、T4.1-T4.5、T5.1-T5.5、T6.1-T6.6 已完成。下一步进入 descriptor 化 Conv2D、外部 PSUM surface 接入或 16x16/8x32 高吞吐阵列。建议顺序：
+
+```text
+T7.1
+```
+
+T7.1 的重点建议放在 descriptor/tile 主线承接 Conv2D 与后处理，避免 direct scalar 路径和 tile/descriptor 路径长期分叉。

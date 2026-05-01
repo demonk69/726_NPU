@@ -7,11 +7,16 @@
 #     OR use the pre-generated hex file
 #
 # Usage:
-#   .\scripts\run_soc_sim.ps1
+#   .\scripts\run_soc_sim.ps1 [-DumpVcd] [-VerboseLog]
 #
 # Output:
-#   soc_sim.vcd  - Waveform file (open with GTKWave)
+#   soc_sim.vcd  - Optional waveform file when -DumpVcd is used
 # =============================================================================
+
+param(
+    [switch]$DumpVcd,
+    [switch]$VerboseLog
+)
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
@@ -22,6 +27,9 @@ $Picorv32Dir = Join-Path $ProjectRoot "picorv32_ref"
 
 # Ensure sim directory exists
 if (-not (Test-Path $SimDir)) { New-Item -ItemType Directory -Path $SimDir | Out-Null }
+
+$vcdFile = Join-Path $SimDir "soc_sim.vcd"
+if (Test-Path $vcdFile) { Remove-Item -LiteralPath $vcdFile -Force }
 
 # Copy picorv32.v to sim directory
 Copy-Item (Join-Path $Picorv32Dir "picorv32.v") (Join-Path $SimDir "picorv32.v") -Force
@@ -103,6 +111,9 @@ with open('$hexFile', 'w') as f:
 # ---- Step 2: Compile Verilog ----
 Write-Host "[2/3] Compiling Verilog..." -ForegroundColor Yellow
 
+$fwHexFile = Join-Path $TbDir "soc_test.hex"
+$fwWords = (Get-Content $fwHexFile).Count
+
 $srcFiles = @(
     # PicoRV32 CPU
     (Join-Path $SimDir "picorv32.v")
@@ -131,6 +142,9 @@ $srcFiles = @(
 
 $vvpFile = Join-Path $SimDir "soc_sim.vvp"
 $arguments = "-o", $vvpFile, "-s", "tb_soc"
+$arguments += "-DFW_WORDS=$fwWords"
+if ($DumpVcd) { $arguments += "-DDUMP_VCD" }
+if ($VerboseLog) { $arguments += "-DSOC_VERBOSE" }
 foreach ($f in $srcFiles) {
     if (Test-Path $f) {
         $arguments += $f
@@ -150,16 +164,25 @@ Write-Host "  OK: Compiled to $vvpFile" -ForegroundColor Green
 Write-Host "[3/3] Running simulation..." -ForegroundColor Yellow
 
 Push-Location $SimDir
-& vvp -N $vvpFile
+$simOut = & vvp -N $vvpFile 2>&1
 $simExit = $LASTEXITCODE
 Pop-Location
 
-$vcdFile = Join-Path $SimDir "soc_sim.vcd"
+$simOut | ForEach-Object { Write-Host $_ }
+
 if (Test-Path $vcdFile) {
     Write-Host "  OK: Waveform saved to $vcdFile" -ForegroundColor Green
     Write-Host "  View with: gtkwave $vcdFile" -ForegroundColor DarkGray
+} elseif ($DumpVcd) {
+    Write-Host "  WARNING: -DumpVcd was set but $vcdFile was not produced." -ForegroundColor DarkYellow
 }
 
 Write-Host ""
 Write-Host "=== Done ===" -ForegroundColor Cyan
+if (($simOut | Select-String "\[FAIL\]|\[TIMEOUT\]|FATAL|ERROR:").Count -gt 0) {
+    exit 1
+}
+if (($simOut | Select-String "\[PASS\] SoC integration test PASSED").Count -eq 0) {
+    exit 1
+}
 exit $simExit

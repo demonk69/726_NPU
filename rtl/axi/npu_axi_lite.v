@@ -6,7 +6,9 @@
 //             0x00  CTRL      - bit0=start, bit1=abort,
 //                               [3:2]=data_mode (00=INT8, 10=FP16),
 //                               [5:4]=stat_mode (00=WS,  01=OS),
-//                               bit6=irq_clr (W1C: write 1 to clear IRQ)
+//                               bit6=irq_clr (W1C: write 1 to clear IRQ),
+//                               bit7=desc_mode, bit8=conv_im2col,
+//                               bit9=bias_en, [11:10]=activation
 //             0x04  STATUS    - bit0=busy, bit1=done, bit2=error
 //             0x08  INT_EN    - bit0=done IRQ enable, bit1=error IRQ enable
 //             0x0C  INT_CLR   - interrupt clear (write-1-to-clear, alt path)
@@ -34,12 +36,23 @@
 //             0x6C  PERF_RD_BURSTS   - AXI master read burst count
 //             0x70  PERF_WR_BURSTS   - AXI master write burst count
 //             0x74  ERR_STATUS        - W1C error status from controller
+//             0x80  CONV_IFM_SHAPE    - [15:0]=IH, [31:16]=IW
+//             0x84  CONV_CHANNELS     - [15:0]=Cin, [31:16]=Batch
+//             0x88  CONV_KERNEL       - [15:0]=KH, [31:16]=KW
+//             0x8C  CONV_OUT_SHAPE    - [15:0]=OH, [31:16]=OW
+//             0x90  CONV_STRIDE_PAD   - [7:0]=stride_h, [15:8]=stride_w,
+//                                      - [23:16]=pad_h, [31:24]=pad_w
+//             0x94  CONV_DILATION     - [7:0]=dilation_h, [15:8]=dilation_w
+//             0x98  BIAS_ADDR         - 32-bit bias vector base address
+//             0x9C  QUANT_CFG         - bit0=enable, bit1=round,
+//                                      - [15:8]=right shift,
+//                                      - [31:16]=signed scale
 //
 //           IRQ Clear dual path:
 //             Path A: write 0x0C (INT_CLR) bit0 = 1  → clears int_pending
 //             Path B: write 0x00 (CTRL)    bit6 = 1  → also clears int_pending
 //                     (bit6 is W1C; subsequent reads return 0)
-//             CTRL bit7 is reserved for descriptor mode and is readable/writable.
+//             CTRL bit7 is descriptor mode and is readable/writable.
 // =============================================================================
 
 `timescale 1ns/1ps
@@ -84,6 +97,14 @@ module npu_axi_lite (
     output reg  [1:0]            cfg_shape, // shape select for reconfig array
     output reg  [31:0]           desc_base,
     output reg  [31:0]           desc_count,
+    output reg  [31:0]           conv_ifm_shape,
+    output reg  [31:0]           conv_channels,
+    output reg  [31:0]           conv_kernel,
+    output reg  [31:0]           conv_out_shape,
+    output reg  [31:0]           conv_stride_pad,
+    output reg  [31:0]           conv_dilation,
+    output reg  [31:0]           bias_addr,
+    output reg  [31:0]           quant_cfg,
     // Status from NPU controller
     input  wire                  status_busy,
     input  wire                  status_done,
@@ -158,6 +179,14 @@ always @(posedge aclk) begin
         cfg_shape <= 2'b10;  // default: 16x16 mode
         desc_base <= 32'd0;
         desc_count <= 32'd0;
+        conv_ifm_shape <= 32'd0;
+        conv_channels <= 32'd0;
+        conv_kernel <= 32'd0;
+        conv_out_shape <= 32'd0;
+        conv_stride_pad <= 32'd0;
+        conv_dilation <= 32'd0;
+        bias_addr <= 32'd0;
+        quant_cfg <= 32'h0001_0000;
         err_clear <= 1'b0;
         err_clear_mask <= 32'd0;
     end else if (wr_en) begin
@@ -188,6 +217,14 @@ always @(posedge aclk) begin
                 err_clear      <= 1'b1;
                 err_clear_mask <= wdata;
             end
+            32'h80: if (w_strb[0]) conv_ifm_shape <= wdata;
+            32'h84: if (w_strb[0]) conv_channels <= wdata;
+            32'h88: if (w_strb[0]) conv_kernel <= wdata;
+            32'h8C: if (w_strb[0]) conv_out_shape <= wdata;
+            32'h90: if (w_strb[0]) conv_stride_pad <= wdata;
+            32'h94: if (w_strb[0]) conv_dilation <= wdata;
+            32'h98: if (w_strb[0]) bias_addr <= wdata;
+            32'h9C: if (w_strb[0]) quant_cfg <= wdata;
             default: ;
         endcase
     end else begin
@@ -244,6 +281,14 @@ always @(*) begin
         32'h6C: rdata_r = perf_m_axi_rd_bursts;
         32'h70: rdata_r = perf_m_axi_wr_bursts;
         32'h74: rdata_r = err_status;
+        32'h80: rdata_r = conv_ifm_shape;
+        32'h84: rdata_r = conv_channels;
+        32'h88: rdata_r = conv_kernel;
+        32'h8C: rdata_r = conv_out_shape;
+        32'h90: rdata_r = conv_stride_pad;
+        32'h94: rdata_r = conv_dilation;
+        32'h98: rdata_r = bias_addr;
+        32'h9C: rdata_r = quant_cfg;
         default: rdata_r = 32'hDEADBEEF;
     endcase
 end

@@ -35,7 +35,7 @@
 //
 // ── IRQ Clear ─────────────────────────────────────────────────────────────
 //
-//   CPU clears IRQ by writing 1 to ctrl_reg[2] (IRQ_CLR bit).
+//   CPU clears IRQ by writing 1 to ctrl_reg[6] (IRQ_CLR bit).
 //   npu_ctrl samples and immediately de-asserts irq. Bit is self-clearing.
 //
 // ── Address Latch ─────────────────────────────────────────────────────────
@@ -64,9 +64,17 @@ module npu_ctrl #(
     input  wire [31:0]       w_addr,
     input  wire [31:0]       a_addr,
     input  wire [31:0]       r_addr,
+    input  wire [31:0]       bias_addr,
+    input  wire [31:0]       quant_cfg,
     input  wire [7:0]        arr_cfg,
     input  wire [31:0]       desc_base,
     input  wire [31:0]       desc_count,
+    input  wire [31:0]       conv_ifm_shape,
+    input  wire [31:0]       conv_channels,
+    input  wire [31:0]       conv_kernel,
+    input  wire [31:0]       conv_out_shape,
+    input  wire [31:0]       conv_stride_pad,
+    input  wire [31:0]       conv_dilation,
     output reg               desc_start,
     output reg  [31:0]       desc_addr,
     input  wire              desc_done,
@@ -74,6 +82,8 @@ module npu_ctrl #(
     // Shape configuration for reconfigurable array
     input  wire [1:0]        cfg_shape_in,
     output wire [1:0]        cfg_shape_latched,
+    output wire [1:0]        post_act_mode,
+    output wire [31:0]       post_quant_cfg,
     // 4x4 tile planner outputs (T2.3)
     output wire              tile_mode,
     output wire              vec_consume,
@@ -104,12 +114,32 @@ module npu_ctrl #(
     output reg [31:0]        dma_a_addr,
     output reg [15:0]        dma_a_len,
     output reg               dma_a_ofm_mode,
+    output reg               dma_a_im2col_mode,
     output reg [31:0]        dma_a_ofm_stride,
     output reg [31:0]        dma_a_ofm_m_base,
     output reg [31:0]        dma_a_ofm_k_base,
     output reg [15:0]        dma_a_ofm_k_len,
     output reg [2:0]         dma_a_ofm_active_rows,
     output reg               dma_a_ofm_fp16_mode,
+    output reg [31:0]        dma_a_im2col_m_index,
+    output reg [15:0]        dma_a_im2col_k_len,
+    output reg [15:0]        dma_a_im2col_ih,
+    output reg [15:0]        dma_a_im2col_iw,
+    output reg [15:0]        dma_a_im2col_cin,
+    output reg [15:0]        dma_a_im2col_kh,
+    output reg [15:0]        dma_a_im2col_kw,
+    output reg [15:0]        dma_a_im2col_oh,
+    output reg [15:0]        dma_a_im2col_ow,
+    output reg [7:0]         dma_a_im2col_stride_h,
+    output reg [7:0]         dma_a_im2col_stride_w,
+    output reg [7:0]         dma_a_im2col_pad_h,
+    output reg [7:0]         dma_a_im2col_pad_w,
+    output reg [7:0]         dma_a_im2col_dilation_h,
+    output reg [7:0]         dma_a_im2col_dilation_w,
+    output reg               dma_a_im2col_fp16_mode,
+    output reg               dma_bias_start,
+    input  wire              dma_bias_done,
+    output reg [31:0]        dma_bias_addr,
     output reg               dma_r_start,
     input  wire              dma_r_done,
     output reg [31:0]        dma_r_addr,
@@ -121,6 +151,7 @@ module npu_ctrl #(
     output reg               pe_stat,     // 0=WS,  1=OS
     output reg               pe_load_w,   // WS mode: latch weight into PE
     output reg               pe_swap_w,   // WS mode: swap dual weight regs
+    output reg               pe_acc_init_en,
     // Ping-Pong Buffer status
     input  wire              w_ppb_ready,
     input  wire              w_ppb_empty,
@@ -171,6 +202,10 @@ localparam [31:0] ERR_IFM_PREV_MISSING     = 32'h0000_0008;
 //     bit[3:2] = data_mode (00=INT8, 10=FP16)
 //     bit[5:4] = stat_mode (00=WS,   01=OS)
 //     bit[6]   = irq_clr   (CPU writes 1 to acknowledge/clear IRQ; self-clearing)
+//     bit[7]   = desc_mode
+//     bit[8]   = direct scalar Conv2D on-the-fly im2col
+//     bit[9]   = direct scalar bias enable
+//     bit[11:10] = direct scalar activation (00=none, 01=ReLU, 10=ReLU6)
 // ---------------------------------------------------------------------------
 wire        cfg_start   = ctrl_reg[0];
 wire        cfg_abort   = ctrl_reg[1];
@@ -178,6 +213,9 @@ wire [1:0]  cfg_mode    = ctrl_reg[3:2]; // 00=INT8  10=FP16
 wire [1:0]  cfg_stat    = ctrl_reg[5:4]; // 00=WS    01=OS
 wire        cfg_irq_clr = ctrl_reg[6];   // CPU writes 1 → clear IRQ
 wire        cfg_desc_mode = ctrl_reg[7];
+wire        cfg_conv_im2col = ctrl_reg[8];
+wire        cfg_bias_en = ctrl_reg[9];
+wire [1:0]  cfg_post_act_mode = ctrl_reg[11:10]; // 00=none, 01=ReLU, 10=ReLU6
 wire [1:0]  cfg_data_bytes = (cfg_mode == 2'b00) ? 2'd1 : 2'd2;
 wire [15:0] cfg_scalar_elem_bytes = {14'b0, cfg_data_bytes};
 wire [15:0] cfg_vector_elem_bytes = cfg_scalar_elem_bytes << 2;
@@ -190,9 +228,13 @@ wire [31:0] cfg_start_k_len_32 = (k_dim <= cfg_k_tile_elems) ? k_dim
                                                              : cfg_k_tile_elems;
 // Warm-up uses live config because shadow registers latch on the same start edge.
 // In tile mode each k step loads 4 lanes, so bytes per k are 4*element_bytes.
-wire [15:0] cfg_start_tile_len = cfg_start_k_len_32[15:0] *
-                                  (arr_cfg[7] ? cfg_vector_elem_bytes
-                                              : cfg_scalar_elem_bytes);
+wire [15:0] cfg_start_tile_len_raw = cfg_start_k_len_32[15:0] *
+                                      (arr_cfg[7] ? cfg_vector_elem_bytes
+                                                  : cfg_scalar_elem_bytes);
+// Scalar direct rows/columns are stored on 32-bit word boundaries in DRAM.
+// Tile mode already moves whole 4-lane words per k and is naturally aligned.
+wire [15:0] cfg_start_tile_len = arr_cfg[7] ? cfg_start_tile_len_raw
+                                            : ((cfg_start_tile_len_raw + 16'd3) & 16'hfffc);
 
 // Rising-edge detect for start
 reg cfg_start_d1;
@@ -265,24 +307,46 @@ wire       desc_decode_error = (desc_decode_err_mask != 32'd0);
 // ---------------------------------------------------------------------------
 reg [31:0] lk_m_dim, lk_n_dim, lk_k_dim;
 reg [31:0] lk_w_addr, lk_a_addr, lk_r_addr;
+reg [31:0] lk_bias_addr;
 reg [1:0]  lk_mode, lk_stat;
 reg [1:0]  lk_shape;   // latched cfg_shape
 reg [7:0]  lk_arr_cfg;
 reg        lk_a_from_prev_ofm;
+reg        lk_conv_im2col;
+reg        lk_bias_en;
+reg [1:0]  lk_post_act_mode;
+reg [31:0] lk_quant_cfg;
+reg [15:0] lk_conv_ih, lk_conv_iw, lk_conv_cin;
+reg [15:0] lk_conv_kh, lk_conv_kw, lk_conv_oh, lk_conv_ow;
+reg [7:0]  lk_conv_stride_h, lk_conv_stride_w;
+reg [7:0]  lk_conv_pad_h, lk_conv_pad_w;
+reg [7:0]  lk_conv_dilation_h, lk_conv_dilation_w;
 reg        lk_desc_irq_en;
 
 assign cfg_shape_latched = lk_shape;
+assign post_act_mode = lk_post_act_mode;
+assign post_quant_cfg = lk_quant_cfg;
 assign tile_mode = lk_arr_cfg[7];
 
 always @(posedge clk) begin
     if (!rst_n) begin
         lk_m_dim  <= 32'd1; lk_n_dim  <= 32'd1; lk_k_dim  <= 32'd1;
         lk_w_addr <= 32'd0; lk_a_addr <= 32'd0; lk_r_addr <= 32'd0;
+        lk_bias_addr <= 32'd0;
         lk_mode   <= 2'b10;                      // default FP16
         lk_stat   <= 2'b01;                      // default OS
         lk_shape  <= 2'b10;                      // default 16x16
         lk_arr_cfg <= 8'd0;
         lk_a_from_prev_ofm <= 1'b0;
+        lk_conv_im2col <= 1'b0;
+        lk_bias_en <= 1'b0;
+        lk_post_act_mode <= 2'b00;
+        lk_quant_cfg <= 32'h0001_0000;
+        lk_conv_ih <= 16'd0; lk_conv_iw <= 16'd0; lk_conv_cin <= 16'd0;
+        lk_conv_kh <= 16'd0; lk_conv_kw <= 16'd0; lk_conv_oh <= 16'd0; lk_conv_ow <= 16'd0;
+        lk_conv_stride_h <= 8'd1; lk_conv_stride_w <= 8'd1;
+        lk_conv_pad_h <= 8'd0; lk_conv_pad_w <= 8'd0;
+        lk_conv_dilation_h <= 8'd1; lk_conv_dilation_w <= 8'd1;
         lk_desc_irq_en <= 1'b0;
     end else if (direct_start_rise) begin
         lk_m_dim  <= m_dim;
@@ -291,11 +355,30 @@ always @(posedge clk) begin
         lk_w_addr <= w_addr;
         lk_a_addr <= a_addr;
         lk_r_addr <= r_addr;
+        lk_bias_addr <= bias_addr;
         lk_mode   <= cfg_mode;
         lk_stat   <= cfg_stat;
         lk_shape  <= cfg_shape_in;
         lk_arr_cfg <= arr_cfg;
         lk_a_from_prev_ofm <= 1'b0;
+        lk_conv_im2col <= cfg_conv_im2col && !arr_cfg[7];
+        lk_bias_en <= cfg_bias_en && !arr_cfg[7];
+        lk_post_act_mode <= arr_cfg[7] ? 2'b00 : cfg_post_act_mode;
+        lk_quant_cfg <= (!arr_cfg[7] && (cfg_mode == 2'b00)) ? quant_cfg
+                                                             : 32'h0001_0000;
+        lk_conv_ih <= conv_ifm_shape[15:0];
+        lk_conv_iw <= conv_ifm_shape[31:16];
+        lk_conv_cin <= conv_channels[15:0];
+        lk_conv_kh <= conv_kernel[15:0];
+        lk_conv_kw <= conv_kernel[31:16];
+        lk_conv_oh <= conv_out_shape[15:0];
+        lk_conv_ow <= conv_out_shape[31:16];
+        lk_conv_stride_h <= conv_stride_pad[7:0];
+        lk_conv_stride_w <= conv_stride_pad[15:8];
+        lk_conv_pad_h <= conv_stride_pad[23:16];
+        lk_conv_pad_w <= conv_stride_pad[31:24];
+        lk_conv_dilation_h <= conv_dilation[7:0];
+        lk_conv_dilation_w <= conv_dilation[15:8];
         lk_desc_irq_en <= 1'b1;
     end else if (state == S_DECODE_DESC && !desc_decode_error) begin
         lk_m_dim  <= desc_m_word;
@@ -305,11 +388,21 @@ always @(posedge clk) begin
         lk_a_addr <= (desc_ifm_from_prev_ofm && prev_ofm_valid) ? prev_ofm_addr
                                                                 : desc_ifm_word;
         lk_r_addr <= desc_ofm_word;
+        lk_bias_addr <= 32'd0;
         lk_mode   <= desc_mode_bits;
         lk_stat   <= desc_flow_bits;
         lk_shape  <= desc_shape_bits;
         lk_arr_cfg <= {desc_tile_packed, 7'd0};
         lk_a_from_prev_ofm <= desc_ifm_from_prev_ofm && prev_ofm_valid;
+        lk_conv_im2col <= 1'b0;
+        lk_bias_en <= 1'b0;
+        lk_post_act_mode <= 2'b00;
+        lk_quant_cfg <= 32'h0001_0000;
+        lk_conv_ih <= 16'd0; lk_conv_iw <= 16'd0; lk_conv_cin <= 16'd0;
+        lk_conv_kh <= 16'd0; lk_conv_kw <= 16'd0; lk_conv_oh <= 16'd0; lk_conv_ow <= 16'd0;
+        lk_conv_stride_h <= 8'd1; lk_conv_stride_w <= 8'd1;
+        lk_conv_pad_h <= 8'd0; lk_conv_pad_w <= 8'd0;
+        lk_conv_dilation_h <= 8'd1; lk_conv_dilation_w <= 8'd1;
         lk_desc_irq_en <= desc_irq_en_bit;
     end
 end
@@ -386,8 +479,10 @@ assign tile_col_valid[3] = (tile_active_cols > 3'd3);
 wire [15:0] scalar_elem_bytes = {14'b0, data_bytes};
 wire [15:0] vector_elem_bytes = scalar_elem_bytes << 2;
 wire [15:0] bytes_per_k = tile_mode ? vector_elem_bytes : scalar_elem_bytes;
-wire [15:0] tile_len = tile_k_len *
-                       (tile_mode ? vector_elem_bytes : scalar_elem_bytes);
+wire [15:0] tile_len_raw = tile_k_len *
+                           (tile_mode ? vector_elem_bytes : scalar_elem_bytes);
+wire [15:0] tile_len = tile_mode ? tile_len_raw
+                                  : ((tile_len_raw + 16'd3) & 16'hfffc);
 
 // Current-tile addresses (used for write-back address calc)
 wire [31:0] comp_r_addr = lk_r_addr +
@@ -421,17 +516,20 @@ assign vec_consume = tile_mode &&
 // ---------------------------------------------------------------------------
 // DMA completion latches
 // ---------------------------------------------------------------------------
-reg dma_w_done_r, dma_a_done_r, dma_r_done_r;
-wire dma_load_done = dma_w_done_r && dma_a_done_r;
+reg dma_w_done_r, dma_a_done_r, dma_bias_done_r, dma_r_done_r;
+wire dma_load_done = dma_w_done_r && dma_a_done_r &&
+                     (!lk_bias_en || dma_bias_done_r);
 
 always @(posedge clk) begin
     if (!rst_n) begin
         dma_w_done_r <= 1'b0;
         dma_a_done_r <= 1'b0;
+        dma_bias_done_r <= 1'b0;
         dma_r_done_r <= 1'b0;
     end else begin
         if (dma_w_done) dma_w_done_r <= 1'b1;
         if (dma_a_done) dma_a_done_r <= 1'b1;
+        if (dma_bias_done) dma_bias_done_r <= 1'b1;
         if (dma_r_done) dma_r_done_r <= 1'b1;
     end
 end
@@ -492,7 +590,9 @@ wire [31:0] seq1_k_rem = (lk_k_dim > seq1_k_base) ? (lk_k_dim - seq1_k_base) : 3
 wire [31:0] seq1_k_len_32 = tile_mode ?
                             ((seq1_k_rem > k_tile_elems) ? k_tile_elems : seq1_k_rem) :
                             lk_k_dim;
-wire [15:0] seq1_len_bytes = seq1_k_len_32[15:0] * bytes_per_k;
+wire [15:0] seq1_len_bytes_raw = seq1_k_len_32[15:0] * bytes_per_k;
+wire [15:0] seq1_len_bytes = tile_mode ? seq1_len_bytes_raw
+                                       : ((seq1_len_bytes_raw + 16'd3) & 16'hfffc);
 wire [31:0] seq1_m_base = tile_mode ? (seq1_i << 2) : seq1_i;
 wire [31:0] seq1_row_rem = (lk_m_dim > seq1_m_base) ? (lk_m_dim - seq1_m_base) : 32'd0;
 wire [2:0] seq1_active_rows = !tile_mode ? 3'd1 :
@@ -520,8 +620,10 @@ always @(posedge clk) begin
         pe_stat        <= 1'b1;
         pe_load_w      <= 1'b0;
         pe_swap_w      <= 1'b0;
+        pe_acc_init_en <= 1'b0;
         dma_w_start    <= 1'b0;
         dma_a_start    <= 1'b0;
+        dma_bias_start <= 1'b0;
         dma_r_start    <= 1'b0;
         desc_start     <= 1'b0;
         desc_addr      <= 32'd0;
@@ -532,14 +634,33 @@ always @(posedge clk) begin
         dma_a_len      <= 16'd0;
         dma_r_len      <= 16'd0;
         dma_a_ofm_mode <= 1'b0;
+        dma_a_im2col_mode <= 1'b0;
         dma_a_ofm_stride <= 32'd0;
         dma_a_ofm_m_base <= 32'd0;
         dma_a_ofm_k_base <= 32'd0;
         dma_a_ofm_k_len <= 16'd0;
         dma_a_ofm_active_rows <= 3'd0;
         dma_a_ofm_fp16_mode <= 1'b0;
+        dma_a_im2col_m_index <= 32'd0;
+        dma_a_im2col_k_len <= 16'd0;
+        dma_a_im2col_ih <= 16'd0;
+        dma_a_im2col_iw <= 16'd0;
+        dma_a_im2col_cin <= 16'd0;
+        dma_a_im2col_kh <= 16'd0;
+        dma_a_im2col_kw <= 16'd0;
+        dma_a_im2col_oh <= 16'd0;
+        dma_a_im2col_ow <= 16'd0;
+        dma_a_im2col_stride_h <= 8'd1;
+        dma_a_im2col_stride_w <= 8'd1;
+        dma_a_im2col_pad_h <= 8'd0;
+        dma_a_im2col_pad_w <= 8'd0;
+        dma_a_im2col_dilation_h <= 8'd1;
+        dma_a_im2col_dilation_w <= 8'd1;
+        dma_a_im2col_fp16_mode <= 1'b0;
+        dma_bias_addr  <= 32'd0;
         dma_w_done_r   <= 1'b0;
         dma_a_done_r   <= 1'b0;
+        dma_bias_done_r <= 1'b0;
         dma_r_done_r   <= 1'b0;
         w_ppb_swap     <= 1'b0;
         a_ppb_swap     <= 1'b0;
@@ -563,6 +684,7 @@ always @(posedge clk) begin
         // ── Default: de-assert all one-cycle pulse signals ──
         dma_w_start  <= 1'b0;
         dma_a_start  <= 1'b0;
+        dma_bias_start <= 1'b0;
         dma_r_start  <= 1'b0;
         desc_start   <= 1'b0;
         w_ppb_swap   <= 1'b0;
@@ -571,9 +693,10 @@ always @(posedge clk) begin
         a_ppb_clear  <= 1'b0;
         r_fifo_clear <= 1'b0;
         pe_swap_w    <= 1'b0;
+        pe_acc_init_en <= 1'b0;
         err_set_mask <= 32'd0;
 
-        // ── IRQ Clear: CPU writes ctrl_reg[2] = 1 to acknowledge IRQ ──
+        // ── IRQ Clear: CPU writes ctrl_reg[6] = 1 to acknowledge IRQ ──
         if (cfg_irq_clr) irq <= 1'b0;
 
         // ── done auto-clear when CPU de-asserts start ──
@@ -590,6 +713,7 @@ always @(posedge clk) begin
                 pe_load_w <= 1'b0;
                 dma_w_done_r <= 1'b0;
                 dma_a_done_r <= 1'b0;
+                dma_bias_done_r <= 1'b0;
                 dma_r_done_r <= 1'b0;
 
                 if (desc_mode_start_rise) begin
@@ -646,14 +770,33 @@ always @(posedge clk) begin
                     dma_a_addr  <= a_addr;
                     dma_a_len   <= cfg_start_tile_len;
                     dma_a_ofm_mode <= 1'b0;
+                    dma_a_im2col_mode <= cfg_conv_im2col && !arr_cfg[7];
                     dma_a_ofm_stride <= 32'd0;
                     dma_a_ofm_m_base <= 32'd0;
                     dma_a_ofm_k_base <= 32'd0;
                     dma_a_ofm_k_len <= 16'd0;
                     dma_a_ofm_active_rows <= 3'd0;
                     dma_a_ofm_fp16_mode <= 1'b0;
+                    dma_a_im2col_m_index <= 32'd0;
+                    dma_a_im2col_k_len <= k_dim[15:0];
+                    dma_a_im2col_ih <= conv_ifm_shape[15:0];
+                    dma_a_im2col_iw <= conv_ifm_shape[31:16];
+                    dma_a_im2col_cin <= conv_channels[15:0];
+                    dma_a_im2col_kh <= conv_kernel[15:0];
+                    dma_a_im2col_kw <= conv_kernel[31:16];
+                    dma_a_im2col_oh <= conv_out_shape[15:0];
+                    dma_a_im2col_ow <= conv_out_shape[31:16];
+                    dma_a_im2col_stride_h <= conv_stride_pad[7:0];
+                    dma_a_im2col_stride_w <= conv_stride_pad[15:8];
+                    dma_a_im2col_pad_h <= conv_stride_pad[23:16];
+                    dma_a_im2col_pad_w <= conv_stride_pad[31:24];
+                    dma_a_im2col_dilation_h <= conv_dilation[7:0];
+                    dma_a_im2col_dilation_w <= conv_dilation[15:8];
+                    dma_a_im2col_fp16_mode <= (cfg_mode == 2'b10);
+                    dma_bias_addr <= bias_addr;
                     dma_w_start <= 1'b1;
                     dma_a_start <= 1'b1;
+                    dma_bias_start <= cfg_bias_en && !arr_cfg[7];
 
                     state <= S_WARMUP_LOAD;
                 end
@@ -708,16 +851,21 @@ always @(posedge clk) begin
                 dma_a_addr   <= lk_a_addr;
                 dma_a_len    <= tile_len;
                 dma_a_ofm_mode <= lk_a_from_prev_ofm && tile_mode;
+                dma_a_im2col_mode <= 1'b0;
                 dma_a_ofm_stride <= lk_k_dim;
                 dma_a_ofm_m_base <= tile_m_base;
                 dma_a_ofm_k_base <= tile_k_base;
                 dma_a_ofm_k_len <= tile_k_len;
                 dma_a_ofm_active_rows <= tile_active_rows;
                 dma_a_ofm_fp16_mode <= (lk_mode == 2'b10);
+                dma_a_im2col_m_index <= 32'd0;
+                dma_a_im2col_k_len <= 16'd0;
                 dma_w_start  <= 1'b1;
                 dma_a_start  <= 1'b1;
+                dma_bias_start <= 1'b0;
                 dma_w_done_r <= 1'b0;
                 dma_a_done_r <= 1'b0;
+                dma_bias_done_r <= 1'b0;
                 dma_r_done_r <= 1'b0;
                 state        <= S_WARMUP_LOAD;
             end
@@ -734,6 +882,7 @@ always @(posedge clk) begin
                     a_ppb_swap   <= 1'b1;
                     dma_w_done_r <= 1'b0;
                     dma_a_done_r <= 1'b0;
+                    dma_bias_done_r <= 1'b0;
                     state        <= S_WARMUP_WAIT;
                 end
             end
@@ -758,25 +907,48 @@ always @(posedge clk) begin
             S_PRELOAD: begin
                 pe_en    <= 1'b0;
                 pe_flush <= 1'b0;
+                pe_acc_init_en <= lk_bias_en && !tile_mode;
                 // pe_stat and pe_load_w are already set by previous state
                 // Launch the next prefetch one cycle after PPBuf swap so DMA
                 // samples the freshly reset writer bank rather than stale full.
                 if (!is_last_seq) begin
                     dma_w_addr  <= pfetch_w_addr;
                     dma_w_len   <= seq1_len_bytes;
-                    dma_a_addr  <= (lk_a_from_prev_ofm && tile_mode) ? lk_a_addr : pfetch_a_addr;
+                    dma_a_addr  <= (lk_a_from_prev_ofm && tile_mode) ? lk_a_addr :
+                                   (lk_conv_im2col && !tile_mode) ? lk_a_addr :
+                                   pfetch_a_addr;
                     dma_a_len   <= seq1_len_bytes;
                     dma_a_ofm_mode <= lk_a_from_prev_ofm && tile_mode;
+                    dma_a_im2col_mode <= lk_conv_im2col && !tile_mode && !lk_a_from_prev_ofm;
                     dma_a_ofm_stride <= lk_k_dim;
                     dma_a_ofm_m_base <= seq1_m_base;
                     dma_a_ofm_k_base <= seq1_k_base;
                     dma_a_ofm_k_len <= seq1_k_len_32[15:0];
                     dma_a_ofm_active_rows <= seq1_active_rows;
                     dma_a_ofm_fp16_mode <= (lk_mode == 2'b10);
+                    dma_a_im2col_m_index <= seq1_m_base;
+                    dma_a_im2col_k_len <= lk_k_dim[15:0];
+                    dma_a_im2col_ih <= lk_conv_ih;
+                    dma_a_im2col_iw <= lk_conv_iw;
+                    dma_a_im2col_cin <= lk_conv_cin;
+                    dma_a_im2col_kh <= lk_conv_kh;
+                    dma_a_im2col_kw <= lk_conv_kw;
+                    dma_a_im2col_oh <= lk_conv_oh;
+                    dma_a_im2col_ow <= lk_conv_ow;
+                    dma_a_im2col_stride_h <= lk_conv_stride_h;
+                    dma_a_im2col_stride_w <= lk_conv_stride_w;
+                    dma_a_im2col_pad_h <= lk_conv_pad_h;
+                    dma_a_im2col_pad_w <= lk_conv_pad_w;
+                    dma_a_im2col_dilation_h <= lk_conv_dilation_h;
+                    dma_a_im2col_dilation_w <= lk_conv_dilation_w;
+                    dma_a_im2col_fp16_mode <= (lk_mode == 2'b10);
+                    dma_bias_addr <= lk_bias_addr + (seq1_j << 2);
                     dma_w_start <= 1'b1;
                     dma_a_start <= 1'b1;
+                    dma_bias_start <= lk_bias_en && !tile_mode;
                     dma_w_done_r <= 1'b0;
                     dma_a_done_r <= 1'b0;
+                    dma_bias_done_r <= 1'b0;
                 end
                 state <= S_OVERLAP_COMPUTE;
             end
@@ -828,6 +1000,7 @@ always @(posedge clk) begin
                                     a_ppb_swap   <= 1'b1;
                                     dma_w_done_r <= 1'b0;
                                     dma_a_done_r <= 1'b0;
+                                    dma_bias_done_r <= 1'b0;
                                     state <= S_PRELOAD;
                                 end else begin
                                     state <= S_WAIT_PREFETCH;
@@ -948,6 +1121,7 @@ always @(posedge clk) begin
                             tile_k_cycle   <= 16'd0;
                             dma_w_done_r   <= 1'b0;
                             dma_a_done_r   <= 1'b0;
+                            dma_bias_done_r <= 1'b0;
                             state <= S_PRELOAD;  // 1-cycle swap propagation
                         end else begin
                             // Prefetch not yet done — wait in S_WAIT_PREFETCH
@@ -976,6 +1150,7 @@ always @(posedge clk) begin
                     tile_k_cycle   <= 16'd0;
                     dma_w_done_r   <= 1'b0;
                     dma_a_done_r   <= 1'b0;
+                    dma_bias_done_r <= 1'b0;
                     state <= S_PRELOAD;  // 1-cycle swap propagation
                 end
             end

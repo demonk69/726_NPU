@@ -18,7 +18,7 @@ module soc_mem #(
     input  wire [3:0]        wen,    // byte-lane write enable
     input  wire [21:0]       addr,   // word address (byte_addr >> 2)
     input  wire [31:0]       wdata,
-    output reg  [31:0]       rdata
+    output wire [31:0]       rdata
 );
 
 localparam ADDR_W = $clog2(WORDS);
@@ -32,8 +32,9 @@ initial begin
 end
 `endif
 
+assign rdata = mem[addr[ADDR_W-1:0]];
+
 always @(posedge clk) begin
-    rdata <= mem[addr[ADDR_W-1:0]];
     if (wen[0]) mem[addr[ADDR_W-1:0]][ 7: 0] <= wdata[ 7: 0];
     if (wen[1]) mem[addr[ADDR_W-1:0]][15: 8] <= wdata[15: 8];
     if (wen[2]) mem[addr[ADDR_W-1:0]][23:16] <= wdata[23:16];

@@ -34,6 +34,15 @@ localparam REG_PERF_RD_UTIL   = 32'h64;
 localparam REG_PERF_WR_UTIL   = 32'h68;
 localparam REG_PERF_RD_BURSTS = 32'h6C;
 localparam REG_PERF_WR_BURSTS = 32'h70;
+localparam REG_PERF_MAC_OPS_LO = 32'hA0;
+localparam REG_PERF_OPS_LO     = 32'hA8;
+localparam REG_PERF_BUSY_CYCLES = 32'hB0;
+localparam REG_PERF_COMPUTE_CYCLES = 32'hB4;
+localparam REG_PERF_DMA_CYCLES = 32'hB8;
+localparam REG_PERF_TOPS_X1E6  = 32'hBC;
+localparam REG_PERF_COMPUTE_UTIL = 32'hC0;
+localparam REG_PERF_E2E_UTIL   = 32'hC4;
+localparam REG_PERF_PEAK_OPS_CYCLE = 32'hC8;
 
 localparam CTRL_START    = 32'h01;
 localparam CTRL_OS       = 32'h10;
@@ -315,6 +324,10 @@ reg [31:0] perf_rd_bytes, perf_wr_bytes;
 reg [31:0] perf_rd_bw, perf_wr_bw;
 reg [31:0] perf_rd_util, perf_wr_util;
 reg [31:0] perf_rd_bursts, perf_wr_bursts;
+reg [31:0] perf_mac_ops_lo, perf_ops_lo;
+reg [31:0] perf_busy_cycles, perf_compute_cycles, perf_dma_cycles;
+reg [31:0] perf_tops_x1e6, perf_compute_util, perf_e2e_util;
+reg [31:0] perf_peak_ops_cycle;
 
 initial begin
     for (i = 0; i < DRAM_SZ; i = i + 1)
@@ -366,6 +379,15 @@ initial begin
     axi_read(REG_PERF_WR_UTIL, perf_wr_util);
     axi_read(REG_PERF_RD_BURSTS, perf_rd_bursts);
     axi_read(REG_PERF_WR_BURSTS, perf_wr_bursts);
+    axi_read(REG_PERF_MAC_OPS_LO, perf_mac_ops_lo);
+    axi_read(REG_PERF_OPS_LO, perf_ops_lo);
+    axi_read(REG_PERF_BUSY_CYCLES, perf_busy_cycles);
+    axi_read(REG_PERF_COMPUTE_CYCLES, perf_compute_cycles);
+    axi_read(REG_PERF_DMA_CYCLES, perf_dma_cycles);
+    axi_read(REG_PERF_TOPS_X1E6, perf_tops_x1e6);
+    axi_read(REG_PERF_COMPUTE_UTIL, perf_compute_util);
+    axi_read(REG_PERF_E2E_UTIL, perf_e2e_util);
+    axi_read(REG_PERF_PEAK_OPS_CYCLE, perf_peak_ops_cycle);
 
     if (perf_cycles == 32'd0 ||
         perf_rd_beats !== 32'd2 || perf_wr_beats !== 32'd1 ||
@@ -380,6 +402,22 @@ initial begin
         $finish;
     end
 
+    if (perf_mac_ops_lo !== 32'd4 || perf_ops_lo !== 32'd8 ||
+        perf_busy_cycles == 32'd0 || perf_compute_cycles == 32'd0 ||
+        perf_dma_cycles == 32'd0 || perf_tops_x1e6 == 32'd0 ||
+        perf_compute_util == 32'd0 || perf_e2e_util == 32'd0 ||
+        perf_peak_ops_cycle !== 32'd2) begin
+        $display("[FAIL] op perf mac=%0d ops=%0d busy=%0d compute=%0d dma=%0d tops_x1e6=%0d compute_util=%0d e2e_util=%0d peak_ops=%0d",
+                 perf_mac_ops_lo, perf_ops_lo, perf_busy_cycles,
+                 perf_compute_cycles, perf_dma_cycles, perf_tops_x1e6,
+                 perf_compute_util, perf_e2e_util, perf_peak_ops_cycle);
+        $finish;
+    end
+
+    $display("[PERF] scalar_smoke MAC_OPS=%0d OPS=%0d BUSY_CYCLES=%0d COMPUTE_CYCLES=%0d DMA_CYCLES=%0d TOPS_X1E6=%0d COMPUTE_UTIL_BP=%0d E2E_UTIL_BP=%0d PEAK_OPS_CYCLE=%0d",
+             perf_mac_ops_lo, perf_ops_lo, perf_busy_cycles,
+             perf_compute_cycles, perf_dma_cycles, perf_tops_x1e6,
+             perf_compute_util, perf_e2e_util, perf_peak_ops_cycle);
     $display("[PASS] tb_npu_scalar_smoke: scalar INT8 OS result=300, cfg_shape latched, perf counters valid");
     $finish;
 end

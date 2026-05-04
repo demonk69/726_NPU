@@ -7,17 +7,18 @@ module tb_pingpong_buf_vec;
     reg [31:0] wr_data;
     reg rd_en;
     reg rd_vec_en;
+    reg [4:0] rd_vec_lanes;
     reg swap;
     reg clear;
     reg fp16_mode;
 
     wire [15:0] rd_data;
-    wire [63:0] rd_vec;
+    wire [255:0] rd_vec;
     wire rd_vec_valid;
     wire buf_empty;
     wire buf_full;
     wire buf_ready;
-    wire [4:0] rd_fill;
+    wire [5:0] rd_fill;
     wire [3:0] wr_fill;
 
     integer errors;
@@ -28,7 +29,7 @@ module tb_pingpong_buf_vec;
         .OUT_WIDTH (16),
         .THRESHOLD (1),
         .SUBW      (4),
-        .VEC_LANES (4)
+        .VEC_LANES (16)
     ) dut (
         .clk         (clk),
         .rst_n       (rst_n),
@@ -37,6 +38,7 @@ module tb_pingpong_buf_vec;
         .rd_en       (rd_en),
         .rd_data     (rd_data),
         .rd_vec_en   (rd_vec_en),
+        .rd_vec_lanes(rd_vec_lanes),
         .rd_vec      (rd_vec),
         .rd_vec_valid(rd_vec_valid),
         .swap        (swap),
@@ -122,6 +124,30 @@ module tb_pingpong_buf_vec;
         end
     endtask
 
+    task expect_vec_seq;
+        input integer lanes;
+        input integer start_value;
+        input [127:0] name;
+        integer li;
+        reg [15:0] exp_lane;
+        begin
+            if (!rd_vec_valid) begin
+                $display("[FAIL] %0s: rd_vec_valid is low", name);
+                errors = errors + 1;
+            end
+            for (li = 0; li < lanes; li = li + 1) begin
+                exp_lane = (start_value + li) & 16'hFFFF;
+                if (rd_vec[li*16 +: 16] !== exp_lane) begin
+                    $display("[FAIL] %0s lane%0d: got 0x%04h expected 0x%04h",
+                             name, li, rd_vec[li*16 +: 16], exp_lane);
+                    errors = errors + 1;
+                end
+            end
+            if (errors == 0)
+                $display("[PASS] %0s", name);
+        end
+    endtask
+
     initial begin
         errors = 0;
         rst_n = 1'b0;
@@ -129,6 +155,7 @@ module tb_pingpong_buf_vec;
         wr_data = 32'd0;
         rd_en = 1'b0;
         rd_vec_en = 1'b0;
+        rd_vec_lanes = 5'd4;
         swap = 1'b0;
         clear = 1'b0;
         fp16_mode = 1'b0;
@@ -163,6 +190,62 @@ module tb_pingpong_buf_vec;
         consume_vec();
         if (!buf_empty) begin
             $display("[FAIL] FP16 consume: buffer not empty after one vector read");
+            errors = errors + 1;
+        end
+
+        pulse_clear();
+
+        // INT8: consume eight lanes across two 32-bit words.
+        fp16_mode = 1'b0;
+        rd_vec_lanes = 5'd8;
+        write_word(32'h04030201);
+        write_word(32'h08070605);
+        pulse_swap();
+
+        expect_vec_seq(8, 1, "INT8_VEC8");
+        consume_vec();
+        if (!buf_empty) begin
+            $display("[FAIL] INT8_VEC8 consume: buffer not empty");
+            errors = errors + 1;
+        end
+
+        pulse_clear();
+
+        // INT8: consume sixteen lanes across four 32-bit words.
+        fp16_mode = 1'b0;
+        rd_vec_lanes = 5'd16;
+        write_word(32'h04030201);
+        write_word(32'h08070605);
+        write_word(32'h0C0B0A09);
+        write_word(32'h100F0E0D);
+        pulse_swap();
+
+        expect_vec_seq(16, 1, "INT8_VEC16");
+        consume_vec();
+        if (!buf_empty) begin
+            $display("[FAIL] INT8_VEC16 consume: buffer not empty");
+            errors = errors + 1;
+        end
+
+        pulse_clear();
+
+        // FP16: consume sixteen lanes across eight 32-bit words.
+        fp16_mode = 1'b1;
+        rd_vec_lanes = 5'd16;
+        write_word(32'h20012000);
+        write_word(32'h20032002);
+        write_word(32'h20052004);
+        write_word(32'h20072006);
+        write_word(32'h20092008);
+        write_word(32'h200B200A);
+        write_word(32'h200D200C);
+        write_word(32'h200F200E);
+        pulse_swap();
+
+        expect_vec_seq(16, 16'h2000, "FP16_VEC16");
+        consume_vec();
+        if (!buf_empty) begin
+            $display("[FAIL] FP16_VEC16 consume: buffer not empty");
             errors = errors + 1;
         end
 

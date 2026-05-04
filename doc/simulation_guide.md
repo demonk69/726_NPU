@@ -1,8 +1,8 @@
 # 仿真指南
 
-更新时间：2026-05-01
+更新时间：2026-05-03
 
-本文给出当前可复现的仿真入口和后续验证顺序。Phase 1 已恢复顶层标量兼容路径；Phase 2 已完成可验证的 4x4 tile-mode GEMM 路径；Phase 3 已完成 AXI read/write burst、perf counters 和带宽目标测试；T4.2-T4.5 已完成独立 PSUM/OUT buffer RMW、PE accumulator init、controller k_tile loop 单测和顶层 K-split GEMM golden；T5.1-T5.5 已完成 descriptor v1 ABI、AXI-Lite descriptor 提交寄存器、descriptor fetch/decode/next-layer、INT8 OFM->IFM 串联和 IRQ/error status；T6.1 已完成 DRAM 预展开 Conv2D im2col golden 仿真；T6.2 已完成 direct scalar on-the-fly Conv2D im2col 仿真；T6.3-T6.5 已完成 direct scalar bias、ReLU/ReLU6 和 INT8 quant/saturate 后处理；T6.6 已完成两层 Conv2D E2E；SoC smoke 已恢复。16x16/8x32 高吞吐和 descriptor 化卷积仍是后续任务。
+本文给出当前可复现的仿真入口和后续验证顺序。Phase 1 已恢复顶层标量兼容路径；Phase 2 已完成可验证的 4x4 tile-mode GEMM 路径；Phase 3 已完成 AXI read/write burst、perf counters 和带宽目标测试；T4.2-T4.5 已完成独立 PSUM/OUT buffer RMW、PE accumulator init、controller k_tile loop 单测和顶层 K-split GEMM golden；T5.1-T5.5 已完成 descriptor v1 ABI、AXI-Lite descriptor 提交寄存器、descriptor fetch/decode/next-layer、INT8 OFM->IFM 串联和 IRQ/error status；T6.1 已完成 DRAM 预展开 Conv2D im2col golden 仿真；T6.2 已完成 direct scalar on-the-fly Conv2D im2col 仿真；T6.3-T6.5 已完成 direct scalar bias、ReLU/ReLU6 和 INT8 quant/saturate 后处理；T6.6 已完成两层 Conv2D E2E；T7.1 已完成 8x8/16x16 active lane 供数验证；T7.2 已完成阵列级 8x32 折叠路由验证；T7.3/T7.4 已完成 PE 级 INT8 2/4-lane SIMD 验证；T7.5 已完成 TOPS/util 性能计数器报告；SoC smoke 已恢复。更大 tile 完整写回、packed K lane 供数和 descriptor 化卷积仍是后续任务。
 
 ## 工具
 
@@ -31,7 +31,7 @@ powershell -ExecutionPolicy Bypass -File scripts\run_sim.ps1
 当前结果：
 
 ```text
-PASS=22 FAIL=0
+PASS=28 FAIL=0
 ALL TESTS PASSED SUCCESSFULLY
 ```
 
@@ -40,6 +40,7 @@ ALL TESTS PASSED SUCCESSFULLY
 - 验证 `pe_top` INT8/FP16 MAC。
 - 验证 WS/OS 基本语义。
 - 验证 INT8/FP16 accumulator init 后继续 MAC。
+- 验证 T7.3/T7.4 INT8 packed 2/4-lane SIMD，以及旧 sign-extended scalar 兼容。
 - 作为后续改 PE 前后的回归基线。
 
 ### 顶层标量 smoke test
@@ -131,6 +132,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_regression.ps1
 tb_npu_tile_writeback.v + 4x4 K=1 INT8 tile -> PASS
 tb_npu_tile_gemm.v + tb/tile4/int8_4x4x4   -> PASS，ALL 16 CHECKS PASSED
 tb_npu_tile_gemm.v + tb/tile4/fp16_4x4x4   -> PASS，ALL 16 CHECKS PASSED
+tb_npu_tile_lane_feed.v                     -> PASS，8x8/16x16 active lane observed
+tb_reconfig_pe_8x32.v                       -> PASS，8x32 output order/fold route/load wrap
+tb_pe_top.v                                 -> PASS，INT8 packed 2/4-lane OS/WS and scalar compatibility
 tb_npu_axi_lite_desc.v                      -> PASS
 ```
 
@@ -266,6 +270,56 @@ vvp sim\tb_reconfig_pe_acc_init.vvp
 - 验证 4x4 OS array 从不同 psum 初值继续 MAC。
 - 验证输出仍按 row-major `result[r*4+c]`。
 
+### 8x32 folded PE array route
+
+```powershell
+$env:Path = 'E:\iverilog\bin;' + $env:Path
+iverilog -g2012 -o sim\tb_reconfig_pe_8x32.vvp `
+  rtl\pe\fp16_mul.v rtl\pe\fp16_add.v rtl\pe\fp32_add.v `
+  rtl\pe\pe_top.v rtl\array\reconfig_pe_array.v `
+  tb\tb_reconfig_pe_8x32.v
+vvp sim\tb_reconfig_pe_8x32.vvp
+```
+
+当前结果：
+
+```text
+[PASS] 8x32 output order
+[PASS] 8x32 folded activation route
+[PASS] 8x32 WS load row wraps at 8
+[PASS] tb_reconfig_pe_8x32
+```
+
+用途：
+
+- 验证 `cfg_shape=2'b11` 下 16x16 物理阵列被映射为两个 8x16 半阵列。
+- 验证逻辑列 0..15 来自 top half，逻辑列 16..31 来自 bottom half，`acc_out[0..31]` 顺序正确。
+- 验证 top-half activation 水平链末端折入 bottom half，对应 row r -> row r+8。
+- 验证 OS weight 链在 row7/row8 间断开，bottom half 从 `w_in[c]` 重新注入。
+- 验证 WS weight load row 在 0..7 内回卷，同时覆盖上下两个半阵列的同名逻辑 row。
+
+### PE INT8 2/4-lane SIMD
+
+```powershell
+$env:Path = 'E:\iverilog\bin;' + $env:Path
+powershell -ExecutionPolicy Bypass -File scripts\run_sim.ps1
+```
+
+当前结果：
+
+```text
+tb_pe_top.v -> PASS=28 FAIL=0
+scripts/run_regression.ps1 -> TOTAL: 2330 PASS, 0 FAIL
+```
+
+用途：
+
+- 验证 `pe_top` 在 `mode=0` 下把 16-bit `w_in/a_in` 解释为 packed `{lane1,lane0}`，执行两路 signed INT8 MAC。
+- 验证 `pe_top` 在 `DATA_W=32/INT8_SIMD_LANES=4` 下把 `w_in/a_in` 解释为 packed `{lane3,lane2,lane1,lane0}`，执行四路 signed INT8 MAC。
+- 验证 OS packed stream、WS packed weight latch、负数 lane 和 accumulator 输出。
+- 验证旧 direct scalar/PPBuf sign-extended INT8 输入仍保持单 lane 兼容。
+- 当前是 PE 级验证；端到端 2x/4x 吞吐仍需要 packed K lane 供数和更大 tile 写回配套。
+
 ### Controller K-split loop
 
 ```powershell
@@ -347,7 +401,7 @@ powershell -ExecutionPolicy Bypass -File scripts\run_conv2d_im2col_case.ps1 `
 conv2d_im2col_int8_os_default  -> ALL 75 CHECKS PASSED
 conv2d_im2col_int8_ws_default  -> ALL 75 CHECKS PASSED
 conv2d_im2col_fp16_os_default  -> ALL 75 CHECKS PASSED
-scripts/run_regression.ps1     -> TOTAL: 2286 PASS, 0 FAIL
+scripts/run_regression.ps1     -> TOTAL: 2330 PASS, 0 FAIL
 ```
 
 用途：
@@ -371,7 +425,7 @@ powershell -ExecutionPolicy Bypass -File scripts\run_conv2d_otf_case.ps1 `
 conv2d_otf_int8_os_default  -> ALL 75 CHECKS PASSED
 conv2d_otf_int8_ws_default  -> ALL 75 CHECKS PASSED
 conv2d_otf_fp16_os_default  -> ALL 75 CHECKS PASSED
-scripts/run_regression.ps1  -> TOTAL: 2286 PASS, 0 FAIL
+scripts/run_regression.ps1  -> TOTAL: 2330 PASS, 0 FAIL
 ```
 
 用途：
@@ -402,7 +456,7 @@ matmul_relu6_fp16_ws_2x3x2       -> ALL 4 CHECKS PASSED
 conv2d_relu_otf_int8_os_default  -> ALL 75 CHECKS PASSED
 conv2d_relu6_otf_int8_ws_default -> ALL 75 CHECKS PASSED
 conv2d_relu6_otf_fp16_os_default -> ALL 75 CHECKS PASSED
-scripts/run_regression.ps1       -> TOTAL: 2286 PASS, 0 FAIL
+scripts/run_regression.ps1       -> TOTAL: 2330 PASS, 0 FAIL
 ```
 
 用途：
@@ -432,7 +486,7 @@ matmul_quant_int8_os_3x5x4           -> ALL 12 CHECKS PASSED
 matmul_quant_int8_ws_3x5x4           -> ALL 12 CHECKS PASSED
 conv2d_quant_otf_int8_os_default     -> ALL 75 CHECKS PASSED
 conv2d_quant_otf_int8_ws_default     -> ALL 75 CHECKS PASSED
-scripts/run_regression.ps1           -> TOTAL: 2286 PASS, 0 FAIL
+scripts/run_regression.ps1           -> TOTAL: 2330 PASS, 0 FAIL
 ```
 
 用途：
@@ -453,7 +507,7 @@ powershell -ExecutionPolicy Bypass -File scripts\run_conv2d_two_layer_case.ps1
 
 ```text
 conv2d_two_layer_int8_os_default -> ALL 48 CHECKS PASSED
-scripts/run_regression.ps1       -> TOTAL: 2286 PASS, 0 FAIL
+scripts/run_regression.ps1       -> TOTAL: 2330 PASS, 0 FAIL
 ```
 
 用途：
@@ -607,6 +661,7 @@ vvp sim\tb_npu_scalar_smoke.vvp
 当前结果：
 
 ```text
+[PERF] scalar_smoke MAC_OPS=4 OPS=8 BUSY_CYCLES=34 COMPUTE_CYCLES=5 DMA_CYCLES=29 TOPS_X1E6=117 COMPUTE_UTIL_BP=8000 E2E_UTIL_BP=1176 PEAK_OPS_CYCLE=2
 [PASS] tb_npu_scalar_smoke: scalar INT8 OS result=300, cfg_shape latched, perf counters valid
 ```
 
@@ -624,6 +679,17 @@ AXI-Lite 性能寄存器：
 0x68 PERF_WR_UTIL     # basis points
 0x6C PERF_RD_BURSTS
 0x70 PERF_WR_BURSTS
+0xA0 PERF_MAC_OPS_LO
+0xA4 PERF_MAC_OPS_HI
+0xA8 PERF_OPS_LO      # 1 MAC = 2 ops
+0xAC PERF_OPS_HI
+0xB0 PERF_BUSY_CYCLES
+0xB4 PERF_COMPUTE_CYCLES
+0xB8 PERF_DMA_CYCLES
+0xBC PERF_TOPS_X1E6   # TOPS * 1,000,000
+0xC0 PERF_COMPUTE_UTIL # basis points
+0xC4 PERF_E2E_UTIL     # basis points
+0xC8 PERF_PEAK_OPS_CYC
 ```
 
 变量含义：
@@ -675,8 +741,11 @@ DRAM result area (0x1020): C00=19 C01=22 C10=43 C11=50
 | `tb_npu_scalar_smoke.v` | AXI perf counters 可读且计数非零/匹配标量场景 | DONE/T3.3 |
 | `tb_dma_burst.v` | 混合读写 8/16 beat burst 数据正确 | DONE/T3.4 |
 | `tb_dma_perf.v` | 长 burst 带宽利用率目标测试 | DONE/T3.5 |
+| `tb_op_counter_perf.v` | TOPS fixed-point 和 compute/e2e utilization 公式验证 | DONE/T7.5 |
 | `tb_psum_out_buf.v` | PSUM/OUT buffer read-modify-write、边界 mask 和 bank 隔离 | DONE/T4.2 |
 | `tb_reconfig_pe_acc_init.v` | PE array 从 per-PE psum 初始化后继续 MAC | DONE/T4.3 |
+| `tb_reconfig_pe_8x32.v` | 8x32 折叠路由、32-lane 输出顺序和 WS 8-row load wrap | DONE/T7.2 |
+| `tb_pe_top.v` | PE 级 INT8 packed 2/4-lane SIMD OS/WS、负数 lane 和旧 scalar 兼容 | DONE/T7.3/T7.4 |
 | `tb_npu_ctrl_ksplit.v` | controller k_tile loop、K slice DMA 地址/长度、final-only writeback | DONE/T4.4 |
 | `tb_npu_tile_ksplit_gemm.v` | 顶层多个 k_tile 累加结果等于未切分 GEMM golden | DONE/T4.5 |
 | `tb_npu_axi_lite_desc.v` | `DESC_BASE/DESC_COUNT` 和 `CTRL[7] desc_mode` readback | DONE/T5.2 |
@@ -732,15 +801,16 @@ rtl/top/npu_top.v
 9. 保持 `tb_dma_burst.v` 通过。
 10. 保持 `tb_dma_perf.v` 通过。
 11. 保持 AXI perf counters 可读，beat/byte/cycle/utilization 有效。
-12. K-split GEMM 通过。
-13. AXI-Lite descriptor 提交寄存器通过。
-14. descriptor 两任务顺序执行通过。
-15. descriptor 层间 OFM/IFM 串联通过。
-16. 预展开 im2col 的卷积通过。
-17. on-the-fly im2col 的卷积通过。
-18. 两层 Conv2D E2E 通过。
-19. SoC 编译和 CPU 启动 NPU smoke 通过。
-20. FPGA smoke test。
+12. 保持 `tb_reconfig_pe_8x32.v` 通过。
+13. K-split GEMM 通过。
+14. AXI-Lite descriptor 提交寄存器通过。
+15. descriptor 两任务顺序执行通过。
+16. descriptor 层间 OFM/IFM 串联通过。
+17. 预展开 im2col 的卷积通过。
+18. on-the-fly im2col 的卷积通过。
+19. 两层 Conv2D E2E 通过。
+20. SoC 编译和 CPU 启动 NPU smoke 通过。
+21. FPGA smoke test。
 
 ## T2.1 4x4 测试数据约定
 

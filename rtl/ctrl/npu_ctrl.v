@@ -189,6 +189,17 @@ localparam S_DONE            = 4'd8;
 reg [3:0] state;
 localparam [31:0] PPB_DEPTH_WORDS = PPB_DEPTH;
 
+function [4:0] shape_tile_lanes;
+    input [1:0] shape;
+    begin
+        case (shape)
+            2'b00: shape_tile_lanes = 5'd4;
+            2'b01: shape_tile_lanes = 5'd8;
+            default: shape_tile_lanes = 5'd16;
+        endcase
+    end
+endfunction
+
 localparam [31:0] ERR_DESC_COUNT_ZERO      = 32'h0000_0001;
 localparam [31:0] ERR_DESC_UNSUPPORTED     = 32'h0000_0002;
 localparam [31:0] ERR_DESC_COUNT_EXHAUSTED = 32'h0000_0004;
@@ -217,10 +228,12 @@ wire        cfg_conv_im2col = ctrl_reg[8];
 wire        cfg_bias_en = ctrl_reg[9];
 wire [1:0]  cfg_post_act_mode = ctrl_reg[11:10]; // 00=none, 01=ReLU, 10=ReLU6
 wire [1:0]  cfg_data_bytes = (cfg_mode == 2'b00) ? 2'd1 : 2'd2;
+wire [4:0]  cfg_shape_lanes = shape_tile_lanes(cfg_shape_in);
 wire [15:0] cfg_scalar_elem_bytes = {14'b0, cfg_data_bytes};
-wire [15:0] cfg_vector_elem_bytes = cfg_scalar_elem_bytes << 2;
+wire [15:0] cfg_vector_elem_bytes = cfg_scalar_elem_bytes * {11'd0, cfg_shape_lanes};
+wire [31:0] cfg_bytes_per_k = {16'd0, cfg_vector_elem_bytes};
 wire [31:0] cfg_k_tile_elems_raw = arr_cfg[7]
-    ? ((cfg_mode == 2'b00) ? PPB_DEPTH_WORDS : (PPB_DEPTH_WORDS >> 1))
+    ? ((PPB_DEPTH_WORDS << 2) / cfg_bytes_per_k)
     : k_dim;
 wire [31:0] cfg_k_tile_elems = (cfg_k_tile_elems_raw == 32'd0) ? 32'd1
                                                                : cfg_k_tile_elems_raw;
@@ -418,8 +431,14 @@ always @(*) begin
     endcase
 end
 
-// Bytes per element (from shadow)
+// Bytes per element and active tile lane count (from shadow)
 wire [1:0] data_bytes = (lk_mode == 2'b00) ? 2'd1 : 2'd2;
+wire [4:0] tile_shape_lanes = shape_tile_lanes(lk_shape);
+wire [31:0] tile_shape_lanes_32 = {27'd0, tile_shape_lanes};
+wire [15:0] scalar_elem_bytes = {14'b0, data_bytes};
+wire [15:0] vector_elem_bytes = scalar_elem_bytes * {11'd0, tile_shape_lanes};
+wire [15:0] bytes_per_k = tile_mode ? vector_elem_bytes : scalar_elem_bytes;
+wire [31:0] bytes_per_k_32 = {16'd0, bytes_per_k};
 
 // ---------------------------------------------------------------------------
 // Tile-loop counters:
@@ -431,21 +450,21 @@ reg [31:0] tile_j;
 reg [31:0] k_tile_idx;
 reg [2:0]  wb_row;  // tile-mode writeback row r within the current 4x4 C tile
 
-localparam [31:0] TILE_LANES = 32'd4;
-// Scalar mode iterates individual C[i,j]; tile mode iterates 4x4 C tiles.
-wire [31:0] tile_m_tiles = tile_mode ? ((lk_m_dim + 32'd3) >> 2) : lk_m_dim;
-wire [31:0] tile_n_tiles = tile_mode ? ((lk_n_dim + 32'd3) >> 2) : lk_n_dim;
+localparam [31:0] TILE4_LANES = 32'd4;
+// Scalar mode iterates individual C[i,j]; tile mode iterates one shape-sized C tile.
+wire [31:0] tile_m_tiles = tile_mode ? ((lk_m_dim + tile_shape_lanes_32 - 32'd1) / tile_shape_lanes_32) : lk_m_dim;
+wire [31:0] tile_n_tiles = tile_mode ? ((lk_n_dim + tile_shape_lanes_32 - 32'd1) / tile_shape_lanes_32) : lk_n_dim;
 wire [31:0] tile_iter_m_count = (tile_m_tiles == 32'd0) ? 32'd1 : tile_m_tiles;
 wire [31:0] tile_iter_n_count = (tile_n_tiles == 32'd0) ? 32'd1 : tile_n_tiles;
 wire [31:0] k_tile_elems_raw = tile_mode
-    ? ((lk_mode == 2'b00) ? PPB_DEPTH_WORDS : (PPB_DEPTH_WORDS >> 1))
+    ? ((PPB_DEPTH_WORDS << 2) / bytes_per_k_32)
     : lk_k_dim;
 wire [31:0] k_tile_elems = (k_tile_elems_raw == 32'd0) ? 32'd1 : k_tile_elems_raw;
 wire [31:0] k_tile_count_raw = (lk_k_dim + k_tile_elems - 32'd1) / k_tile_elems;
 wire [31:0] k_tile_count = (k_tile_count_raw == 32'd0) ? 32'd1 : k_tile_count_raw;
 
-assign tile_m_base = tile_mode ? (tile_i << 2) : tile_i; // global M row of tile row 0
-assign tile_n_base = tile_mode ? (tile_j << 2) : tile_j; // global N col of tile col 0
+assign tile_m_base = tile_mode ? (tile_i * tile_shape_lanes_32) : tile_i; // global M row of tile row 0
+assign tile_n_base = tile_mode ? (tile_j * tile_shape_lanes_32) : tile_j; // global N col of tile col 0
 assign tile_k_index = k_tile_idx;
 assign tile_k_base = tile_mode ? (k_tile_idx * k_tile_elems) : 32'd0;
 wire [31:0] tile_k_rem = (lk_k_dim > tile_k_base) ? (lk_k_dim - tile_k_base) : 32'd0;
@@ -456,13 +475,19 @@ assign tile_k_len = (tile_k_len_32 == 32'd0) ? 16'd1 : tile_k_len_32[15:0];
 
 wire [31:0] tile_row_rem = (lk_m_dim > tile_m_base) ? (lk_m_dim - tile_m_base) : 32'd0;
 wire [31:0] tile_col_rem = (lk_n_dim > tile_n_base) ? (lk_n_dim - tile_n_base) : 32'd0;
+wire [31:0] tile_active_rows_32 = !tile_mode ? 32'd1 :
+                                  (tile_row_rem >= tile_shape_lanes_32) ? tile_shape_lanes_32 :
+                                  tile_row_rem;
+wire [31:0] tile_active_cols_32 = !tile_mode ? 32'd1 :
+                                  (tile_col_rem >= tile_shape_lanes_32) ? tile_shape_lanes_32 :
+                                  tile_col_rem;
 
 assign tile_active_rows = !tile_mode ? 3'd1 :
-                          (tile_row_rem >= TILE_LANES) ? 3'd4 :
-                          tile_row_rem[2:0];
+                          (tile_active_rows_32 >= TILE4_LANES) ? 3'd4 :
+                          tile_active_rows_32[2:0];
 assign tile_active_cols = !tile_mode ? 3'd1 :
-                          (tile_col_rem >= TILE_LANES) ? 3'd4 :
-                          tile_col_rem[2:0];
+                          (tile_active_cols_32 >= TILE4_LANES) ? 3'd4 :
+                          tile_active_cols_32[2:0];
 
 // Edge tiles may have fewer than 4 valid rows/cols when M or N is not a
 // multiple of 4. These masks prevent inactive lanes from being written back.
@@ -476,9 +501,6 @@ assign tile_col_valid[2] = (tile_active_cols > 3'd2);
 assign tile_col_valid[3] = (tile_active_cols > 3'd3);
 
 // One-tile DMA byte length
-wire [15:0] scalar_elem_bytes = {14'b0, data_bytes};
-wire [15:0] vector_elem_bytes = scalar_elem_bytes << 2;
-wire [15:0] bytes_per_k = tile_mode ? vector_elem_bytes : scalar_elem_bytes;
 wire [15:0] tile_len_raw = tile_k_len *
                            (tile_mode ? vector_elem_bytes : scalar_elem_bytes);
 wire [15:0] tile_len = tile_mode ? tile_len_raw
@@ -503,7 +525,7 @@ wire is_last_tile = (tile_i == tile_iter_m_count - 1) &&
 localparam [15:0] TILE_R_LEN = 16'd4;
 
 wire [15:0] tile_compute_cycles = tile_k_len +
-                                  {13'd0, tile_active_rows} - 16'd1;
+                                  tile_active_rows_32[15:0] - 16'd1;
 
 // vec_consume advances one packed A vector and one packed W vector for each
 // logical k. Extra cycles after K drain row-skewed activations through the array.
@@ -593,11 +615,14 @@ wire [31:0] seq1_k_len_32 = tile_mode ?
 wire [15:0] seq1_len_bytes_raw = seq1_k_len_32[15:0] * bytes_per_k;
 wire [15:0] seq1_len_bytes = tile_mode ? seq1_len_bytes_raw
                                        : ((seq1_len_bytes_raw + 16'd3) & 16'hfffc);
-wire [31:0] seq1_m_base = tile_mode ? (seq1_i << 2) : seq1_i;
+wire [31:0] seq1_m_base = tile_mode ? (seq1_i * tile_shape_lanes_32) : seq1_i;
 wire [31:0] seq1_row_rem = (lk_m_dim > seq1_m_base) ? (lk_m_dim - seq1_m_base) : 32'd0;
+wire [31:0] seq1_active_rows_32 = !tile_mode ? 32'd1 :
+                                  (seq1_row_rem >= tile_shape_lanes_32) ? tile_shape_lanes_32 :
+                                  seq1_row_rem;
 wire [2:0] seq1_active_rows = !tile_mode ? 3'd1 :
-                              (seq1_row_rem >= TILE_LANES) ? 3'd4 :
-                              seq1_row_rem[2:0];
+                              (seq1_active_rows_32 >= TILE4_LANES) ? 3'd4 :
+                              seq1_active_rows_32[2:0];
 
 wire [31:0] pfetch_w_addr = tile_mode ?
     (lk_w_addr + ((seq1_j * lk_k_dim + seq1_k_base) * {16'b0, vector_elem_bytes})) :

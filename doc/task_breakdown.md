@@ -1,6 +1,6 @@
 # 任务分解
 
-更新时间：2026-04-28
+更新时间：2026-05-03
 
 本文是后续协作的主任务清单。建议按任务编号逐项解决，每完成一项就更新本文状态和验证结果。
 
@@ -656,11 +656,11 @@ scripts/run_regression.ps1 -> 1075 PASS / 12 FAIL
 
 | ID | 状态 | 任务 | 主要文件 | 验收标准 |
 |---|---|---|---|---|
-| T7.1 | TODO | 8x8/16x16 向量供数 | `npu_top`, `buf` | 阵列 active lane 全部有数据 |
-| T7.2 | TODO | 8x32 折叠路由修正和验证 | `reconfig_pe_array` | 逻辑 8x32 输出顺序正确 |
-| T7.3 | TODO | INT8 2-lane SIMD PE | `pe_top` | 16x16 @500MHz 理论 0.512 TOPS |
-| T7.4 | TODO | INT8 4-lane SIMD PE | `pe_top` | 16x16 @500MHz 理论 1.024 TOPS |
-| T7.5 | TODO | 性能计数器输出 TOPS 和利用率 | `op_counter`, `npu_top` | 仿真报告可直接引用 |
+| T7.1 | DONE | 8x8/16x16 向量供数 | `npu_top`, `buf` | 阵列 active lane 全部有数据 |
+| T7.2 | DONE | 8x32 折叠路由修正和验证 | `reconfig_pe_array` | 逻辑 8x32 输出顺序正确 |
+| T7.3 | DONE | INT8 2-lane SIMD PE | `pe_top` | 16x16 @500MHz 理论 0.512 TOPS |
+| T7.4 | DONE | INT8 4-lane SIMD PE | `pe_top` | 16x16 @500MHz 理论 1.024 TOPS |
+| T7.5 | DONE | 性能计数器输出 TOPS 和利用率 | `op_counter`, `npu_top` | 仿真报告可直接引用 |
 
 ## 阶段 8：低功耗和 FPGA 验证
 
@@ -783,10 +783,78 @@ scripts/run_regression.ps1 -> TOTAL: 2286 PASS, 0 FAIL
 scripts/run_soc_sim.ps1 -> [PASS] SoC integration test PASSED, Cycles: 247, C00=19 C01=22 C10=43 C11=50
 ```
 
-当前 T2.1-T2.6、T3.1-T3.5、T4.1-T4.5、T5.1-T5.5、T6.1-T6.6 已完成。下一步进入 descriptor 化 Conv2D、外部 PSUM surface 接入或 16x16/8x32 高吞吐阵列。建议顺序：
+当前 T2.1-T2.6、T3.1-T3.5、T4.1-T4.5、T5.1-T5.5、T6.1-T6.6、T7.1-T7.5 已完成。下一步进入 descriptor 化 Conv2D、外部 PSUM surface 接入、packed K lane 供数或更大 tile 完整写回。建议顺序：
 
 ```text
-T7.1
+descriptor 化 Conv2D / packed K lane 供数
 ```
 
-T7.1 的重点建议放在 descriptor/tile 主线承接 Conv2D 与后处理，避免 direct scalar 路径和 tile/descriptor 路径长期分叉。
+T7.1 实现记录：
+- `pingpong_buf` 的 vector read 增加运行时 `rd_vec_lanes`，同一实例支持 4/8/16 lane 读取，INT8/FP16 都按实际 lane 数推进读指针。
+- `npu_top` 将 tile feeder 扩展到最多 16 lane，并按 `CFG_SHAPE` 选择 4/8/16 lane；A 侧 row-skew 延迟链从固定 4 lane 改为 16 lane 生成式结构。
+- `npu_ctrl` 的 tile DMA byte/k、K-split 容量和 OS drain 周期按 shape lane 数计算，避免 8x8/16x16 供数长度仍停留在 4-lane。
+- 新增 `tb/tb_npu_tile_lane_feed.v`，通过真实 AXI/DMA 路径检查 8x8 与 16x16 的 active W/A lane 均送达阵列边界；`scripts/run_regression.ps1` 已接入该用例。
+
+T7.1 验证记录：
+```text
+tb_pingpong_buf_vec -> INT8_VEC8 / INT8_VEC16 / FP16_VEC16 PASS
+tb_npu_tile_lane_feed -> 8x8 lane feed observed, 16x16 lane feed observed, PASS
+scripts/run_regression.ps1 -> TOTAL: 2289 PASS, 0 FAIL
+```
+
+T7.2 实现记录：
+- `reconfig_pe_array` 的 8x32 mode 将 16x16 物理阵列拆成两个 8x16 半阵列；top half 对应逻辑列 0..15，bottom half 对应逻辑列 16..31。
+- bottom half 的 activation 输入改为从对应 top-half row 的 16-column 水平链末端接入，避免只把 row7/col15 单点折到 row8/col0。
+- 8x32 OS weight 垂直链在 row7/row8 之间断开，bottom half 从同一拍 `w_in[c]` 重新进入，形成独立右半阵列。
+- 8x32 WS load row 以 8 行为周期，同时装载 top half row r 和 bottom half row r+8；`ws_load_row_out` 在 0..7 间回卷。
+- 输出映射保持 32-lane 逻辑顺序：`acc_out[0..15]` 来自 top half，`acc_out[16..31]` 来自 bottom half。
+- 折叠源线在最后一列 shift register 处生成，避免 Icarus 对 `act_h[*][PHY_COLS]` 末列索引产生越界 warning。
+
+T7.2 验证记录：
+```text
+tb_reconfig_pe_8x32 -> output order PASS, folded activation route PASS, WS load row wrap PASS
+manual compile/run tb_reconfig_pe_8x32_current.vvp -> 4 PASS, 0 FAIL
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_regression.ps1 -> TOTAL: 2293 PASS, 0 FAIL
+```
+
+T7.3 实现记录：
+- `pe_top` 新增 `INT8_SIMD_LANES=2` 参数，INT8 packed 输入按 `{lane1,lane0}` 执行两路 signed 8-bit multiply，并在 PE 内合并为一个 32-bit accumulator 加数。
+- OS 路径支持每拍 packed `w_in/a_in` 的 2-lane dot；WS 路径支持 packed weight latch 后对 packed activation 连续 MAC。
+- 旧 direct scalar/PPBuf feeder 仍会把单个 INT8 sign-extend 到 16 bit；当 W/A 两侧都呈现旧 sign-extended scalar 编码时，PE 保持单 lane 兼容，避免 `16'hFFFF * 16'hFFFF` 被误算成两次 MAC。
+- `tb/tb_pe_top.v` 增加 T7.3 覆盖：INT8 packed OS、INT8 packed WS、负数 lane 和旧 scalar 兼容；`scripts/run_regression.ps1` 已接入 `pe_top` 回归入口。
+- 当前 T7.3 是 PE 级 packed SIMD 能力；tile/descriptor 主线的 packed K lane 供数、valid 对齐和端到端 2x 吞吐验证仍是后续工作。
+
+T7.3 验证记录：
+```text
+powershell -ExecutionPolicy Bypass -File scripts/run_sim.ps1 -> PASS=25 FAIL=0
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_regression.ps1 -> TOTAL: 2318 PASS, 0 FAIL
+```
+
+T7.4 实现记录：
+- `pe_top` 的 `INT8_SIMD_LANES` 默认值改为随 `DATA_W` 选择：`DATA_W=16` 保持 2-lane，`DATA_W>=32` 使用 4-lane。
+- INT8 datapath 扩展到 lane0..lane3，packed 约定为 `{lane3,lane2,lane1,lane0}`；四个 signed 8-bit product 在 PE 内合并为一个 18-bit 中间和，再 sign-extend 到 32-bit accumulator。
+- 旧 sign-extended scalar 兼容检测扩展到全 `DATA_W` 宽度：当 W/A 的高位都只是 lane0 符号扩展时，只计算 lane0，避免 `32'hFFFFFFFF * 32'hFFFFFFFF` 被误算成 4 次 MAC。
+- `tb/tb_pe_top.v` 新增 32-bit `u_pe_simd4` DUT，覆盖 INT8 packed 4-lane OS、WS packed weight latch、负数 lane 和全宽 scalar 兼容；原 16-bit DUT 的 T7.3/FP16/acc_init 回归保持不变。
+- 当前 T7.4 是 PE 级 4-lane SIMD 能力；阵列/PPBuf/top/descriptor 主线仍默认 `DATA_W=16`，端到端 1.024 TOPS 还需要后续 32-bit packed K lane 供数、valid 对齐和写回配套。
+
+T7.4 验证记录：
+```text
+powershell -ExecutionPolicy Bypass -File scripts/run_sim.ps1 -> PASS=28 FAIL=0
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_regression.ps1 -> TOTAL: 2321 PASS, 0 FAIL
+```
+
+T7.5 实现记录：
+- `op_counter` 改为在 `ctrl_done` 时按 `M*N*K` 累计 useful MAC，并输出 `total_ops`、`peak_ops_per_cycle`、`tops_x1e6`、`compute_util_bp` 和 `e2e_util_bp`；其中 1 MAC = 2 ops，`tops_x1e6` 表示 `TOPS * 1,000,000`，util 单位为 basis points。
+- `npu_top` 实例化 `op_counter`，非 tile 路径按 1x1 scalar peak 统计；tile 路径按当前 `CFG_SHAPE` 的 active row/col 统计。由于 packed K lane 供数尚未接入顶层，`INT8_SIMD_LANES` 默认保持 1，避免把 PE 级 SIMD 能力误报为端到端吞吐。
+- `npu_axi_lite` 新增 `0xA0..0xC8` 只读寄存器，暴露 MAC/OPS、busy/compute/DMA cycles、TOPS fixed-point、compute/e2e utilization 和 peak ops/cycle。
+- 新增 `tb/tb_op_counter_perf.v`，用固定 16x16x16 workload 验证公式：4096 MAC、8192 ops、16 busy/compute cycles、`TOPS_X1E6=256000`、util=10000bp。
+- `tb/tb_npu_scalar_smoke.v` 增加顶层 AXI-Lite 读取检查，并打印可引用的 `[PERF] scalar_smoke ...` 报告行；`scripts/run_regression.ps1` 已接入 `op_counter_perf`。
+
+T7.5 验证记录：
+```text
+tb_op_counter_perf -> [PERF] op_counter MAC_OPS=4096 OPS=8192 BUSY_CYCLES=16 COMPUTE_CYCLES=16 TOPS_X1E6=256000 COMPUTE_UTIL_BP=10000 E2E_UTIL_BP=10000 PEAK_OPS_CYCLE=512
+tb_op_counter_perf -> ALL 9 CHECKS PASSED
+tb_npu_scalar_smoke -> [PERF] scalar_smoke MAC_OPS=4 OPS=8 BUSY_CYCLES=34 COMPUTE_CYCLES=5 DMA_CYCLES=29 TOPS_X1E6=117 COMPUTE_UTIL_BP=8000 E2E_UTIL_BP=1176 PEAK_OPS_CYCLE=2
+tb_npu_scalar_smoke -> PASS
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_regression.ps1 -> TOTAL: 2330 PASS, 0 FAIL
+```

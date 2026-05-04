@@ -2,7 +2,7 @@
 # run_regression.ps1 - Full regression suite for NPU_prj
 #
 # Rebuilds and runs all OS and WS matmul test cases from source RTL.
-# Also runs: tb_fp16_e2e, tb_multi_rc_comprehensive
+# Also runs: tb_pe_top, tb_fp16_e2e, tb_multi_rc_comprehensive
 #
 # Prerequisites: iverilog, vvp
 # =============================================================================
@@ -111,6 +111,11 @@ Write-Host "  NPU Full Regression Suite" -ForegroundColor Cyan
 Write-Host "  $(Get-Date -Format 'yyyy-MM-dd HH:mm')" -ForegroundColor Cyan
 Write-Host "======================================================" -ForegroundColor Cyan
 
+# ---- 0. PE Top INT8/FP16 MAC + T7.3/T7.4 INT8 SIMD ----
+Run-Test -Name "pe_top" `
+    -VvpOut "$SimDir\reg_pe_top.vvp" `
+    -ExtraSrc @("$TbDir\tb_pe_top.v")
+
 # ---- 1. FP16 E2E ----
 Run-Test -Name "fp16_e2e" `
     -VvpOut "$SimDir\reg_fp16_e2e.vvp" `
@@ -141,6 +146,11 @@ Run-Test -Name "dma_perf" `
     -VvpOut "$SimDir\reg_dma_perf.vvp" `
     -ExtraSrc @("$TbDir\tb_dma_perf.v")
 
+# ---- 2a3b. T7.5 Operation TOPS/Utilization Counter ----
+Run-Test -Name "op_counter_perf" `
+    -VvpOut "$SimDir\reg_op_counter_perf.vvp" `
+    -ExtraSrc @("$TbDir\tb_op_counter_perf.v")
+
 # ---- 2a4. PSUM/OUT Buffer RMW ----
 Run-Test -Name "psum_out_buf" `
     -VvpOut "$SimDir\reg_psum_out_buf.vvp" `
@@ -150,6 +160,11 @@ Run-Test -Name "psum_out_buf" `
 Run-Test -Name "reconfig_pe_acc_init" `
     -VvpOut "$SimDir\reg_reconfig_pe_acc_init.vvp" `
     -ExtraSrc @("$TbDir\tb_reconfig_pe_acc_init.v")
+
+# ---- 2a5a. PE Array 8x32 Folded Routing ----
+Run-Test -Name "reconfig_pe_8x32" `
+    -VvpOut "$SimDir\reg_reconfig_pe_8x32.vvp" `
+    -ExtraSrc @("$TbDir\tb_reconfig_pe_8x32.v")
 
 # ---- 2a6. Controller K-split Loop ----
 Run-Test -Name "npu_ctrl_ksplit" `
@@ -195,6 +210,11 @@ Run-Test -Name "npu_scalar_smoke" `
 Run-Test -Name "npu_tile_writeback" `
     -VvpOut "$SimDir\reg_npu_tile_writeback.vvp" `
     -ExtraSrc @("$TbDir\tb_npu_tile_writeback.v")
+
+# ---- 2a. T7.1 8x8/16x16 Tile Lane Feed ----
+Run-Test -Name "npu_tile_lane_feed" `
+    -VvpOut "$SimDir\reg_npu_tile_lane_feed.vvp" `
+    -ExtraSrc @("$TbDir\tb_npu_tile_lane_feed.v")
 
 # ---- 2b. 4x4 Tile GEMM ----
 # Each case sets M=N=K=4 in test_params.vh.

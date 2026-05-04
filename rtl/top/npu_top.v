@@ -29,7 +29,11 @@ module npu_top #(
     parameter DATA_W       = 16,
     parameter ACC_W        = 32,
     parameter PPB_DEPTH    = 64,
-    parameter PPB_THRESH   = 16
+    parameter PPB_THRESH   = 16,
+    // End-to-end packed K-lane feed is not enabled yet, so the top-level
+    // performance counter defaults to scalar INT8 lanes even though PE-level
+    // T7.3/T7.4 SIMD is available.
+    parameter INT8_SIMD_LANES = 1
 )(
     // System
     input  wire              sys_clk,
@@ -92,7 +96,19 @@ module npu_top #(
     output wire              npu_irq
 );
 
-localparam TILE_LANES = 4;
+localparam MAX_TILE_LANES = 16;
+localparam [3:0] PERF_SIMD_LANES = INT8_SIMD_LANES;
+
+function [4:0] shape_tile_lanes;
+    input [1:0] shape;
+    begin
+        case (shape)
+            2'b00: shape_tile_lanes = 5'd4;
+            2'b01: shape_tile_lanes = 5'd8;
+            default: shape_tile_lanes = 5'd16;
+        endcase
+    end
+endfunction
 
 // ---------------------------------------------------------------------------
 // Wires: register file → controller
@@ -120,6 +136,10 @@ wire [31:0] perf_m_axi_wr_lat, perf_m_axi_rd_lat;
 wire [31:0] perf_total_cycles;
 wire [31:0] perf_m_axi_rd_bw, perf_m_axi_wr_bw;
 wire [31:0] perf_m_axi_rd_util, perf_m_axi_wr_util;
+wire [63:0] perf_mac_ops, perf_ops;
+wire [31:0] perf_busy_cycles, perf_compute_cycles, perf_dma_cycles;
+wire [31:0] perf_tops_x1e6, perf_compute_util_bp, perf_e2e_util_bp;
+wire [31:0] perf_peak_ops_per_cycle;
 
 // ---------------------------------------------------------------------------
 // AXI4-Lite Register File
@@ -183,6 +203,15 @@ npu_axi_lite u_axi_lite (
     .perf_m_axi_wr_util(perf_m_axi_wr_util),
     .perf_m_axi_rd_bursts(perf_m_axi_rd_cnt),
     .perf_m_axi_wr_bursts(perf_m_axi_wr_cnt),
+    .perf_mac_ops(perf_mac_ops),
+    .perf_ops(perf_ops),
+    .perf_busy_cycles(perf_busy_cycles),
+    .perf_compute_cycles(perf_compute_cycles),
+    .perf_dma_cycles(perf_dma_cycles),
+    .perf_tops_x1e6(perf_tops_x1e6),
+    .perf_compute_util_bp(perf_compute_util_bp),
+    .perf_e2e_util_bp(perf_e2e_util_bp),
+    .perf_peak_ops_per_cycle(perf_peak_ops_per_cycle),
     .npu_irq    (npu_irq)
 );
 
@@ -229,6 +258,7 @@ wire [2:0] ctrl_tile_active_rows, ctrl_tile_active_cols; // row/col count to ser
 wire [31:0] ctrl_tile_k_base, ctrl_tile_k_index;
 wire [15:0] ctrl_tile_k_len;
 wire [15:0] ctrl_tile_k_cycle; // OS feeder cycle, includes row-skew drain cycles
+wire [4:0]  tile_lane_count = shape_tile_lanes(ctrl_cfg_shape);
 
 npu_ctrl #(
     .ROWS  (PHY_ROWS),       // controller sees physical dimensions
@@ -350,7 +380,7 @@ wire        w_ppb_full,   a_ppb_full;
 wire        w_ppb_rd_en,  a_ppb_rd_en;
 wire [DATA_W-1:0] w_ppb_rd_data, a_ppb_rd_data;
 wire        w_ppb_rd_vec_en, a_ppb_rd_vec_en;
-wire [TILE_LANES*DATA_W-1:0] w_ppb_rd_vec, a_ppb_rd_vec;
+wire [MAX_TILE_LANES*DATA_W-1:0] w_ppb_rd_vec, a_ppb_rd_vec;
 wire        w_ppb_rd_vec_valid, a_ppb_rd_vec_valid;
 
 wire w_ppb_buf_empty_int, a_ppb_buf_empty_int;
@@ -362,7 +392,8 @@ pingpong_buf #(
     .DEPTH     (PPB_DEPTH),
     .OUT_WIDTH (DATA_W),
     .THRESHOLD (PPB_THRESH),
-    .SUBW      (4)
+    .SUBW      (4),
+    .VEC_LANES (MAX_TILE_LANES)
 ) u_w_ppb (
     .clk       (sys_clk),
     .rst_n     (sys_rst_n),
@@ -371,6 +402,7 @@ pingpong_buf #(
     .rd_en     (w_ppb_rd_en),
     .rd_data   (w_ppb_rd_data),
     .rd_vec_en  (w_ppb_rd_vec_en),
+    .rd_vec_lanes(tile_lane_count),
     .rd_vec     (w_ppb_rd_vec),
     .rd_vec_valid(w_ppb_rd_vec_valid),
     .swap      (ctrl_w_ppb_swap),
@@ -389,7 +421,8 @@ pingpong_buf #(
     .DEPTH     (PPB_DEPTH),
     .OUT_WIDTH (DATA_W),
     .THRESHOLD (PPB_THRESH),
-    .SUBW      (4)
+    .SUBW      (4),
+    .VEC_LANES (MAX_TILE_LANES)
 ) u_a_ppb (
     .clk       (sys_clk),
     .rst_n     (sys_rst_n),
@@ -398,6 +431,7 @@ pingpong_buf #(
     .rd_en     (a_ppb_rd_en),
     .rd_data   (a_ppb_rd_data),
     .rd_vec_en  (a_ppb_rd_vec_en),
+    .rd_vec_lanes(tile_lane_count),
     .rd_vec     (a_ppb_rd_vec),
     .rd_vec_valid(a_ppb_rd_vec_valid),
     .swap      (ctrl_a_ppb_swap),
@@ -580,7 +614,7 @@ axi_monitor #(
 wire pe_data_ready = !w_ppb_buf_empty_int && !a_ppb_buf_empty_int;
 wire pe_consume = pe_en && (pe_data_ready || pe_flush);
 // One packed A vector and one packed W vector are consumed only when both PPBufs
-// have a valid 4-lane preview for the controller's current k cycle.
+// have enough lanes for the controller's current shape and k cycle.
 wire tile_vec_fire = ctrl_vec_consume &&
                      w_ppb_rd_vec_valid &&
                      a_ppb_rd_vec_valid;
@@ -607,88 +641,68 @@ wire [PHY_ROWS*PHY_COLS-1:0] pe_active_dbg;
 // Data source from PPBuf
 wire [DATA_W-1:0] pe_w_data = w_ppb_rd_data;
 wire [DATA_W-1:0] pe_a_data = a_ppb_rd_data;
-wire [DATA_W-1:0] w_vec_lane0 = w_ppb_rd_vec[0*DATA_W +: DATA_W];
-wire [DATA_W-1:0] w_vec_lane1 = w_ppb_rd_vec[1*DATA_W +: DATA_W];
-wire [DATA_W-1:0] w_vec_lane2 = w_ppb_rd_vec[2*DATA_W +: DATA_W];
-wire [DATA_W-1:0] w_vec_lane3 = w_ppb_rd_vec[3*DATA_W +: DATA_W];
-wire [DATA_W-1:0] a_vec_lane0 = a_ppb_rd_vec[0*DATA_W +: DATA_W];
-wire [DATA_W-1:0] a_vec_lane1 = a_ppb_rd_vec[1*DATA_W +: DATA_W];
-wire [DATA_W-1:0] a_vec_lane2 = a_ppb_rd_vec[2*DATA_W +: DATA_W];
-wire [DATA_W-1:0] a_vec_lane3 = a_ppb_rd_vec[3*DATA_W +: DATA_W];
+wire [MAX_TILE_LANES*DATA_W-1:0] a_skew_vec;
 
-reg [DATA_W-1:0] a_lane1_d0;
-reg [DATA_W-1:0] a_lane2_d0, a_lane2_d1;
-reg [DATA_W-1:0] a_lane3_d0, a_lane3_d1, a_lane3_d2;
-
-// OS row-skew feeder:
-//   row0 gets A[m0+0,k] immediately,
-//   row1 gets A[m0+1,k] after 1 cycle,
-//   row2 gets A[m0+2,k] after 2 cycles,
-//   row3 gets A[m0+3,k] after 3 cycles.
-// The first r cycles of row r are zero bubbles; this is required so A[k] meets
-// the matching W[k] after W has shifted down r rows.
-// This aligns each row with the vertically shifted W[k,n0+c] stream.
-always @(posedge sys_clk) begin
-    if (!sys_rst_n || !ctrl_tile_mode) begin
-        a_lane1_d0 <= {DATA_W{1'b0}};
-        a_lane2_d0 <= {DATA_W{1'b0}};
-        a_lane2_d1 <= {DATA_W{1'b0}};
-        a_lane3_d0 <= {DATA_W{1'b0}};
-        a_lane3_d1 <= {DATA_W{1'b0}};
-        a_lane3_d2 <= {DATA_W{1'b0}};
-    end else if (tile_feed_step) begin
-        a_lane1_d0 <= tile_vec_fire ? a_vec_lane1 : {DATA_W{1'b0}};
-        a_lane2_d0 <= tile_vec_fire ? a_vec_lane2 : {DATA_W{1'b0}};
-        a_lane2_d1 <= a_lane2_d0;
-        a_lane3_d0 <= tile_vec_fire ? a_vec_lane3 : {DATA_W{1'b0}};
-        a_lane3_d1 <= a_lane3_d0;
-        a_lane3_d2 <= a_lane3_d1;
-    end
-end
-
-wire [DATA_W-1:0] pe_w_lane0 = ctrl_tile_mode
-    ? (tile_vec_fire ? w_vec_lane0 : {DATA_W{1'b0}})
-    : pe_w_data;
-wire [DATA_W-1:0] pe_w_lane1 = ctrl_tile_mode && tile_vec_fire ? w_vec_lane1 : {DATA_W{1'b0}};
-wire [DATA_W-1:0] pe_w_lane2 = ctrl_tile_mode && tile_vec_fire ? w_vec_lane2 : {DATA_W{1'b0}};
-wire [DATA_W-1:0] pe_w_lane3 = ctrl_tile_mode && tile_vec_fire ? w_vec_lane3 : {DATA_W{1'b0}};
-
-wire [DATA_W-1:0] pe_a_lane0 = ctrl_tile_mode
-    ? (tile_vec_fire ? a_vec_lane0 : {DATA_W{1'b0}})
-    : pe_a_data;
-wire [DATA_W-1:0] pe_a_lane1 = ctrl_tile_mode ? a_lane1_d0 : {DATA_W{1'b0}};
-wire [DATA_W-1:0] pe_a_lane2 = ctrl_tile_mode ? a_lane2_d1 : {DATA_W{1'b0}};
-wire [DATA_W-1:0] pe_a_lane3 = ctrl_tile_mode ? a_lane3_d2 : {DATA_W{1'b0}};
-
-// ── Weight input to PE array ──
-// T2.2: lower four columns receive w_vec[0..3]. Upper columns stay zero until
-// wider 8x8/16x16 feeding is implemented.
+// OS row-skew feeder. Row r receives A lane r after r compute cycles, so the
+// A wavefront stays aligned with the W stream as it shifts down the array.
+genvar skew_lane;
 generate
-    if (PHY_COLS >= 4) begin : gen_pe_w_in_4plus
-        assign pe_w_in = {{(PHY_COLS-TILE_LANES)*DATA_W{1'b0}},
-                          pe_w_lane3, pe_w_lane2, pe_w_lane1, pe_w_lane0};
-    end else if (PHY_COLS == 3) begin : gen_pe_w_in_3
-        assign pe_w_in = {pe_w_lane2, pe_w_lane1, pe_w_lane0};
-    end else if (PHY_COLS == 2) begin : gen_pe_w_in_2
-        assign pe_w_in = {pe_w_lane1, pe_w_lane0};
-    end else begin : gen_pe_w_in_1
-        assign pe_w_in = pe_w_lane0;
+    for (skew_lane = 0; skew_lane < MAX_TILE_LANES; skew_lane = skew_lane + 1) begin : gen_a_skew
+        localparam integer LANE = skew_lane;
+        if (LANE == 0) begin : gen_lane0
+            assign a_skew_vec[LANE*DATA_W +: DATA_W] =
+                (ctrl_tile_mode && tile_vec_fire) ? a_ppb_rd_vec[LANE*DATA_W +: DATA_W]
+                                                  : {DATA_W{1'b0}};
+        end else begin : gen_lane_delay
+            reg [DATA_W-1:0] pipe [0:LANE-1];
+            integer stage_i;
+            always @(posedge sys_clk) begin
+                if (!sys_rst_n || !ctrl_tile_mode) begin
+                    for (stage_i = 0; stage_i < LANE; stage_i = stage_i + 1)
+                        pipe[stage_i] <= {DATA_W{1'b0}};
+                end else if (tile_feed_step) begin
+                    pipe[0] <= tile_vec_fire ? a_ppb_rd_vec[LANE*DATA_W +: DATA_W]
+                                             : {DATA_W{1'b0}};
+                    for (stage_i = 1; stage_i < LANE; stage_i = stage_i + 1)
+                        pipe[stage_i] <= pipe[stage_i-1];
+                end
+            end
+            assign a_skew_vec[LANE*DATA_W +: DATA_W] = pipe[LANE-1];
+        end
     end
 endgenerate
 
-// ── Activation input to PE array ──
-// T2.2: lower four rows receive a_vec[0..3]. OS row-skew scheduling is a T2.3
-// controller/feeder responsibility; this stage only exposes the 4-lane path.
+genvar feed_col;
 generate
-    if (PHY_ROWS >= 4) begin : gen_pe_a_in_4plus
-        assign pe_a_in = {{(PHY_ROWS-TILE_LANES)*DATA_W{1'b0}},
-                          pe_a_lane3, pe_a_lane2, pe_a_lane1, pe_a_lane0};
-    end else if (PHY_ROWS == 3) begin : gen_pe_a_in_3
-        assign pe_a_in = {pe_a_lane2, pe_a_lane1, pe_a_lane0};
-    end else if (PHY_ROWS == 2) begin : gen_pe_a_in_2
-        assign pe_a_in = {pe_a_lane1, pe_a_lane0};
-    end else begin : gen_pe_a_in_1
-        assign pe_a_in = pe_a_lane0;
+    for (feed_col = 0; feed_col < PHY_COLS; feed_col = feed_col + 1) begin : gen_pe_w_in
+        localparam [4:0] COL_IDX = feed_col;
+        if (feed_col < MAX_TILE_LANES) begin : gen_tile_w_lane
+            assign pe_w_in[feed_col*DATA_W +: DATA_W] =
+                ctrl_tile_mode
+                    ? ((tile_vec_fire && (COL_IDX < tile_lane_count))
+                        ? w_ppb_rd_vec[feed_col*DATA_W +: DATA_W]
+                        : {DATA_W{1'b0}})
+                    : ((feed_col == 0) ? pe_w_data : {DATA_W{1'b0}});
+        end else begin : gen_zero_w_lane
+            assign pe_w_in[feed_col*DATA_W +: DATA_W] = {DATA_W{1'b0}};
+        end
+    end
+endgenerate
+
+genvar feed_row;
+generate
+    for (feed_row = 0; feed_row < PHY_ROWS; feed_row = feed_row + 1) begin : gen_pe_a_in
+        localparam [4:0] ROW_IDX = feed_row;
+        if (feed_row < MAX_TILE_LANES) begin : gen_tile_a_lane
+            assign pe_a_in[feed_row*DATA_W +: DATA_W] =
+                ctrl_tile_mode
+                    ? ((ROW_IDX < tile_lane_count)
+                        ? a_skew_vec[feed_row*DATA_W +: DATA_W]
+                        : {DATA_W{1'b0}})
+                    : ((feed_row == 0) ? pe_a_data : {DATA_W{1'b0}});
+        end else begin : gen_zero_a_lane
+            assign pe_a_in[feed_row*DATA_W +: DATA_W] = {DATA_W{1'b0}};
+        end
     end
 endgenerate
 
@@ -707,6 +721,47 @@ wire [ACC_W-1:0] scalar_result;
 wire [ACC_W-1:0] scalar_act_result;
 wire [ACC_W-1:0] scalar_post_result;
 wire             scalar_valid;
+
+wire [4:0] perf_active_rows = ctrl_tile_mode
+    ? ((ctrl_cfg_shape == 2'b11) ? 5'd8 : tile_lane_count)
+    : 5'd1;
+wire [5:0] perf_active_cols = ctrl_tile_mode
+    ? ((ctrl_cfg_shape == 2'b11) ? 6'd32 : {1'b0, tile_lane_count})
+    : 6'd1;
+wire       perf_compute_valid = ctrl_tile_mode ? tile_feed_step : scalar_pe_en;
+
+op_counter #(
+    .ROWS(PHY_ROWS),
+    .COLS(32),
+    .FREQ_MHZ(500)
+) u_op_counter (
+    .clk(sys_clk),
+    .rst_n(sys_rst_n),
+    .pe_en(pe_en),
+    .pe_flush(pe_flush),
+    .ctrl_busy(status_busy),
+    .ctrl_done(status_done),
+    .dma_w_done(dma_w_done),
+    .dma_a_done(dma_a_done),
+    .dma_r_done(dma_r_done),
+    .pe_valid(pe_array_valid),
+    .m_dim(m_dim_r),
+    .n_dim(n_dim_r),
+    .k_dim(k_dim_r),
+    .compute_valid(perf_compute_valid),
+    .active_rows(perf_active_rows),
+    .active_cols(perf_active_cols),
+    .simd_lanes(PERF_SIMD_LANES),
+    .total_mac_ops(perf_mac_ops),
+    .total_busy_cycles(perf_busy_cycles),
+    .total_compute_cycles(perf_compute_cycles),
+    .total_dma_cycles(perf_dma_cycles),
+    .total_ops(perf_ops),
+    .peak_ops_per_cycle(perf_peak_ops_per_cycle),
+    .tops_x1e6(perf_tops_x1e6),
+    .compute_util_bp(perf_compute_util_bp),
+    .e2e_util_bp(perf_e2e_util_bp)
+);
 
 pe_top #(
     .DATA_W(DATA_W),

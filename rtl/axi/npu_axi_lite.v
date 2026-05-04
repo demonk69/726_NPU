@@ -47,6 +47,17 @@
 //             0x9C  QUANT_CFG         - bit0=enable, bit1=round,
 //                                      - [15:8]=right shift,
 //                                      - [31:16]=signed scale
+//             0xA0  PERF_MAC_OPS_LO   - useful MAC operations[31:0]
+//             0xA4  PERF_MAC_OPS_HI   - useful MAC operations[63:32]
+//             0xA8  PERF_OPS_LO       - useful operations[31:0], 1 MAC = 2 ops
+//             0xAC  PERF_OPS_HI       - useful operations[63:32]
+//             0xB0  PERF_BUSY_CYCLES  - NPU busy cycles
+//             0xB4  PERF_COMPUTE_CYCLES - compute-active cycles
+//             0xB8  PERF_DMA_CYCLES   - busy cycles not in compute
+//             0xBC  PERF_TOPS_X1E6    - TOPS * 1,000,000 at FREQ_MHZ
+//             0xC0  PERF_COMPUTE_UTIL - compute utilization, basis points
+//             0xC4  PERF_E2E_UTIL     - end-to-end utilization, basis points
+//             0xC8  PERF_PEAK_OPS_CYC - peak operations per cycle used by util
 //
 //           IRQ Clear dual path:
 //             Path A: write 0x0C (INT_CLR) bit0 = 1  → clears int_pending
@@ -125,6 +136,15 @@ module npu_axi_lite (
     input  wire [31:0]           perf_m_axi_wr_util,
     input  wire [31:0]           perf_m_axi_rd_bursts,
     input  wire [31:0]           perf_m_axi_wr_bursts,
+    input  wire [63:0]           perf_mac_ops,
+    input  wire [63:0]           perf_ops,
+    input  wire [31:0]           perf_busy_cycles,
+    input  wire [31:0]           perf_compute_cycles,
+    input  wire [31:0]           perf_dma_cycles,
+    input  wire [31:0]           perf_tops_x1e6,
+    input  wire [31:0]           perf_compute_util_bp,
+    input  wire [31:0]           perf_e2e_util_bp,
+    input  wire [31:0]           perf_peak_ops_per_cycle,
     // Interrupt output
     output wire                  npu_irq
 );
@@ -289,6 +309,17 @@ always @(*) begin
         32'h94: rdata_r = conv_dilation;
         32'h98: rdata_r = bias_addr;
         32'h9C: rdata_r = quant_cfg;
+        32'hA0: rdata_r = perf_mac_ops[31:0];
+        32'hA4: rdata_r = perf_mac_ops[63:32];
+        32'hA8: rdata_r = perf_ops[31:0];
+        32'hAC: rdata_r = perf_ops[63:32];
+        32'hB0: rdata_r = perf_busy_cycles;
+        32'hB4: rdata_r = perf_compute_cycles;
+        32'hB8: rdata_r = perf_dma_cycles;
+        32'hBC: rdata_r = perf_tops_x1e6;
+        32'hC0: rdata_r = perf_compute_util_bp;
+        32'hC4: rdata_r = perf_e2e_util_bp;
+        32'hC8: rdata_r = perf_peak_ops_per_cycle;
         default: rdata_r = 32'hDEADBEEF;
     endcase
 end

@@ -1,6 +1,6 @@
 # 架构修复路线
 
-更新时间：2026-04-28
+更新时间：2026-05-03
 
 本文把当前 RTL 原型演进到目标 NPU 的修复路线按依赖关系排列。详细任务表见 [task_breakdown.md](task_breakdown.md)。
 
@@ -14,7 +14,7 @@ A PPBuf -> one scalar -> pe_a_in[0]
 PE array -> result[0] only -> result FIFO
 ```
 
-当前已经为这条路径补上 `u_scalar_pe` 兼容计算和写回，使标量 dot product 可验证通过。T2.4-T2.6 进一步补上了 4x4 tile-mode GEMM 的 4-lane 供数、16-output 收集和 INT8/FP16 golden 测试；16x16/8x32 高吞吐仍需要后续扩展。
+当前已经为这条路径补上 `u_scalar_pe` 兼容计算和写回，使标量 dot product 可验证通过。T2.4-T2.6 进一步补上了 4x4 tile-mode GEMM 的 4-lane 供数、16-output 收集和 INT8/FP16 golden 测试；T7.1-T7.5 已完成 8x8/16x16 active lane 供数、8x32 阵列级折叠路由、PE 级 INT8 2/4-lane SIMD 和 TOPS/util 性能报告；更大 tile 端到端高吞吐写回仍需要后续扩展。
 
 ## 修复层级
 
@@ -40,7 +40,7 @@ PE 单测通过
 当前验证记录：
 
 ```text
-scripts/run_sim.ps1      -> PASS=19 FAIL=0
+scripts/run_sim.ps1      -> PASS=28 FAIL=0
 tb_npu_scalar_smoke.v    -> PASS
 tb_comprehensive.v       -> ALL 28 TESTS PASSED
 scripts/run_full_sim.ps1 -> compile and simulation completed
@@ -150,8 +150,11 @@ conv + ReLU + conv 两层通过
 
 1. 8x8/16x16 lane 扩展。
 2. 8x32 折叠路由验证。
-3. INT8 SIMD PE。
-4. clock gating/DFS 接入。
+3. INT8 2-lane SIMD PE（T7.3 已完成 PE 级验证）。
+4. INT8 4-lane SIMD PE（T7.4 已完成 PE 级验证）。
+5. TOPS/util 报告（T7.5 已完成 `op_counter` 和 AXI-Lite 可读寄存器）。
+6. packed K lane 供数和端到端吞吐验证。
+7. clock gating/DFS 接入。
 
 完成标准：
 

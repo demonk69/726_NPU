@@ -278,9 +278,14 @@ axi_monitor #(.ACC_W(ACC_W)) u_monitor (
 // Operation Counter
 // ---------------------------------------------------------------------------
 wire [63:0] total_mac_ops;
+wire [63:0] total_ops;
 wire [31:0] total_pe_cycles, total_busy_cycles, total_compute_cycles;
 wire [31:0] total_dma_cycles, active_pe_cnt, peak_active_pe;
 wire [31:0] fsm_trans_cnt, util_pct, mac_per_cyc, eff_pct;
+wire [31:0] peak_ops_per_cycle, tops_x1e6, compute_util_bp, e2e_util_bp;
+wire [4:0]  op_active_rows = u_npu.ctrl_tile_mode ? 5'd4 : 5'd1;
+wire [5:0]  op_active_cols = u_npu.ctrl_tile_mode ? 6'd4 : 6'd1;
+wire        op_compute_valid = u_npu.ctrl_tile_mode ? u_npu.tile_feed_step : u_npu.scalar_pe_en;
 
 op_counter #(.ROWS(ROWS), .COLS(COLS)) u_opcnt (
     .clk(clk), .rst_n(rst_n),
@@ -296,6 +301,10 @@ op_counter #(.ROWS(ROWS), .COLS(COLS)) u_opcnt (
 
     .n_dim(u_npu.n_dim_r),
     .k_dim(u_npu.k_dim_r),
+    .compute_valid(op_compute_valid),
+    .active_rows(op_active_rows),
+    .active_cols(op_active_cols),
+    .simd_lanes(4'd1),
     .total_mac_ops(total_mac_ops),
     .total_pe_cycles(total_pe_cycles),
     .total_busy_cycles(total_busy_cycles),
@@ -306,7 +315,12 @@ op_counter #(.ROWS(ROWS), .COLS(COLS)) u_opcnt (
     .fsm_transitions(fsm_trans_cnt),
     .utilization_pct(util_pct),
     .mac_per_cycle(mac_per_cyc),
-    .efficiency_pct(eff_pct)
+    .efficiency_pct(eff_pct),
+    .total_ops(total_ops),
+    .peak_ops_per_cycle(peak_ops_per_cycle),
+    .tops_x1e6(tops_x1e6),
+    .compute_util_bp(compute_util_bp),
+    .e2e_util_bp(e2e_util_bp)
 );
 
 // ===========================================================================
@@ -383,6 +397,9 @@ task print_report;
         $display("    Compute Cycles  : %6d    DMA Cycles     : %6d", total_compute_cycles, total_dma_cycles);
         $display("    Peak Active PEs : %6d / %0d", peak_active_pe, ROWS*COLS);
         $display("  [Performance]");
+        $display("    Total Ops       : %6d    Peak Ops/Cyc  : %6d", total_ops, peak_ops_per_cycle);
+        $display("    TOPS x1e6       : %6d    TOPS          : %0d.%06d",
+                 tops_x1e6, tops_x1e6/1000000, tops_x1e6%1000000);
         $display("    PE Utilization  : %6d.%02d %%", util_pct/100, util_pct%100);
         $display("    MACs/Cycle      : %6d.%02d", mac_per_cyc/100, mac_per_cyc%100);
         $display("    Efficiency      : %6d.%02d %%", eff_pct/100, eff_pct%100);

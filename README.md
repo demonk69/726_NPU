@@ -2,11 +2,11 @@
 
 面向边缘 AI 推理的异构处理器原型：PicoRV32 CPU 负责控制和任务编排，NPU 负责矩阵乘和卷积中的高负载计算。项目目标是通过 AXI4-Lite 配置通路和 AXI4 DMA 数据通路，实现可验证、可扩展、低功耗的 NPU 加速器。
 
-更新时间：2026-05-01
+更新时间：2026-05-04
 
 ## 当前结论
 
-当前仓库已经具备 PE、AXI-Lite、DMA、Ping-Pong Buffer、16x16 可重构阵列外壳和 SoC 框架。Phase 1 已恢复顶层标量最小正确性；Phase 2 已完成可验证的 4x4 tile-mode GEMM 路径，包括 16-output serializer、row-wise writeback、INT8/FP16 4x4 golden 测试。T6.1 已支持 testbench/software 在 DRAM 中预展开 Conv2D im2col；T6.2 已支持 direct scalar on-the-fly Conv2D im2col；T6.3-T6.5 已在 direct scalar 路径完成 32-bit bias、ReLU/ReLU6 和 INT8 quant/saturate 后处理；T6.6 已完成两层 Conv2D 端到端仿真。SoC smoke 仿真已恢复，PicoRV32 可配置 NPU 并验证 2x2 INT8 GEMM 结果。
+当前仓库已经具备 PE、AXI-Lite、DMA、Ping-Pong Buffer、16x16 可重构阵列外壳和 SoC 框架。Phase 1 已恢复顶层标量最小正确性；Phase 2 已完成可验证的 4x4 tile-mode GEMM 路径，包括 16-output serializer、row-wise writeback、INT8/FP16 4x4 golden 测试。T6.1 已支持 testbench/software 在 DRAM 中预展开 Conv2D im2col；T6.2 已支持 direct scalar on-the-fly Conv2D im2col；T6.3-T6.5 已在 direct scalar 路径完成 32-bit bias、ReLU/ReLU6 和 INT8 quant/saturate 后处理；T6.6 已完成两层 Conv2D 端到端仿真；T7.5 已补齐 TOPS/util 性能计数器报告。SoC smoke 仿真已恢复，PicoRV32 可配置 NPU 并验证 2x2 INT8 GEMM 结果。
 
 已确认可依赖：
 
@@ -16,6 +16,7 @@
 - `tb_dma_burst.v` 已覆盖混合读写场景下 8/16 beat burst 地址和数据正确性。
 - `tb_dma_perf.v` 已输出长 burst 带宽利用率报告：read 85.04%，write 77.34%，并解释 write 低于 80% 的原因。
 - `axi_monitor` 已接入 `npu_top`，AXI-Lite `0x48..0x70` 可读出 DMA burst/beat/byte/cycle、bytes-per-cycle 和 utilization counters。
+- `op_counter` 已接入 `npu_top`，AXI-Lite `0xA0..0xC8` 可读出 useful MAC/ops、busy/compute/DMA cycles、`TOPS_X1E6`、compute/e2e utilization 和 peak ops/cycle。
 - `psum_out_buf` 已实现 2-bank 4x4 tile PSUM/OUT RMW 存储，并通过边界 mask、bank isolation 和 K-split RMW 单测。
 - `pe_top` 和 `reconfig_pe_array` 已支持 accumulator init，4x4 PE array 可从 per-PE psum 初值继续 MAC。
 - `npu_ctrl` 已支持 tile-mode k_tile loop，K 超过 PPB 深度时按 K slice 生成 A/W DMA 地址和长度，最后一个 k_tile 才 flush/writeback。
@@ -153,17 +154,18 @@ scripts/run_conv2d_otf_case.ps1 default INT8 OS/WS, FP16 OS -> PASS
 scripts/run_matmul_case.ps1 -Bias -Activation relu/relu6 -> PASS
 scripts/run_conv2d_otf_case.ps1 -Bias -Activation relu/relu6 -> PASS
 scripts/run_conv2d_two_layer_case.ps1 -> ALL 48 CHECKS PASSED
+tb/tb_op_counter_perf.v -> ALL 9 CHECKS PASSED
 tb/tb_npu_tile_ksplit_gemm.v -> PASS
 tb/tb_npu_axi_lite_desc.v -> PASS
 tb/tb_npu_desc_two_layer.v -> PASS
 tb/tb_npu_desc_ofm_chain.v -> PASS
 tb_comprehensive.v       -> ALL 28 TESTS PASSED
 scripts/run_full_sim.ps1 -> compile and simulation completed
-scripts/run_regression.ps1 -> TOTAL: 2286 PASS, 0 FAIL
+scripts/run_regression.ps1 -> TOTAL: 2330 PASS, 0 FAIL
 scripts/run_soc_sim.ps1 -> [PASS] SoC integration test PASSED, C00=19 C01=22 C10=43 C11=50
 ```
 
-SoC 仿真入口已修复旧 `.ROWS/.COLS`、`dram_model` `axi_arlen`、PicoRV32 PCPI 端口、AXI-lite bridge AW/W 握手和 SoC 内存 ready/rdata 对齐问题。T2.1-T2.6 已完成 4x4 tile 的 A/W tile-pack、4-lane vector read、tile planner、vector consume、OS row-skew feeder、16-output serializer、row-wise writeback，以及 4x4 INT8/FP16 GEMM golden 测试。T3.1-T3.5 已完成 AXI read/write burst、4KB 边界切分、AXI perf counters、混合 burst 正确性测试和带宽利用率目标测试；T4.1-T4.5 已明确并实现 PSUM/OUT Buffer 的 tile-local RMW 存储、accumulator init、controller k_tile loop 和顶层 K-split GEMM golden。T5.1 已固定 descriptor v1 二进制格式，T5.2 已给 AXI-Lite 增加 `DESC_BASE/DESC_COUNT`，T5.3 已实现第一版 descriptor fetch/decode/next-layer，T5.4 已实现 INT8 OFM->IFM 两层 GEMM 串联，T5.5 已补齐 `STATUS.error`、done/error IRQ 和 `ERR_STATUS(0x74)` W1C 错误状态。T6.1 已完成 DRAM 预展开 Conv2D im2col 仿真；T6.2 已完成 direct scalar on-the-fly Conv2D im2col 仿真；T6.3-T6.5 已完成 direct scalar bias、ReLU/ReLU6 和 INT8 quant/saturate 后处理；T6.6 已完成两层 Conv2D E2E；全量回归当前为 2286 PASS / 0 FAIL。当前 tile/descriptor 主线是 OS；direct scalar matmul/Conv2D 回归同时覆盖 OS 和 WS。下一步进入 descriptor 化卷积或 16x16/8x32 高吞吐阵列。
+SoC 仿真入口已修复旧 `.ROWS/.COLS`、`dram_model` `axi_arlen`、PicoRV32 PCPI 端口、AXI-lite bridge AW/W 握手和 SoC 内存 ready/rdata 对齐问题。T2.1-T2.6 已完成 4x4 tile 的 A/W tile-pack、4-lane vector read、tile planner、vector consume、OS row-skew feeder、16-output serializer、row-wise writeback，以及 4x4 INT8/FP16 GEMM golden 测试。T3.1-T3.5 已完成 AXI read/write burst、4KB 边界切分、AXI perf counters、混合 burst 正确性测试和带宽利用率目标测试；T4.1-T4.5 已明确并实现 PSUM/OUT Buffer 的 tile-local RMW 存储、accumulator init、controller k_tile loop 和顶层 K-split GEMM golden。T5.1 已固定 descriptor v1 二进制格式，T5.2 已给 AXI-Lite 增加 `DESC_BASE/DESC_COUNT`，T5.3 已实现第一版 descriptor fetch/decode/next-layer，T5.4 已实现 INT8 OFM->IFM 两层 GEMM 串联，T5.5 已补齐 `STATUS.error`、done/error IRQ 和 `ERR_STATUS(0x74)` W1C 错误状态。T6.1 已完成 DRAM 预展开 Conv2D im2col 仿真；T6.2 已完成 direct scalar on-the-fly Conv2D im2col 仿真；T6.3-T6.5 已完成 direct scalar bias、ReLU/ReLU6 和 INT8 quant/saturate 后处理；T6.6 已完成两层 Conv2D E2E；T7.1-T7.5 已完成宽 lane 供数、8x32 阵列级折叠路由、PE 级 INT8 2/4-lane SIMD 和 TOPS/util 性能计数器报告；全量回归当前为 2330 PASS / 0 FAIL。当前 tile/descriptor 主线是 OS；direct scalar matmul/Conv2D 回归同时覆盖 OS 和 WS。下一步进入 descriptor 化卷积、packed K lane 供数或更大 tile 完整写回。
 
 ## 性能目标口径
 

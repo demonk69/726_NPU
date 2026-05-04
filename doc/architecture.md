@@ -1,6 +1,6 @@
 # NPU 目标架构方案
 
-更新时间：2026-05-01
+更新时间：2026-05-03
 
 本文描述项目应收敛到的目标架构，并标注当前 RTL 与目标之间的差距。评分要求以 4x4 脉动阵列、AXI-Lite/Burst AXI、DMA、低功耗、RTL/FPGA 验证为基础；动态可重构阵列和更高带宽/算力作为优化项。
 
@@ -178,7 +178,7 @@ all m_tile done && all n_tile done && all k_tile done
 desc.last_layer == 1 or desc.next_desc == 0
 ```
 
-`DESC_COUNT` 是链表 fetch 上限，用于防止 `next_desc` 跑飞；如果 count 耗尽但没有遇到 `last_layer` 或 `next_desc=0`，T5.5 会置位 `ERR_STATUS.DESC_COUNT_EXHAUSTED`。当前 descriptor v1 可直接映射到已有直配寄存器：`M/N/K` -> `M_DIM/N_DIM/K_DIM`，`ifm_addr` -> `A_ADDR`，`weight_addr` -> `W_ADDR`，`ofm_addr` -> `R_ADDR`，`desc_ctrl.dtype/dataflow/shape/tile_packed` -> `CTRL[3:2]`、`CTRL[5:4]`、`CFG_SHAPE` 和 `ARR_CFG[7]`。T5.4 增加 `desc_ctrl[23] IFM_FROM_PREV_OFM`：置位时本层 `A_ADDR` 由上一层 `ofm_addr` 覆盖，并由 DMA 执行 row-major OFM 到 A tile stream 的 gather/repack。当前支持并验证 `OP=GEMM_TILEPACK`、`DTYPE=INT8`、`DATAFLOW=OS`、`SHAPE=4x4`、`TILE_PACKED=1` 的两层串联；独立 descriptor 路径仍支持 INT8/FP16 4x4 OS tile-pack GEMM，unsupported descriptor 会置位 `ERR_STATUS.DESC_UNSUPPORTED`。
+`DESC_COUNT` 是链表 fetch 上限，用于防止 `next_desc` 跑飞；如果 count 耗尽但没有遇到 `last_layer` 或 `next_desc=0`，T5.5 会置位 `ERR_STATUS.DESC_COUNT_EXHAUSTED`。当前 descriptor v1 可直接映射到已有直配寄存器：`M/N/K` -> `M_DIM/N_DIM/K_DIM`，`ifm_addr` -> `A_ADDR`，`weight_addr` -> `W_ADDR`，`ofm_addr` -> `R_ADDR`，`desc_ctrl.dtype/dataflow/shape/tile_packed` -> `CTRL[3:2]`、`CTRL[5:4]`、`CFG_SHAPE` 和 `ARR_CFG[7]`。T5.4 增加 `desc_ctrl[23] IFM_FROM_PREV_OFM`：置位时本层 `A_ADDR` 由上一层 `ofm_addr` 覆盖，并由 DMA 执行 row-major OFM 到 A tile stream 的 gather/repack。当前支持并验证 `OP=GEMM_TILEPACK`、`DTYPE=INT8`、`DATAFLOW=OS`、`SHAPE=4x4`、`TILE_PACKED=1` 的两层串联；独立 descriptor 路径仍支持 INT8/FP16 4x4 OS tile-pack GEMM，unsupported descriptor 会置位 `ERR_STATUS.DESC_UNSUPPORTED`。T7.3/T7.4 的 INT8 2/4-lane SIMD 目前是 PE 级能力，descriptor/tile 主线尚未声明 32-bit packed K lane 供数语义。
 
 ## PE 阵列
 
@@ -189,7 +189,7 @@ desc.last_layer == 1 or desc.next_desc == 0
 - 16 个 PE 同时参与计算。
 - 每个逻辑 `k` 周期从 PPBuf 读取 4 个 activation lane 和 4 个 weight lane；activation 进入 PE row 前要做 row-skew，前几个物理周期不是 4 个 row 全部有效。
 - 每个 tile 产生最多 16 个输出。
-- 支持 INT8 和 FP16。
+- 支持 INT8 和 FP16；INT8 PE 内已支持 packed 2/4-lane SIMD，并兼容旧 sign-extended scalar 输入。
 - 支持 WS 和 OS。
 
 ### 优化形态
@@ -216,7 +216,9 @@ input regs -> multiplier -> accumulator -> output regs
 INT8 目标：
 
 - baseline：1-lane INT8 MAC。
-- 性能优化：2-lane 或 4-lane INT8 SIMD MAC，INT32 accumulate。
+- T7.3：PE 级 2-lane INT8 SIMD MAC，INT32 accumulate。
+- T7.4：PE 级 4-lane INT8 SIMD MAC，INT32 accumulate。
+- 性能优化剩余项：配套上游 32-bit packed K lane 供数、阵列 valid 对齐和写回。
 
 FP16 目标：
 
@@ -232,7 +234,7 @@ FP16 目标：
 16x16 4-lane @500MHz = 1.024 TOPS
 ```
 
-因此 0.5-1 TOPS 目标要求 16x16 阵列配合 PE 内 INT8 SIMD。
+因此 0.5-1 TOPS 目标要求 16x16 阵列配合 PE 内 INT8 SIMD。T7.3/T7.4 已提供 PE 级 2-lane/4-lane 理论 0.512/1.024 TOPS 基础；T7.5 已提供 `TOPS_X1E6`、compute/e2e utilization 和 peak ops/cycle 性能计数口径。端到端高吞吐还取决于后续 packed K lane 供数、结果收集和写回。
 
 ## 4x4 Tile 数据布局
 
@@ -747,6 +749,6 @@ raw = 2.0 GB/s
 | 4x4 真并行 tile | T2.4/T2.5/T2.6 已完成 serializer/writeback 和 4x4 INT8/FP16 golden 测试 | 保持回归 |
 | 多层卷积 | descriptor v1 ABI、AXI-Lite 提交寄存器、controller fetch/decode/next-layer 和 T5.4 INT8 OFM->IFM 串联已具备；T6.2 已有 direct scalar raw IFM on-the-fly im2col；T6.3-T6.5 已有 direct scalar bias、ReLU/ReLU6 和 INT8 quant/saturate；T6.6 已验证 direct scalar 两层 Conv2D E2E；单 tile 内 k_tile loop 和顶层 K-split GEMM golden 已完成，外部 PSUM surface 还未接入 descriptor 流 | 增加外部 PSUM read/write，并把 Conv2D im2col 与后处理接入 tile/descriptor 主线 |
 | AXI burst | T3.1-T3.5 已完成读写通道 INCR burst、4KB 边界切分、AXI perf counters、混合正确性测试和带宽目标报告 | 后续若冲更高 write util，需多 outstanding 或 B response 重叠 |
-| 16x16/8x32 | 阵列模块存在 | 补齐供数、valid 对齐、写回 |
+| 16x16/8x32 | 8x8/16x16 active lane 供数已验证；8x32 阵列级折叠路由和 32-lane 输出顺序已验证；PE 级 INT8 2/4-lane SIMD 已验证 | 补齐 32-bit packed K lane 供数、更大 tile 的 valid 对齐、边界 mask 和顶层写回 |
 | 低功耗 | 行为模块存在但未接入 | 使用 clock enable/BUFGCE/ICG 接入 |
 | SoC 验证 | `run_soc_sim.ps1` 已通过；PicoRV32 配置 NPU 完成 2x2 INT8 GEMM，结果 `19,22,43,50` | 扩展到 descriptor/Conv2D 系统级 smoke |

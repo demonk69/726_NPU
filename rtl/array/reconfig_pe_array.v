@@ -87,7 +87,8 @@ localparam MODE_8x32  = 2'b11;
 // Active row/col counts per shape
 wire [4:0] active_rows = (cfg_shape == MODE_4x4)  ? 5'd4  :
                           (cfg_shape == MODE_8x8)  ? 5'd8  :
-                          5'd16;  // 16x16 and 8x32
+                          (cfg_shape == MODE_8x32) ? 5'd8  :
+                          5'd16;
 
 wire [4:0] active_cols = (cfg_shape == MODE_4x4)  ? 5'd4  :
                           (cfg_shape == MODE_8x8)  ? 5'd8  :
@@ -223,8 +224,9 @@ assign ws_load_row_out = ws_load_row;
 // ---------------------------------------------------------------------------
 wire fold_enable = (cfg_shape == MODE_8x32);
 
-// Capture row7,col15's activation output for fold-through to row8,col0
-wire [DATA_W-1:0] fold_act_from_top;
+// In 8x32 mode the lower half implements logical columns 16..31. Each top
+// physical row r continues horizontally into lower physical row r+8.
+wire [DATA_W-1:0] fold_act_from_top [0:7];
 
 // ---------------------------------------------------------------------------
 // PE instantiation grid (16x16 physical)
@@ -254,31 +256,33 @@ generate
                                                    : w_in[c*DATA_W +: DATA_W];
 
             // ── WS load_w gating: only the current row accepts weight ──
+            wire fold_load_row_match = (r < 8) ? (r == ws_load_row)
+                                               : ((r - 8) == ws_load_row);
             wire pe_load_w = stat_mode ? load_w
-                                       : (load_w && (r == ws_load_row));
+                                       : (load_w &&
+                                          (fold_enable ? fold_load_row_match
+                                                       : (r == ws_load_row)));
 
             // ── Activation input selection ──
             // OS mode: use act_in[r] directly (row skew is provided by act_h
             //          horizontal shift chain and/or upper layer data formatting)
             // WS mode: use cascade-delayed activation (row-to-row propagation)
             wire [DATA_W-1:0] pe_a_in;
-            if (r == 8 && c == 0) begin : fold_a_in
-                // 8x32 fold: Row8,Col0 gets activation from Row7,Col15's output
-                assign pe_a_in = fold_enable ? fold_act_from_top
-                              : stat_mode     ? act_in[r*DATA_W +: DATA_W]
-                                              : act_row_skewed[r];
+            if (r >= 8) begin : fold_a_in
+                assign pe_a_in = fold_enable
+                              ? (stat_mode ? fold_act_from_top[r-8]
+                                           : act_row_skewed[r-8])
+                              : (stat_mode ? act_in[r*DATA_W +: DATA_W]
+                                           : act_row_skewed[r]);
             end else begin : normal_a_in
                 assign pe_a_in = stat_mode ? act_in[r*DATA_W +: DATA_W]
                                            : act_row_skewed[r];
             end
 
-            // ── Partial sum input: bottom half in 8x32 mode has no psum from above ──
+            // ── Partial sum input: 8x32 splits the vertical chain at row8 ──
             wire [ACC_W-1:0] pe_acc_in;
-            if (r >= 8) begin : fold_acc
-                assign pe_acc_in = {ACC_W{1'b0}};
-            end else begin : normal_acc
-                assign pe_acc_in = acc_v[r][c];
-            end
+            assign pe_acc_in = (fold_enable && (r == 8)) ? {ACC_W{1'b0}}
+                                                         : acc_v[r][c];
 
             pe_top #(
                 .DATA_W(DATA_W),
@@ -311,9 +315,8 @@ generate
             end
             assign act_h[r][c+1] = act_reg;
 
-            // Capture fold source: Row 7, Column 15's activation output
-            if (r == 7 && c == 15) begin : fold_src
-                assign fold_act_from_top = act_reg;
+            if (r < 8 && c == PHY_COLS-1) begin : fold_act_src
+                assign fold_act_from_top[r] = act_reg;
             end
 
             // --- Vertical weight shift register (OS mode row skew) ---
@@ -324,7 +327,13 @@ generate
                 else
                     w_v_reg <= w_v[r][c];
             end
-            assign w_v[r+1][c] = w_v_reg;
+            if (r == 7) begin : fold_weight_boundary
+                // Lower 8x16 half is an independent right-half array.
+                assign w_v[r+1][c] = fold_enable ? w_in[c*DATA_W +: DATA_W]
+                                                 : w_v_reg;
+            end else begin : normal_weight_boundary
+                assign w_v[r+1][c] = w_v_reg;
+            end
 
         end  // gen_col
     end  // gen_row

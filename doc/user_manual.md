@@ -1,6 +1,6 @@
 # 使用说明
 
-更新时间：2026-05-01
+更新时间：2026-05-03
 
 本文面向 CPU 侧软件和 testbench。当前实现还处于原型阶段，寄存器直配模式可用于调试；多层卷积建议按 descriptor 模式设计。
 
@@ -8,7 +8,7 @@
 
 可以依赖：
 
-- 单 PE INT8/FP16 MAC。
+- 单 PE INT8/FP16 MAC；INT8 PE 内支持 packed 2/4-lane SIMD，并兼容旧 sign-extended scalar 输入。
 - AXI-Lite 寄存器读写。
 - PPBuf 对 INT8/FP16 数据拆包。
 - 顶层标量 INT8 dot product 兼容路径，可用于 Phase 1 回归。
@@ -30,7 +30,7 @@
 
 不能依赖：
 
-- 16x16/8x32 高吞吐。
+- 16x16/8x32 端到端高吞吐写回；T7.3/T7.4 只完成 PE 级 2/4-lane SIMD，不等于整机 2x/4x 吞吐已验证。
 - 多层卷积自动调度。
 - FP16 OFM 自动转换成下一层 FP16 IFM；这需要后续 post-process/format conversion。
 - INT16。
@@ -83,6 +83,17 @@ NPU 基地址建议：
 | `0x94` | `CONV_DILATION` | `[7:0]=dilation_h, [15:8]=dilation_w` |
 | `0x98` | `BIAS_ADDR` | direct scalar bias vector base，每输出列一个 32-bit word |
 | `0x9C` | `QUANT_CFG` | direct scalar INT8 quant：bit0 enable，bit1 round，`[15:8]` right shift，`[31:16]` signed scale |
+| `0xA0` | `PERF_MAC_OPS_LO` | useful MAC operations low word |
+| `0xA4` | `PERF_MAC_OPS_HI` | useful MAC operations high word |
+| `0xA8` | `PERF_OPS_LO` | useful operations low word，1 MAC = 2 ops |
+| `0xAC` | `PERF_OPS_HI` | useful operations high word |
+| `0xB0` | `PERF_BUSY_CYCLES` | NPU busy cycles |
+| `0xB4` | `PERF_COMPUTE_CYCLES` | compute-active cycles |
+| `0xB8` | `PERF_DMA_CYCLES` | busy cycles not in compute |
+| `0xBC` | `PERF_TOPS_X1E6` | TOPS fixed point，`TOPS * 1,000,000` |
+| `0xC0` | `PERF_COMPUTE_UTIL` | compute utilization，basis points |
+| `0xC4` | `PERF_E2E_UTIL` | end-to-end utilization，basis points |
+| `0xC8` | `PERF_PEAK_OPS_CYC` | peak operations per cycle used by utilization |
 
 `CTRL` 编码：
 
@@ -224,7 +235,7 @@ B(:,j) = W_ADDR + j * K * element_bytes
 C(i,j) = R_ADDR + (i * N + j) * 4
 ```
 
-注意：非 tile mode 保留 Phase 1 标量兼容路径；tile mode 使用下面的 4x4 tile-pack 格式。当前已验证 4x4 INT8/FP16 GEMM，16x16/8x32 高吞吐仍未完成。
+注意：非 tile mode 保留 Phase 1 标量兼容路径；tile mode 使用下面的 4x4 tile-pack 格式。当前已验证 4x4 INT8/FP16 GEMM、8x8/16x16 active lane 供数、阵列级 8x32 折叠路由和 PE 级 INT8 2/4-lane SIMD；更大 tile 的完整结果收集/写回、32-bit packed K lane 供数和端到端 2x/4x 吞吐仍未完成。
 
 ## 4x4 Tile-Pack 约定
 
@@ -566,4 +577,4 @@ OFM_ADDR(i,j)  = OFM_BASE  + (i * N + j) * 4
 powershell -ExecutionPolicy Bypass -File scripts\run_sim.ps1
 ```
 
-同时运行 `tb_npu_scalar_smoke.v`、`tb_dma_read_burst.v`、`tb_dma_write_burst.v`、`tb_dma_burst.v`、`tb_dma_perf.v`、`tb_psum_out_buf.v`、`tb_reconfig_pe_acc_init.v`、`tb_npu_ctrl_ksplit.v`、`tb_npu_ctrl_dataflow_modes.v`、`tb_npu_ctrl_error_status.v`、`tb_npu_tile_ksplit_gemm.v`、`tb_npu_axi_lite_desc.v`、`tb_npu_desc_two_layer.v`、`tb_npu_desc_ofm_chain.v`、`tb_pingpong_buf_vec.v`、`tb_npu_ctrl_tile.v`、`tb_npu_tile_writeback.v`、`tb_npu_tile_gemm.v` 和 `tb_comprehensive.v`。需要临时验证大矩阵功能时，使用 `scripts/run_matmul_case.ps1` 生成并运行 direct scalar matmul case；需要验证 T6.1 DRAM 预展开卷积时，使用 `scripts/run_conv2d_im2col_case.ps1`；需要验证 T6.2 raw IFM on-the-fly im2col 时，使用 `scripts/run_conv2d_otf_case.ps1`；需要验证 T6.3-T6.5 后处理时，加 `-Bias -Activation relu|relu6 -Quant -QuantScale <q> -QuantShift <s> [-QuantRound]`；需要验证 T6.6 两层 Conv2D E2E 时，使用 `scripts/run_conv2d_two_layer_case.ps1`。SoC smoke 使用 `scripts/run_soc_sim.ps1`，默认无 VCD，`-DumpVcd` 可选。T5.5 已补齐 IRQ/error status；T6.1/T6.2 已完成两种 Conv2D im2col golden；T6.3-T6.6 已完成 direct scalar bias、ReLU/ReLU6、INT8 quant/saturate 和两层 Conv2D E2E；当前 tile/descriptor 主线是 OS，direct scalar matmul/Conv2D 回归覆盖 OS 和 WS。下一步进入 descriptor 化卷积或 16x16/8x32 高吞吐阵列。
+同时运行 `tb_pe_top.v`、`tb_npu_scalar_smoke.v`、`tb_dma_read_burst.v`、`tb_dma_write_burst.v`、`tb_dma_burst.v`、`tb_dma_perf.v`、`tb_op_counter_perf.v`、`tb_psum_out_buf.v`、`tb_reconfig_pe_acc_init.v`、`tb_reconfig_pe_8x32.v`、`tb_npu_ctrl_ksplit.v`、`tb_npu_ctrl_dataflow_modes.v`、`tb_npu_ctrl_error_status.v`、`tb_npu_tile_ksplit_gemm.v`、`tb_npu_axi_lite_desc.v`、`tb_npu_desc_two_layer.v`、`tb_npu_desc_ofm_chain.v`、`tb_pingpong_buf_vec.v`、`tb_npu_tile_lane_feed.v`、`tb_npu_ctrl_tile.v`、`tb_npu_tile_writeback.v`、`tb_npu_tile_gemm.v` 和 `tb_comprehensive.v`。需要临时验证大矩阵功能时，使用 `scripts/run_matmul_case.ps1` 生成并运行 direct scalar matmul case；需要验证 T6.1 DRAM 预展开卷积时，使用 `scripts/run_conv2d_im2col_case.ps1`；需要验证 T6.2 raw IFM on-the-fly im2col 时，使用 `scripts/run_conv2d_otf_case.ps1`；需要验证 T6.3-T6.5 后处理时，加 `-Bias -Activation relu|relu6 -Quant -QuantScale <q> -QuantShift <s> [-QuantRound]`；需要验证 T6.6 两层 Conv2D E2E 时，使用 `scripts/run_conv2d_two_layer_case.ps1`。SoC smoke 使用 `scripts/run_soc_sim.ps1`，默认无 VCD，`-DumpVcd` 可选。T5.5 已补齐 IRQ/error status；T6.1/T6.2 已完成两种 Conv2D im2col golden；T6.3-T6.6 已完成 direct scalar bias、ReLU/ReLU6、INT8 quant/saturate 和两层 Conv2D E2E；T7.1-T7.5 已完成宽 lane 供数、阵列级 8x32 路由、PE 级 INT8 2/4-lane SIMD 和 TOPS/util 性能计数器报告；当前 tile/descriptor 主线是 OS，direct scalar matmul/Conv2D 回归覆盖 OS 和 WS。下一步进入 descriptor 化卷积、packed K lane 供数或更大 tile 完整写回。

@@ -16,7 +16,7 @@
 //   OUT_WIDTH  - read data width (PE side, e.g. 16); DATA_W/OUT_WIDTH must be int
 //   THRESHOLD  - how many words DMA must fill before buf_ready asserts
 //   SUBW       - max sub-words per word (4 for INT8; FP16 uses SUBW/2=2)
-//   VEC_LANES  - number of PE lanes returned by rd_vec
+//   VEC_LANES  - maximum number of PE lanes returned by rd_vec
 //
 // fp16_mode port:
 //   0 (INT8): each 32-bit word yields SUBW=4 bytes; rd_data is sign-extended byte
@@ -43,7 +43,8 @@ module pingpong_buf #(
     // ---- Read port (PE side) ----
     input  wire                      rd_en,
     output wire [OUT_WIDTH-1:0]      rd_data,
-    input  wire                      rd_vec_en,     // consume VEC_LANES lanes
+    input  wire                      rd_vec_en,     // consume rd_vec_lanes lanes
+    input  wire [4:0]                rd_vec_lanes,  // valid range: 1..VEC_LANES
     output wire [VEC_LANES*OUT_WIDTH-1:0] rd_vec,
     output wire                      rd_vec_valid,
 
@@ -57,7 +58,7 @@ module pingpong_buf #(
     output wire                      buf_empty,  // no more sub-words to read
     output wire                      buf_full,   // writer's bank full
     output wire                      buf_ready,  // writer's bank has >= THRESHOLD words
-    output wire [$clog2(DEPTH*DATA_W/OUT_WIDTH):0] rd_fill,  // sub-words remaining
+    output wire [$clog2(DEPTH*SUBW):0] rd_fill,  // sub-words remaining
     output wire [$clog2(DEPTH):0]    wr_fill     // words written
 );
 
@@ -68,7 +69,13 @@ localparam ADDR_W    = $clog2(DEPTH);
 localparam FILL_W    = ADDR_W + 1;
 localparam SUBW_W    = $clog2(SUBW);             // 2 bits for SUBW=4 index
 localparam RD_FILL_W = $clog2(DEPTH * SUBW) + 1; // max fill: DEPTH*4 sub-words
-localparam [RD_FILL_W-1:0] VEC_LANES_FILL = VEC_LANES;
+localparam [4:0] VEC_LANES_5 = VEC_LANES;
+
+wire [4:0] rd_vec_lanes_eff =
+    (rd_vec_lanes == 5'd0)      ? VEC_LANES_5 :
+    (rd_vec_lanes > VEC_LANES_5) ? VEC_LANES_5 :
+                                   rd_vec_lanes;
+wire [RD_FILL_W-1:0] rd_vec_lanes_fill = rd_vec_lanes_eff;
 
 // Effective sub-words per word (runtime):
 //   INT8:  eff_subw = 4 (SUBW)
@@ -187,29 +194,19 @@ wire [OUT_WIDTH-1:0] rd_data_raw = fp16_mode ? rd_fp16 : rd_int8;
 // When buffer is empty, output 0 to avoid PE latching stale data
 assign rd_data = buf_empty ? {OUT_WIDTH{1'b0}} : rd_data_raw;
 
-// ---- 4-lane vector preview path ----
-// rd_vec starts at the same rd_ptr/rd_sub as rd_data.  INT8 returns four
-// sign-extended bytes from one 32-bit word when aligned.  FP16 returns four
-// half-words from two consecutive 32-bit words when aligned.
-wire [ADDR_W-1:0] rd_ptr_p1 = rd_ptr + 1'b1;
-wire [ADDR_W-1:0] rd_ptr_p2 = rd_ptr + 2'd2;
-
-wire [DATA_W-1:0] rd_vec_word0 = (rd_sel == 1'b0) ? mem_a[rd_ptr]    : mem_b[rd_ptr];
-wire [DATA_W-1:0] rd_vec_word1 = (rd_sel == 1'b0) ? mem_a[rd_ptr_p1] : mem_b[rd_ptr_p1];
-wire [DATA_W-1:0] rd_vec_word2 = (rd_sel == 1'b0) ? mem_a[rd_ptr_p2] : mem_b[rd_ptr_p2];
-
+// ---- Vector preview path ----
+// rd_vec starts at the same rd_ptr/rd_sub as rd_data.  The port exposes up to
+// VEC_LANES lanes; rd_vec_lanes selects how many lanes a read consumes.
 genvar lane_i;
 generate
     for (lane_i = 0; lane_i < VEC_LANES; lane_i = lane_i + 1) begin : gen_rd_vec
-        wire [3:0] lane_abs = {2'b00, rd_sub} + lane_i[3:0];
-        wire [1:0] int_word_sel = lane_abs[3:2];
-        wire [1:0] fp_word_sel  = lane_abs[3:1];
+        wire [5:0] lane_abs = {4'b0000, rd_sub} + lane_i[5:0];
+        wire [ADDR_W-1:0] int_word_addr = rd_ptr + lane_abs[5:2];
+        wire [ADDR_W-1:0] fp_word_addr  = rd_ptr + lane_abs[5:1];
         wire [1:0] sub_idx      = fp16_mode ? {1'b0, lane_abs[0]} : lane_abs[1:0];
 
-        wire [DATA_W-1:0] int_word = (int_word_sel == 2'd0) ? rd_vec_word0 : rd_vec_word1;
-        wire [DATA_W-1:0] fp_word  = (fp_word_sel  == 2'd0) ? rd_vec_word0 :
-                                      (fp_word_sel  == 2'd1) ? rd_vec_word1 :
-                                                               rd_vec_word2;
+        wire [DATA_W-1:0] int_word = (rd_sel == 1'b0) ? mem_a[int_word_addr] : mem_b[int_word_addr];
+        wire [DATA_W-1:0] fp_word  = (rd_sel == 1'b0) ? mem_a[fp_word_addr]  : mem_b[fp_word_addr];
 
         wire [7:0] vec_byte = (sub_idx == 2'd0) ? int_word[ 7: 0] :
                               (sub_idx == 2'd1) ? int_word[15: 8] :
@@ -226,9 +223,9 @@ generate
     end
 endgenerate
 
-assign rd_vec_valid = (cur_rd_fill >= VEC_LANES_FILL);
+assign rd_vec_valid = (rd_vec_lanes_eff != 5'd0) && (cur_rd_fill >= rd_vec_lanes_fill);
 
-wire [3:0] vec_abs_next = {2'b00, rd_sub} + VEC_LANES;
+wire [5:0] vec_abs_next = {4'b0000, rd_sub} + {1'b0, rd_vec_lanes_eff};
 wire [ADDR_W:0] vec_word_inc = fp16_mode ? (vec_abs_next >> 1)
                                          : (vec_abs_next >> 2);
 wire [SUBW_W-1:0] vec_next_sub = fp16_mode
@@ -258,11 +255,11 @@ always @(posedge clk) begin
         if (rd_sel == 1'b0) begin
             rd_ptr_a  <= rd_ptr_a + vec_word_inc[ADDR_W-1:0];
             rd_sub_a  <= vec_next_sub;
-            rd_fill_a <= rd_fill_a - VEC_LANES_FILL;
+            rd_fill_a <= rd_fill_a - rd_vec_lanes_fill;
         end else begin
             rd_ptr_b  <= rd_ptr_b + vec_word_inc[ADDR_W-1:0];
             rd_sub_b  <= vec_next_sub;
-            rd_fill_b <= rd_fill_b - VEC_LANES_FILL;
+            rd_fill_b <= rd_fill_b - rd_vec_lanes_fill;
         end
     end else if (do_read) begin
         if (rd_sel == 1'b0) begin

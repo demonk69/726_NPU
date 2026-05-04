@@ -16,6 +16,7 @@ module tb_pe_top;
 parameter DATA_W = 16;
 parameter ACC_W  = 32;
 parameter CLK_PERIOD = 10; // 100 MHz
+localparam SIMD4_DATA_W = 32;
 
 // ---------------------------------------------------------------------------
 // DUT ports
@@ -35,6 +36,21 @@ reg  [ACC_W-1:0]  acc_in;
 reg  [ACC_W-1:0]  acc_init;
 wire [ACC_W-1:0]  acc_out;
 wire              valid_out;
+
+reg                    rst_n4;
+reg                    mode4;
+reg                    stat_mode4;
+reg                    en4;
+reg                    flush4;
+reg                    load_w4;
+reg                    swap_w4;
+reg                    acc_init_en4;
+reg  [SIMD4_DATA_W-1:0] w4_in;
+reg  [SIMD4_DATA_W-1:0] a4_in;
+reg  [ACC_W-1:0]       acc4_in;
+reg  [ACC_W-1:0]       acc4_init;
+wire [ACC_W-1:0]       acc4_out;
+wire                   valid4_out;
 
 // ---------------------------------------------------------------------------
 // DUT instantiation
@@ -60,6 +76,28 @@ pe_top #(
     .valid_out(valid_out)
 );
 
+pe_top #(
+    .DATA_W(SIMD4_DATA_W),
+    .ACC_W (ACC_W),
+    .INT8_SIMD_LANES(4)
+) u_pe_simd4 (
+    .clk      (clk),
+    .rst_n    (rst_n4),
+    .mode     (mode4),
+    .stat_mode(stat_mode4),
+    .en       (en4),
+    .flush    (flush4),
+    .load_w   (load_w4),
+    .swap_w   (swap_w4),
+    .acc_init_en(acc_init_en4),
+    .w_in     (w4_in),
+    .a_in     (a4_in),
+    .acc_in   (acc4_in),
+    .acc_init (acc4_init),
+    .acc_out  (acc4_out),
+    .valid_out(valid4_out)
+);
+
 // ---------------------------------------------------------------------------
 // Clock
 // ---------------------------------------------------------------------------
@@ -76,6 +114,23 @@ begin
     mode = 0; stat_mode = 0;
     repeat(4) @(posedge clk);
     rst_n = 1;
+    @(posedge clk);
+end
+endtask
+
+task init_dut4_signals;
+begin
+    rst_n4 = 0; en4 = 0; flush4 = 0; load_w4 = 0; swap_w4 = 0; acc_init_en4 = 0;
+    w4_in = 0; a4_in = 0; acc4_in = 0; acc4_init = 0;
+    mode4 = 0; stat_mode4 = 0;
+end
+endtask
+
+task reset_dut4;
+begin
+    init_dut4_signals;
+    repeat(4) @(posedge clk);
+    rst_n4 = 1;
     @(posedge clk);
 end
 endtask
@@ -135,6 +190,41 @@ begin
 end
 endtask
 
+task drive_beat4;
+    input [SIMD4_DATA_W-1:0] w;
+    input [SIMD4_DATA_W-1:0] a;
+    input [ACC_W-1:0]        acc;
+    input                    fl;
+begin
+    @(posedge clk);
+    #1;
+    w4_in   = w;
+    a4_in   = a;
+    acc4_in = acc;
+    flush4  = fl;
+    load_w4 = 0;
+    en4     = 1;
+end
+endtask
+
+task drive_ws_beat4;
+    input [SIMD4_DATA_W-1:0] a;
+    input [ACC_W-1:0]        acc;
+begin
+    @(posedge clk);
+    #1;
+    w4_in   = 32'd0;
+    a4_in   = a;
+    acc4_in = acc;
+    flush4  = 0;
+    load_w4 = 0;
+    en4     = 1;
+    @(posedge clk);
+    #1;
+    en4     = 0;
+end
+endtask
+
 // ---------------------------------------------------------------------------
 // 检查与记录逻辑
 // ---------------------------------------------------------------------------
@@ -172,10 +262,41 @@ endtask
 integer i, k;
 reg signed [7:0]  iw, ia;
 
+function [15:0] pack_s8x2;
+    input integer hi;
+    input integer lo;
+    reg [7:0] hi_b;
+    reg [7:0] lo_b;
+begin
+    hi_b = hi[7:0];
+    lo_b = lo[7:0];
+    pack_s8x2 = {hi_b, lo_b};
+end
+endfunction
+
+function [31:0] pack_s8x4;
+    input integer l3;
+    input integer l2;
+    input integer l1;
+    input integer l0;
+    reg [7:0] l3_b;
+    reg [7:0] l2_b;
+    reg [7:0] l1_b;
+    reg [7:0] l0_b;
+begin
+    l3_b = l3[7:0];
+    l2_b = l2[7:0];
+    l1_b = l1[7:0];
+    l0_b = l0[7:0];
+    pack_s8x4 = {l3_b, l2_b, l1_b, l0_b};
+end
+endfunction
+
 initial begin
     $dumpfile("tb_pe_top.vcd");
     $dumpvars(0, tb_pe_top);
 
+    init_dut4_signals;
     reset_dut;
 
     // =======================================================================
@@ -624,6 +745,130 @@ initial begin
     repeat(3) @(posedge clk); #1;
     $display("[TEST 17 RESULT] Info: init=10, w=3, a=4");
     check_result(acc_out, 32'd22, 17);
+
+    // =======================================================================
+    // Test 18: INT8 2-lane SIMD OS
+    // Beat0: {w1,w0}={4,3},   {a1,a0}={5,2} => 3*2 + 4*5 = 26
+    // Beat1: {w1,w0}={-2,-1}, {a1,a0}={7,6} => -1*6 + -2*7 = -20
+    // Expected total: 6
+    // =======================================================================
+    $display("\n>>> Starting Test 18: INT8 2-lane SIMD OS <<<");
+    reset_dut;
+    mode      = 0;
+    stat_mode = 1;
+
+    drive_beat(pack_s8x2(4, 3), pack_s8x2(5, 2), 32'd0, 1'b0);
+    drive_beat(pack_s8x2(-2, -1), pack_s8x2(7, 6), 32'd0, 1'b0);
+    @(posedge clk); #1; en = 0; flush = 0;
+    @(posedge clk); #1; en = 0; flush = 0;
+    drive_beat(16'd0, 16'd0, 32'd0, 1'b1);
+    @(posedge clk); #1; en = 0; flush = 0;
+    repeat(3) @(posedge clk); #1;
+    $display("[TEST 18 RESULT] Info: packed INT8 OS two-lane accumulation");
+    check_result(acc_out, 32'd6, 18);
+
+    // =======================================================================
+    // Test 19: INT8 2-lane SIMD WS with latched packed weight
+    // Weight {w1,w0}={4,3}; activations {5,2} then {-2,1}
+    // Expected: (3*2 + 4*5) + (3*1 + 4*-2) = 21
+    // =======================================================================
+    $display("\n>>> Starting Test 19: INT8 2-lane SIMD WS <<<");
+    reset_dut;
+    mode      = 0;
+    stat_mode = 0;
+
+    @(posedge clk); #1;
+    w_in = pack_s8x2(4, 3); a_in = pack_s8x2(5, 2); acc_in = 32'd0;
+    flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1; en = 0; load_w = 0;
+    drive_ws_beat(pack_s8x2(-2, 1), 32'd0);
+    @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
+    @(posedge clk); #1; flush = 0; en = 0;
+    repeat(3) @(posedge clk); #1;
+    $display("[TEST 19 RESULT] Info: packed INT8 WS two-lane weight latch");
+    check_result(acc_out, 32'd21, 19);
+
+    // =======================================================================
+    // Test 20: Legacy sign-extended INT8 scalar compatibility
+    // Old feeders present -1 as 16'hFFFF. This must remain one MAC, not two.
+    // =======================================================================
+    $display("\n>>> Starting Test 20: INT8 legacy sign-extended scalar compatibility <<<");
+    reset_dut;
+    mode      = 0;
+    stat_mode = 1;
+
+    drive_beat(16'hFFFF, 16'hFFFF, 32'd0, 1'b0);
+    @(posedge clk); #1; en = 0; flush = 0;
+    @(posedge clk); #1; en = 0; flush = 0;
+    drive_beat(16'd0, 16'd0, 32'd0, 1'b1);
+    @(posedge clk); #1; en = 0; flush = 0;
+    repeat(3) @(posedge clk); #1;
+    $display("[TEST 20 RESULT] Info: sign-extended -1 * -1 remains scalar");
+    check_result(acc_out, 32'd1, 20);
+
+    // =======================================================================
+    // Test 21: INT8 4-lane SIMD OS
+    // Beat0: {w3,w2,w1,w0}={5,-4,3,2}, {a3,a2,a1,a0}={-1,6,4,7}
+    //        2*7 + 3*4 + -4*6 + 5*-1 = -3
+    // Beat1: {w3,w2,w1,w0}={1,2,-3,4}, {a3,a2,a1,a0}={-5,6,7,-8}
+    //        4*-8 + -3*7 + 2*6 + 1*-5 = -46
+    // Expected total: -49
+    // =======================================================================
+    $display("\n>>> Starting Test 21: INT8 4-lane SIMD OS <<<");
+    reset_dut4;
+    mode4      = 0;
+    stat_mode4 = 1;
+
+    drive_beat4(pack_s8x4(5, -4, 3, 2), pack_s8x4(-1, 6, 4, 7), 32'd0, 1'b0);
+    drive_beat4(pack_s8x4(1, 2, -3, 4), pack_s8x4(-5, 6, 7, -8), 32'd0, 1'b0);
+    @(posedge clk); #1; en4 = 0; flush4 = 0;
+    @(posedge clk); #1; en4 = 0; flush4 = 0;
+    drive_beat4(32'd0, 32'd0, 32'd0, 1'b1);
+    @(posedge clk); #1; en4 = 0; flush4 = 0;
+    repeat(3) @(posedge clk); #1;
+    $display("[TEST 21 RESULT] Info: packed INT8 OS four-lane accumulation");
+    check_result(acc4_out, 32'hFFFFFFCF, 21);
+
+    // =======================================================================
+    // Test 22: INT8 4-lane SIMD WS with latched packed weight
+    // Weight {w3,w2,w1,w0}={4,-3,2,1}
+    // Activation0 {5,6,-7,8}  => -4
+    // Activation1 {-2,3,4,-5} => -14
+    // Expected total: -18
+    // =======================================================================
+    $display("\n>>> Starting Test 22: INT8 4-lane SIMD WS <<<");
+    reset_dut4;
+    mode4      = 0;
+    stat_mode4 = 0;
+
+    @(posedge clk); #1;
+    w4_in = pack_s8x4(4, -3, 2, 1); a4_in = pack_s8x4(5, 6, -7, 8); acc4_in = 32'd0;
+    flush4 = 0; load_w4 = 1; en4 = 1;
+    @(posedge clk); #1; en4 = 0; load_w4 = 0;
+    drive_ws_beat4(pack_s8x4(-2, 3, 4, -5), 32'd0);
+    @(posedge clk); #1; w4_in = 32'd0; a4_in = 32'd0; flush4 = 1; en4 = 1;
+    @(posedge clk); #1; flush4 = 0; en4 = 0;
+    repeat(3) @(posedge clk); #1;
+    $display("[TEST 22 RESULT] Info: packed INT8 WS four-lane weight latch");
+    check_result(acc4_out, 32'hFFFFFFEE, 22);
+
+    // =======================================================================
+    // Test 23: Legacy full-width sign-extended INT8 scalar compatibility
+    // A 32-bit SIMD PE must still treat sign-extended -1 as one scalar MAC.
+    // =======================================================================
+    $display("\n>>> Starting Test 23: INT8 4-lane legacy scalar compatibility <<<");
+    reset_dut4;
+    mode4      = 0;
+    stat_mode4 = 1;
+
+    drive_beat4(32'hFFFFFFFF, 32'hFFFFFFFF, 32'd0, 1'b0);
+    @(posedge clk); #1; en4 = 0; flush4 = 0;
+    @(posedge clk); #1; en4 = 0; flush4 = 0;
+    drive_beat4(32'd0, 32'd0, 32'd0, 1'b1);
+    @(posedge clk); #1; en4 = 0; flush4 = 0;
+    repeat(3) @(posedge clk); #1;
+    $display("[TEST 23 RESULT] Info: full-width sign-extended -1 * -1 remains scalar");
+    check_result(acc4_out, 32'd1, 23);
 
     // =======================================================================
     // Summary

@@ -14,6 +14,9 @@
 //                    swap_w atomically swaps active/prefetch registers.
 //           OS mode: weight streams through like activation.
 //           FP16/INT8 support with mixed-precision FP32 accumulation.
+//           INT8 mode supports packed 2-lane SIMD with DATA_W=16 and
+//           packed 4-lane SIMD with DATA_W=32.
+//           Legacy sign-extended scalar INT8 inputs are treated as 1-lane.
 //           acc_init_en loads the internal accumulator from PSUM/OUT_BUF before
 //           a K-split continuation tile starts.
 // =============================================================================
@@ -22,7 +25,8 @@
 
 module pe_top #(
     parameter DATA_W = 16,   // max data width (FP16)
-    parameter ACC_W  = 32    // accumulator width
+    parameter ACC_W  = 32,   // accumulator width
+    parameter INT8_SIMD_LANES = (DATA_W >= 32) ? 4 : 2
 )(
     input  wire              clk,
     input  wire              rst_n,
@@ -133,11 +137,60 @@ reg               s1_stat;
 reg               s1_mode;
 reg  [ACC_W-1:0]  s1_acc_in;
 
-// INT8: signed 8-bit multiply -> 16-bit sign-extended to ACC_W
-wire signed [7:0] int8_w = s0_w[7:0];
-wire signed [7:0] int8_a = s0_a[7:0];
-wire signed [15:0] int8_mul_16 = $signed(int8_w) * $signed(int8_a);
-wire [ACC_W-1:0] int8_prod = {{(ACC_W-16){int8_mul_16[15]}}, int8_mul_16};
+// INT8: DATA_W carries up to four signed INT8 lanes in packed SIMD form.
+// Existing scalar feeders sign-extend one INT8 value to 16 bits; detect that
+// legacy encoding across DATA_W and keep it equivalent to a single-lane MAC.
+wire signed [7:0] int8_w0 = s0_w[7:0];
+wire signed [7:0] int8_a0 = s0_a[7:0];
+wire signed [7:0] int8_w1 = s0_w[15:8];
+wire signed [7:0] int8_a1 = s0_a[15:8];
+wire signed [7:0] int8_w2;
+wire signed [7:0] int8_a2;
+wire signed [7:0] int8_w3;
+wire signed [7:0] int8_a3;
+
+generate
+    if (DATA_W >= 24) begin : gen_int8_lane2
+        assign int8_w2 = s0_w[23:16];
+        assign int8_a2 = s0_a[23:16];
+    end else begin : gen_int8_lane2_zero
+        assign int8_w2 = 8'sd0;
+        assign int8_a2 = 8'sd0;
+    end
+
+    if (DATA_W >= 32) begin : gen_int8_lane3
+        assign int8_w3 = s0_w[31:24];
+        assign int8_a3 = s0_a[31:24];
+    end else begin : gen_int8_lane3_zero
+        assign int8_w3 = 8'sd0;
+        assign int8_a3 = 8'sd0;
+    end
+endgenerate
+
+wire signed [15:0] int8_mul0_16 = $signed(int8_w0) * $signed(int8_a0);
+wire signed [15:0] int8_mul1_16 = $signed(int8_w1) * $signed(int8_a1);
+wire signed [15:0] int8_mul2_16 = $signed(int8_w2) * $signed(int8_a2);
+wire signed [15:0] int8_mul3_16 = $signed(int8_w3) * $signed(int8_a3);
+
+wire int8_lane1_cfg_en = (INT8_SIMD_LANES >= 2) && (DATA_W >= 16);
+wire int8_lane2_cfg_en = (INT8_SIMD_LANES >= 3) && (DATA_W >= 24);
+wire int8_lane3_cfg_en = (INT8_SIMD_LANES >= 4) && (DATA_W >= 32);
+wire int8_w_scalar_se  = (s0_w[DATA_W-1:8] == {(DATA_W-8){s0_w[7]}});
+wire int8_a_scalar_se  = (s0_a[DATA_W-1:8] == {(DATA_W-8){s0_a[7]}});
+wire int8_scalar_se    = int8_w_scalar_se && int8_a_scalar_se;
+wire int8_lane1_en     = int8_lane1_cfg_en && !int8_scalar_se;
+wire int8_lane2_en     = int8_lane2_cfg_en && !int8_scalar_se;
+wire int8_lane3_en     = int8_lane3_cfg_en && !int8_scalar_se;
+
+wire signed [17:0] int8_mul0_ext = {{2{int8_mul0_16[15]}}, int8_mul0_16};
+wire signed [17:0] int8_mul1_ext = {{2{int8_mul1_16[15]}}, int8_mul1_16};
+wire signed [17:0] int8_mul2_ext = {{2{int8_mul2_16[15]}}, int8_mul2_16};
+wire signed [17:0] int8_mul3_ext = {{2{int8_mul3_16[15]}}, int8_mul3_16};
+wire signed [17:0] int8_sum_18   = int8_mul0_ext +
+                                   (int8_lane1_en ? int8_mul1_ext : 18'sd0) +
+                                   (int8_lane2_en ? int8_mul2_ext : 18'sd0) +
+                                   (int8_lane3_en ? int8_mul3_ext : 18'sd0);
+wire [ACC_W-1:0] int8_prod = {{(ACC_W-18){int8_sum_18[17]}}, int8_sum_18};
 
 // FP16: instantiate fp16_mul (combinational)
 wire [ACC_W-1:0] fp16_mul_out;
@@ -145,8 +198,8 @@ fp16_mul u_fp16_mul (
     .clk     (clk),
     .rst_n   (rst_n),
     .en      (en),
-    .a       (s0_w),
-    .b       (s0_a),
+    .a       (s0_w[15:0]),
+    .b       (s0_a[15:0]),
     .result  (fp16_mul_out)
 );
 

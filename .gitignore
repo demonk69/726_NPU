@@ -8,6 +8,12 @@
 sim/npu_sim
 sim/tb_fp16_e2e
 sim/tb_multi_rc
+sim/classifier_sim
+
+# SoC firmware build intermediates
+sim/soc_test.o
+sim/soc_test.elf
+sim/soc_test.bin
 
 # Generated console captures
 sim/*_out.txt

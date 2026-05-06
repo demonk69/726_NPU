@@ -516,6 +516,95 @@ scripts/run_regression.ps1       -> TOTAL: 2330 PASS, 0 FAIL
 - layer1 直接把 layer0 `R_ADDR` 作为 `A_ADDR`，验证层间量化输出能被下一层消费。
 - testbench 同时检查 layer0 中间 OFM 和 layer1 最终 golden。
 
+### Image Conv2D 可视化实验
+
+这个实验用 `pic/test1_128.png` 做真实图像输入，复用 T6.2 direct scalar on-the-fly Conv2D im2col 路径跑一个 3x3 Laplacian 边缘检测，并把 NPU 输出重新渲染为 PNG。它不是新的 RTL datapath，而是把现有 Conv2D 仿真包装成可视化检查流程。
+
+默认命令：
+
+```powershell
+$env:Path = 'E:\iverilog\bin;' + $env:Path
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_image_conv_case.ps1
+```
+
+128x128 默认用例会在 direct scalar 路径上检查 16384 个输出点，仿真可能需要几分钟；调试脚本或环境时可以先用 `-Resize 16` 或 `-Resize 32` 快速 smoke。
+
+当前 `pic/test1_128.png` 的默认结果：
+
+```text
+Generated image Conv2D case: E:\NPU_prj\tb\image\image_laplacian_test1_128
+image=E:\NPU_prj\pic\test1_128.png size=128x128 kernel=laplacian
+GEMM M=16384 K=9 N=1
+ALL 16384 CHECKS PASSED
+mismatches=0 max_abs_diff=0
+```
+
+输出文件：
+
+```text
+tb/image/image_laplacian_test1_128/input_gray.png   # 输入灰度图
+tb/image/image_laplacian_test1_128/golden.png       # 软件 golden 边缘图
+tb/image/image_laplacian_test1_128/npu.png          # NPU 仿真输出边缘图
+tb/image/image_laplacian_test1_128/diff.png         # golden 与 NPU raw INT32 差异图
+tb/image/image_laplacian_test1_128/comparison.png   # 四图拼接，便于直接查看
+```
+
+实现流程：
+
+1. `scripts/run_image_conv_case.ps1` 调用 `tb/image/gen_image_conv_data.py` 读取 PNG 并转成灰度。
+2. 每个像素映射成 signed INT8：`npu_ifm = grayscale - 128`，所以 0 变成 -128，255 变成 127。
+3. 默认卷积核是 Laplacian：
+
+```text
+ 0 -1  0
+-1  4 -1
+ 0 -1  0
+```
+
+4. 生成 T6.2 on-the-fly Conv2D case：DRAM 中保存 raw NCHW IFM 和 `W_col`，`CTRL[8]` 启用 DMA on-the-fly im2col。
+5. 对 128x128 单通道图像，Conv2D 映射到 GEMM：
+
+```text
+M = OH * OW = 128 * 128 = 16384
+K = Cin * KH * KW = 1 * 3 * 3 = 9
+N = Cout = 1
+```
+
+6. 脚本用 `tb/matmul/tb_matmul_os.v` 编译仿真，并额外定义：
+
+```text
+QUIET_CHECK       # 不逐像素打印 16384 行结果
+DUMP_RESULT_HEX  # 仿真结束写出 npu_output.hex
+```
+
+7. 仿真完成后，Python 读取 `expected.hex` 和 `npu_output.hex`，用同一幅度归一化生成 `golden.png` 和 `npu.png`，并生成 `diff.png`。
+
+判读方法：
+
+- `comparison.png` 中 `golden` 和 `npu` 视觉一致，说明卷积结果一致。
+- `diff.png` 全黑且 `mismatches=0`，说明 raw INT32 输出逐点完全一致。
+- 如果 `diff.png` 出现整体平移，优先查 stride/pad/im2col 坐标。
+- 如果每 4 个像素或每几列出现周期性亮点，优先查 INT8 packing 或 32-bit 对齐。
+- 如果形状正确但亮度比例不对，优先查 signed/unsigned 映射或后处理量化。
+
+可选参数：
+
+```powershell
+# Sobel X 边缘
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_image_conv_case.ps1 `
+  -Kernel sobel_x -Name image_sobelx_test1_128
+
+# 先缩小到 32x32，快速 smoke
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_image_conv_case.ps1 `
+  -Resize 32 -Name image_laplacian_smoke32
+
+# 指定其他图片
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_image_conv_case.ps1 `
+  -ImagePath pic\your_image.png -Kernel laplacian
+```
+
+当前支持的 `-Kernel`：`laplacian`、`sobel_x`、`sobel_y`、`sharpen`。输出图像用于可视化，功能正确性仍以 `ALL ... CHECKS PASSED` 和 `mismatches=0` 为准。
+
 ### Top K-split GEMM golden
 
 ```powershell

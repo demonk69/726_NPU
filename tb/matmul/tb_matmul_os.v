@@ -359,6 +359,8 @@ task do_matmul_test;
     input [31:0] timeout;
     input is_fp16;
     integer idx;
+    integer dump_idx;
+    integer dump_fd;
     reg [31:0] exp_val;
     begin
         // Configure NPU
@@ -383,21 +385,25 @@ task do_matmul_test;
             axi_write(REG_QUANT_CFG, `QUANT_CFG);
         end
 
+        `ifndef QUIET_CHECK
         // Debug: verify register writes took effect
         axi_read(REG_M_DIM, rdata_tmp); $display("    M_DIM readback = %0d", rdata_tmp);
         axi_read(REG_N_DIM, rdata_tmp); $display("    N_DIM readback = %0d", rdata_tmp);
         axi_read(REG_K_DIM, rdata_tmp); $display("    K_DIM readback = %0d", rdata_tmp);
+        `endif
 
         axi_write(REG_CTRL, ctrl_val);
 
         // Wait for completion
         wait_done(timeout);
 
+        `ifndef QUIET_CHECK
         // Debug: print NPU state
         $display("    NPU ctrl state=%0d, tile_i=%0d, tile_j=%0d",
                  u_npu.u_ctrl.state, u_npu.u_ctrl.tile_i, u_npu.u_ctrl.tile_j);
         $display("    DMA state=%0d, r_pending=%0d",
                  u_npu.u_dma.dma_state, u_npu.u_dma.r_pending);
+        `endif
 
         // Check all M×N results
         $display("    Checking %0dx%0d results...", m_dim, n_dim);
@@ -406,8 +412,10 @@ task do_matmul_test;
                 idx = i * n_dim + j;
                 got_val = dram[(r_addr >> 2) + idx];
                 exp_val = expected[idx];
+                `ifndef QUIET_CHECK
                 $display("    C[%0d][%0d]: addr=0x%08h got=0x%08h exp=0x%08h",
                          i, j, r_addr + idx * 4, got_val, exp_val);
+                `endif
 
                 if (is_fp16) begin
                     if (fp32_close(got_val, exp_val)) begin
@@ -429,6 +437,18 @@ task do_matmul_test;
                 end
             end
         end
+        `ifdef DUMP_RESULT_HEX
+        dump_fd = $fopen("npu_output.hex", "w");
+        if (dump_fd == 0) begin
+            $display("    [FAIL] could not open npu_output.hex for writing");
+            fail_cnt = fail_cnt + 1;
+        end else begin
+            for (dump_idx = 0; dump_idx < m_dim * n_dim; dump_idx = dump_idx + 1)
+                $fdisplay(dump_fd, "%08h", dram[(r_addr >> 2) + dump_idx]);
+            $fclose(dump_fd);
+            $display("    [DUMP] wrote npu_output.hex (%0d words)", m_dim * n_dim);
+        end
+        `endif
         $display("    Results: %0d pass, %0d fail", pass_cnt, fail_cnt);
     end
 endtask

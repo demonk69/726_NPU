@@ -240,3 +240,34 @@ R = [10, 2, 8, 2, 9, 0, 13, 0]
 ```
 
 这说明“小 `.pth` + 现有参考 CPU + 现有 NPU 电路”已经可以完成一个真实 Conv/ReLU 推理 smoke。RepOpt VGG 不能跑通的原因仍然是模型资产和中间 buffer 规模远超当前默认 DRAM，而不是 CPU 无法配置 NPU。
+
+## 三层小模型 smoke 状态
+
+已新增 3 层 `.pth` 小模型 SoC 闭环：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_pth_multilayer_soc.ps1
+```
+
+模型结构：
+
+```text
+Conv3x3(1->1) + ReLU
+CPU repack: row-major int32 OFM -> NCHW int8 IFM
+Conv1x1(1->2) + ReLU
+CPU repack: row-major int32 OFM -> NCHW int8 IFM
+Conv1x1(2->1) + ReLU
+```
+
+已确认仿真结果：
+
+```text
+[PASS] PTH multilayer Conv SoC test PASSED!
+Cycles: 1403
+R = [28, 22, 25, 37]
+```
+
+这个用例比单层 tiny smoke 多验证了两件事：
+
+- 参考 CPU 可以连续调度多个 `.pth` 转换出来的 NPU Conv/ReLU 层。
+- 层间必须由 CPU 把 NPU row-major int32 OFM 重新打包成下一层 Conv 所需的 NCHW int8 IFM。

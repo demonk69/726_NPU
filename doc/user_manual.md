@@ -14,6 +14,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_pth_tiny_conv_so
 
 该入口自动生成 tiny quantized `.pth`，转换为 NPU 权重/DRAM image，并由参考 CPU 固件调度 NPU 执行 `Conv2D + ReLU`。
 
+三层小模型闭环入口：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_pth_multilayer_soc.ps1
+```
+
+该入口额外验证参考 CPU 连续调度多个 NPU Conv/ReLU 层，并在层间执行 NPU 输出到下一层 NCHW int8 输入的 repack。
+
 ## 当前可用能力
 
 可以依赖：

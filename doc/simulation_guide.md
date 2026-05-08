@@ -997,6 +997,22 @@ R = [10, 2, 8, 2, 9, 0, 13, 0]
 
 用途：验证 `.pth -> NPU assets -> DRAM image -> RV32I firmware -> CPU MMIO 调度 -> NPU Conv2D/ReLU -> DRAM result` 的最小闭环。
 
+当前 3 层小模型 `.pth` SoC smoke：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_pth_multilayer_soc.ps1
+```
+
+当前结果：
+
+```text
+[PASS] PTH multilayer Conv SoC test PASSED!
+Cycles: 1403
+R = [28, 22, 25, 37]
+```
+
+用途：验证参考 CPU 连续调度 3 个 `.pth` 转换出来的 NPU Conv/ReLU 层，并在层间执行 `row-major int32 OFM -> NCHW int8 IFM` repack。
+
 快速 smoke：
 
 ```powershell

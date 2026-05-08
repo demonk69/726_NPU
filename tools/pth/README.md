@@ -108,3 +108,31 @@ This proves the small end-to-end path:
 ```text
 .pth -> host converter -> DRAM assets + CPU firmware -> CPU MMIO schedule -> NPU Conv2D/ReLU -> CPU-visible result
 ```
+
+## 3-Layer Small Model Smoke
+
+For a slightly more realistic CPU/NPU split, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_pth_multilayer_soc.ps1
+```
+
+This generates and runs:
+
+```text
+Conv3x3(1->1) + ReLU
+CPU repack: row-major int32 OFM -> NCHW int8 IFM
+Conv1x1(1->2) + ReLU
+CPU repack: row-major int32 OFM -> NCHW int8 IFM
+Conv1x1(2->1) + ReLU
+```
+
+Current passing result:
+
+```text
+[PASS] PTH multilayer Conv SoC test PASSED!
+R = [28, 22, 25, 37]
+```
+
+This smoke covers multi-layer CPU scheduling and the required layer-to-layer
+CPU repack step, while staying inside the default SoC DRAM.

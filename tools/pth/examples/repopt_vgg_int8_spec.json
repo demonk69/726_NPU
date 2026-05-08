@@ -1,0 +1,142 @@
+{
+  "name": "cifar10_repopt_vgglike_int8_v1",
+  "input": {
+    "shape": [1, 3, 32, 32],
+    "dtype": "int8",
+    "layout": "NCHW",
+    "scale_key": "quant.scale",
+    "zero_point_key": "quant.zero_point",
+    "source_preprocess": "CIFAR10 ToTensor then Normalize(mean=(0.4914,0.4822,0.4465), std=(0.2023,0.1994,0.2010)), then QuantStub qint8"
+  },
+  "layers": [
+    {
+      "name": "stage1_0_conv",
+      "op": "conv2d",
+      "weight": "model.stage1.0.conv.weight",
+      "bias": "model.stage1.0.conv.bias",
+      "stride": [1, 1],
+      "padding": [1, 1],
+      "dilation": [1, 1],
+      "activation": "relu"
+    },
+    {
+      "name": "stage1_1_conv",
+      "op": "conv2d",
+      "weight": "model.stage1.1.conv.weight",
+      "bias": "model.stage1.1.conv.bias",
+      "stride": [1, 1],
+      "padding": [1, 1],
+      "dilation": [1, 1],
+      "activation": "relu"
+    },
+    {
+      "name": "stage1_pool",
+      "op": "maxpool2d",
+      "kernel": [2, 2],
+      "stride": [2, 2],
+      "padding": [0, 0]
+    },
+    {
+      "name": "stage2_0_conv",
+      "op": "conv2d",
+      "weight": "model.stage2.0.conv.weight",
+      "bias": "model.stage2.0.conv.bias",
+      "stride": [1, 1],
+      "padding": [1, 1],
+      "dilation": [1, 1],
+      "activation": "relu"
+    },
+    {
+      "name": "stage2_1_conv",
+      "op": "conv2d",
+      "weight": "model.stage2.1.conv.weight",
+      "bias": "model.stage2.1.conv.bias",
+      "stride": [1, 1],
+      "padding": [1, 1],
+      "dilation": [1, 1],
+      "activation": "relu"
+    },
+    {
+      "name": "stage2_pool",
+      "op": "maxpool2d",
+      "kernel": [2, 2],
+      "stride": [2, 2],
+      "padding": [0, 0]
+    },
+    {
+      "name": "stage3_0_conv",
+      "op": "conv2d",
+      "weight": "model.stage3.0.conv.weight",
+      "bias": "model.stage3.0.conv.bias",
+      "stride": [1, 1],
+      "padding": [1, 1],
+      "dilation": [1, 1],
+      "activation": "relu"
+    },
+    {
+      "name": "stage3_1_conv",
+      "op": "conv2d",
+      "weight": "model.stage3.1.conv.weight",
+      "bias": "model.stage3.1.conv.bias",
+      "stride": [1, 1],
+      "padding": [1, 1],
+      "dilation": [1, 1],
+      "activation": "relu"
+    },
+    {
+      "name": "stage3_2_conv",
+      "op": "conv2d",
+      "weight": "model.stage3.2.conv.weight",
+      "bias": "model.stage3.2.conv.bias",
+      "stride": [1, 1],
+      "padding": [1, 1],
+      "dilation": [1, 1],
+      "activation": "relu"
+    },
+    {
+      "name": "stage3_pool",
+      "op": "maxpool2d",
+      "kernel": [2, 2],
+      "stride": [2, 2],
+      "padding": [0, 0]
+    },
+    {
+      "name": "stage4_0_conv",
+      "op": "conv2d",
+      "weight": "model.stage4.0.conv.weight",
+      "bias": "model.stage4.0.conv.bias",
+      "stride": [1, 1],
+      "padding": [1, 1],
+      "dilation": [1, 1],
+      "activation": "relu"
+    },
+    {
+      "name": "stage4_1_conv",
+      "op": "conv2d",
+      "weight": "model.stage4.1.conv.weight",
+      "bias": "model.stage4.1.conv.bias",
+      "stride": [1, 1],
+      "padding": [1, 1],
+      "dilation": [1, 1],
+      "activation": "relu"
+    },
+    {
+      "name": "avgpool",
+      "op": "adaptive_avgpool2d",
+      "output_size": [1, 1],
+      "note": "CPU V1 op; NPU has no pooling datapath"
+    },
+    {
+      "name": "flatten",
+      "op": "flatten",
+      "start_dim": 1
+    },
+    {
+      "name": "classifier",
+      "op": "linear",
+      "out_features": 10,
+      "weight": "model.classifier._packed_params._packed_params",
+      "note": "CPU V1 op; classifier is quantized packed params in the PyTorch checkpoint"
+    }
+  ]
+}

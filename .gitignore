@@ -25,3 +25,7 @@ soc_out*.txt
 # Python cache
 __pycache__/
 *.pyc
+
+# Local model/checkpoint inputs and generated conversion probes
+/.06_RepOpt_VGG/
+/sim/pth_*/

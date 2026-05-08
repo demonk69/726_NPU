@@ -4,6 +4,16 @@
 
 本文面向 CPU 侧软件和 testbench。当前实现还处于原型阶段，寄存器直配模式可用于调试；多层卷积建议按 descriptor 模式设计。
 
+`.pth` 推理原型的模型子集、数据布局和 CPU/NPU 分工见 [pth_inference_subset.md](pth_inference_subset.md)。该路径当前定义为 host Python 离线转换 `.pth + model_spec.json`，参考 CPU 用 direct register mode 逐层调度 NPU。
+
+当前已有一个最小 SoC 闭环入口：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_pth_tiny_conv_soc.ps1
+```
+
+该入口自动生成 tiny quantized `.pth`，转换为 NPU 权重/DRAM image，并由参考 CPU 固件调度 NPU 执行 `Conv2D + ReLU`。
+
 ## 当前可用能力
 
 可以依赖：

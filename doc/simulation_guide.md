@@ -963,6 +963,40 @@ r_fifo_din
 
 复杂图像特征验证入口见 [visual_cnn_verification.md](visual_cnn_verification.md)。该流程使用 `scripts/run_visual_cnn_case.ps1` 生成 `Cout=6` 的 3x3 feature-bank Conv2D OTF case，并覆盖 bias、ReLU/ReLU6、INT8 quant/saturate、OS/WS direct scalar 分支和 PNG/HTML 可视化报告。
 
+`.pth` 推理原型的第一阶段范围见 [pth_inference_subset.md](pth_inference_subset.md)：V1 只承诺 `.pth state_dict + model_spec.json` 的受限静态模型，由 host converter 转换权重和计划，参考 CPU 用 direct register mode 调 NPU 执行 Conv/ReLU。
+
+当前 RepOpt VGG int8 probe 可生成 host 侧计划和 CPU runtime descriptor：
+
+```powershell
+python tools\pth\pth_to_npu_assets.py `
+  --pth .06_RepOpt_VGG\06_RepOpt_VGG\runs\cifar10_repopt_vgglike_qat\qat_int8_quantized.pth `
+  --spec tools\pth\examples\repopt_vgg_int8_spec.json `
+  --out-dir sim\pth_repopt_probe `
+  --mode OS
+
+python tools\pth\gen_cpu_runtime.py `
+  --plan sim\pth_repopt_probe\model_plan.json `
+  --out-dir sim\pth_repopt_probe\cpu_runtime
+```
+
+注意：该 probe 的资产约 5.29 MB，而当前 `tb_soc.v/soc_top.v` 默认 DRAM 是 61,440 bytes，因此它现在只能验证转换和 CPU 调度代码生成，不能直接作为现有 SoC smoke 的完整推理用例。
+
+当前 DRAM 可承载的 `.pth` SoC smoke：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_pth_tiny_conv_soc.ps1
+```
+
+当前结果：
+
+```text
+[PASS] PTH tiny Conv SoC test PASSED!
+Cycles: 687
+R = [10, 2, 8, 2, 9, 0, 13, 0]
+```
+
+用途：验证 `.pth -> NPU assets -> DRAM image -> RV32I firmware -> CPU MMIO 调度 -> NPU Conv2D/ReLU -> DRAM result` 的最小闭环。
+
 快速 smoke：
 
 ```powershell

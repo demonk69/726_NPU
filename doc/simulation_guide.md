@@ -959,6 +959,18 @@ r_fifo_wr_en
 r_fifo_din
 ```
 
+## Visual CNN 可视化验证
+
+复杂图像特征验证入口见 [visual_cnn_verification.md](visual_cnn_verification.md)。该流程使用 `scripts/run_visual_cnn_case.ps1` 生成 `Cout=6` 的 3x3 feature-bank Conv2D OTF case，并覆盖 bias、ReLU/ReLU6、INT8 quant/saturate、OS/WS direct scalar 分支和 PNG/HTML 可视化报告。
+
+快速 smoke：
+
+```powershell
+$env:Path = 'E:\iverilog\bin;' + $env:Path
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_visual_cnn_case.ps1 `
+  -Resize 16 -Name visual_cnn_smoke16
+```
+
 如果结果为 0，先确认：
 
 1. DRAM 读出的 W/A 是否非零。

@@ -67,8 +67,10 @@ def build_layer(plan, plan_dir, state_dict, args, layer_name, x_q):
     global_m = int(layer["registers"]["M_DIM"])
     global_n = int(layer["registers"]["N_DIM"])
     k_dim = int(layer["registers"]["K_DIM"])
-    m_tiles = global_m // tile_rows
-    n_tiles = global_n // tile_cols
+    # Windowed mode: use --m-tiles / --n-tiles if set, else full layer
+    max_m_tiles = (global_m // tile_rows) if not args.m_tiles else min(args.m_tiles, global_m // tile_rows)
+    max_n_tiles = (global_n // tile_cols) if not args.n_tiles else min(args.n_tiles, global_n // tile_cols)
+    m_tiles = max_m_tiles; n_tiles = max_n_tiles
     total_m = m_tiles * tile_rows; total_n = n_tiles * tile_cols
     tile_count = m_tiles * n_tiles
     results_per_tile = tile_rows * tile_cols
@@ -501,7 +503,8 @@ def main():
 
     write_hex(out_dir / "expected_raw.hex", exp_raw)
     write_hex(out_dir / "expected_raw_addr.hex", exp_raw_addr)
-    write_hex(out_dir / "expected_q.hex", exp_q)
+    write_hex(out_dir / "expected_q.hex", exp_q[:total_m0 * total_n0])
+    write_hex(out_dir / "expected_q1.hex", exp_q[total_m0 * total_n0:])
 
     # Write IFM golden for testbench verification
     write_hex(out_dir / "expected_ifm.hex", ifm_verif)
@@ -515,13 +518,14 @@ def main():
         f'`define REP_TILE_SOC_RAW_ADDR_HEX "{op}/expected_raw_addr.hex"',
         f'`define REP_TILE_SOC_EXPECTED_RAW_HEX "{op}/expected_raw.hex"',
         f'`define REP_TILE_SOC_EXPECTED_Q_HEX "{op}/expected_q.hex"',
+        f'`define REP_TILE_SOC_EXPECTED_Q1_HEX "{op}/expected_q1.hex"',
         f'`define REP_TILE_SOC_FW_WORDS {fw_words}',
         f'`define REP_TILE_SOC_DRAM_WORDS {dram_words}',
         f'`define REP_TILE_SOC_TIMEOUT_CYCLES {timeout}',
         f'`define REP_TILE_SOC_MARKER_ADDR 32\'h{marker_addr:08x}',
         f'`define REP_TILE_SOC_Q_BASE 32\'h{q0_base:08x}',
         f'`define REP_TILE_SOC_RAW_COUNT {len(exp_raw)}',
-        f'`define REP_TILE_SOC_Q_COUNT {len(exp_q)}',
+        f'`define REP_TILE_SOC_Q_COUNT {total_m0 * total_n0}',
         f'`define REP_TILE_SOC_TILE_COUNT {layout0["tile_count"] + layout1["tile_count"]}',
         f'`define REP_TILE_SOC_M_BASE 0',
         f'`define REP_TILE_SOC_N_BASE 0',
@@ -530,6 +534,11 @@ def main():
         f'`define REP_TILE_SOC_R_ADDR_0 32\'h{r0_base:08x}',
         f'`define REP_TILE_SOC_IFM1_BASE 32\'h{ifm1_base:08x}',
         f'`define REP_TILE_SOC_IFM1_WORDS {ifm1_words}',
+        f'`define REP_TILE_SOC_L0_Q_COUNT {total_m0 * total_n0}',
+        f'`define REP_TILE_SOC_L0_RAW_COUNT {total_m0 * total_n0}',
+        f'`define REP_TILE_SOC_R1_BASE 32\'h{r1_base:08x}',
+        f'`define REP_TILE_SOC_Q1_BASE 32\'h{q1_base:08x}',
+        f'`define REP_TILE_SOC_L1_Q_COUNT {total_m1 * total_n1}',
     ]
     with open(out_dir / "soc_repopt_tile_window_params.vh", "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(lines) + "\n")

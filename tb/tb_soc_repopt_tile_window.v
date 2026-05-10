@@ -28,6 +28,9 @@ integer q_i;
 reg [31:0] expected_raw [0:`REP_TILE_SOC_RAW_COUNT-1];
 reg [31:0] expected_raw_addr [0:`REP_TILE_SOC_RAW_COUNT-1];
 reg [31:0] expected_q [0:`REP_TILE_SOC_Q_COUNT-1];
+`ifdef REP_TILE_SOC_Q1_BASE
+reg [31:0] expected_q1 [0:`REP_TILE_SOC_L1_Q_COUNT-1];
+`endif
 
 soc_top #(
     .MEM_WORDS      (MEM_WORDS),
@@ -61,6 +64,9 @@ initial begin
     $readmemh(`REP_TILE_SOC_RAW_ADDR_HEX, expected_raw_addr);
     $readmemh(`REP_TILE_SOC_EXPECTED_RAW_HEX, expected_raw);
     $readmemh(`REP_TILE_SOC_EXPECTED_Q_HEX, expected_q);
+`ifdef REP_TILE_SOC_Q1_BASE
+    $readmemh(`REP_TILE_SOC_EXPECTED_Q1_HEX, expected_q1);
+`endif
 end
 
 initial begin : init_dram
@@ -106,6 +112,8 @@ task print_summary;
                  $signed(u_soc.u_dram.mem[`REP_TILE_SOC_R_ADDR_0 >> 2]));
         $display("  first postprocess q[0] = %0d",
                  $signed(u_soc.u_dram.mem[`REP_TILE_SOC_Q_BASE >> 2]));
+        $display("  first IFM word = 0x%08h",
+                 u_soc.u_dram.mem[(`REP_TILE_SOC_IFM1_BASE) >> 2]);
     end
 endtask
 
@@ -121,6 +129,12 @@ function results_match;
             if (u_soc.u_dram.mem[(`REP_TILE_SOC_Q_BASE >> 2) + q_i] !== expected_q[q_i])
                 ok = 1'b0;
         end
+`ifdef REP_TILE_SOC_Q1_BASE
+        for (q_i = 0; q_i < `REP_TILE_SOC_L1_Q_COUNT; q_i = q_i + 1) begin
+            if (u_soc.u_dram.mem[(`REP_TILE_SOC_Q1_BASE >> 2) + q_i] !== expected_q1[q_i])
+                ok = 1'b0;
+        end
+`endif
         results_match = ok;
     end
 endfunction
@@ -163,10 +177,42 @@ initial begin
                     $display("========================================");
                     if (results_match()) begin
                         $display("  [PASS] RepOpt tile-window SoC MMIO + CPU postprocess test PASSED!");
-                    end else begin
+`ifdef REP_TILE_SOC_IFM1_BASE
+                        begin
+                            integer ifm_dump_fd, ifm_i;
+                            ifm_dump_fd = $fopen("ifm_dump.hex", "w");
+                            for (ifm_i = 0; ifm_i < `REP_TILE_SOC_IFM1_WORDS; ifm_i = ifm_i + 1)
+                                $fwrite(ifm_dump_fd, "%08h\n", u_soc.u_dram.mem[(`REP_TILE_SOC_IFM1_BASE >> 2) + ifm_i]);
+                            $fclose(ifm_dump_fd);
+                            $display("  [IFM] dumped %0d words to ifm_dump.hex", `REP_TILE_SOC_IFM1_WORDS);
+                        end
+`endif
+                    end                     else begin
                         $display("  [FAIL] PASS marker seen but raw/q result memory mismatched!");
                         print_mismatch();
                     end
+`ifdef REP_TILE_SOC_IFM1_BASE
+                    // Also dump IFM for debug regardless of pass/fail
+                    begin
+                        integer ifm_dump_fd, ifm_i;
+                        ifm_dump_fd = $fopen("ifm_dump.hex", "w");
+                        for (ifm_i = 0; ifm_i < `REP_TILE_SOC_IFM1_WORDS; ifm_i = ifm_i + 1)
+                            $fwrite(ifm_dump_fd, "%08h\n", u_soc.u_dram.mem[(`REP_TILE_SOC_IFM1_BASE >> 2) + ifm_i]);
+                        $fclose(ifm_dump_fd);
+                        $display("  [IFM] dumped %0d words to ifm_dump.hex", `REP_TILE_SOC_IFM1_WORDS);
+                    end
+`endif
+                    // Debug: dump first 4 raw results of L1
+                    $display("  L1 raw[0..3]: %0d %0d %0d %0d",
+                             $signed(u_soc.u_dram.mem[(`REP_TILE_SOC_R_ADDR_0 >> 2) + 64 + 0]),
+                             $signed(u_soc.u_dram.mem[(`REP_TILE_SOC_R_ADDR_0 >> 2) + 64 + 1]),
+                             $signed(u_soc.u_dram.mem[(`REP_TILE_SOC_R_ADDR_0 >> 2) + 64 + 2]),
+                             $signed(u_soc.u_dram.mem[(`REP_TILE_SOC_R_ADDR_0 >> 2) + 64 + 3]));
+                    $display("  L1 q[0..3]: %0d %0d %0d %0d",
+                             $signed(u_soc.u_dram.mem[(`REP_TILE_SOC_Q_BASE >> 2) + 64 + 0]),
+                             $signed(u_soc.u_dram.mem[(`REP_TILE_SOC_Q_BASE >> 2) + 64 + 1]),
+                             $signed(u_soc.u_dram.mem[(`REP_TILE_SOC_Q_BASE >> 2) + 64 + 2]),
+                             $signed(u_soc.u_dram.mem[(`REP_TILE_SOC_Q_BASE >> 2) + 64 + 3]));
                     $display("  Cycles: %0d", cycle_count);
                     print_summary();
                     $display("========================================");

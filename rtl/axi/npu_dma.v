@@ -55,7 +55,7 @@ module npu_dma #(
     input  wire [31:0] a_ofm_m_base,
     input  wire [31:0] a_ofm_k_base,
     input  wire [15:0] a_ofm_k_len,
-    input  wire [2:0]  a_ofm_active_rows,
+    input  wire [4:0]  a_ofm_active_rows,
     input  wire        a_ofm_fp16_mode,
     input  wire [31:0] a_im2col_m_index,
     input  wire [15:0] a_im2col_k_len,
@@ -204,10 +204,10 @@ reg [31:0] ofm_base_latch;
 reg [31:0] ofm_m_base_latch;
 reg [31:0] ofm_k_base_latch;
 reg [15:0] ofm_k_len_latch;
-reg [2:0]  ofm_active_rows_latch;
+reg [4:0]  ofm_active_rows_latch;
 reg        ofm_fp16_latch;
 reg [15:0] ofm_k_pos;
-reg [2:0]  ofm_lane_pos;
+reg [4:0]  ofm_lane_pos;
 reg [1:0]  ofm_emit_phase;
 reg [31:0] ofm_pack0;
 reg [31:0] ofm_pack1;
@@ -702,7 +702,7 @@ always @(posedge clk) begin
                             ofm_emit_phase <= 2'd2;
                         end
                     end
-                end else if (ofm_lane_pos >= 3'd4) begin
+                end else if (ofm_lane_pos >= 5'd4) begin
                     ofm_emit_phase <= 2'd1;
                 end else if (ofm_lane_pos >= ofm_active_rows_latch) begin
                     case (ofm_lane_pos)

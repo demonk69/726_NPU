@@ -97,6 +97,7 @@ module npu_top #(
 );
 
 localparam MAX_TILE_LANES = 16;
+localparam MAX_TILE_RESULTS = 256;  // 16x16 or 8x32 grid
 localparam [3:0] PERF_SIMD_LANES = INT8_SIMD_LANES;
 
 function [4:0] shape_tile_lanes;
@@ -231,7 +232,7 @@ wire [31:0] dma_a_ofm_stride;
 wire [31:0] dma_a_ofm_m_base;
 wire [31:0] dma_a_ofm_k_base;
 wire [15:0] dma_a_ofm_k_len;
-wire [2:0]  dma_a_ofm_active_rows;
+wire [4:0]  dma_a_ofm_active_rows;
 wire dma_a_ofm_fp16_mode;
 wire [31:0] dma_a_im2col_m_index;
 wire [15:0] dma_a_im2col_k_len;
@@ -251,10 +252,12 @@ wire ctrl_r_fifo_clear;
 wire [1:0] ctrl_cfg_shape;
 wire [1:0] ctrl_post_act_mode;
 wire [31:0] ctrl_post_quant_cfg;
+wire       ctrl_bias_en;
 wire ctrl_tile_mode, ctrl_vec_consume;
 wire [31:0] ctrl_tile_m_base, ctrl_tile_n_base; // global C tile origin: m0/n0
-wire [3:0] ctrl_tile_row_valid, ctrl_tile_col_valid; // valid r/c lanes for edge tiles
-wire [2:0] ctrl_tile_active_rows, ctrl_tile_active_cols; // row/col count to serialize
+wire [15:0] ctrl_tile_row_valid, ctrl_tile_col_valid; // valid r/c lanes for edge tiles
+wire [4:0]  ctrl_tile_active_rows;
+wire [5:0]  ctrl_tile_active_cols; // row/col count to serialize
 wire [31:0] ctrl_tile_k_base, ctrl_tile_k_index;
 wire [15:0] ctrl_tile_k_len;
 wire [15:0] ctrl_tile_k_cycle; // OS feeder cycle, includes row-skew drain cycles
@@ -295,6 +298,7 @@ npu_ctrl #(
     .cfg_shape_latched(ctrl_cfg_shape),
     .post_act_mode(ctrl_post_act_mode),
     .post_quant_cfg(ctrl_post_quant_cfg),
+    .bias_en    (ctrl_bias_en),
     .tile_mode    (ctrl_tile_mode),
     .vec_consume  (ctrl_vec_consume),
     .tile_m_base  (ctrl_tile_m_base),
@@ -634,8 +638,8 @@ wire [PHY_ROWS*DATA_W-1:0] pe_a_in;
 wire [PHY_COLS*ACC_W-1:0]  pe_acc_in;
 wire [PHY_ROWS*PHY_COLS*ACC_W-1:0] pe_acc_init;
 wire [PHY_ROWS*PHY_COLS-1:0] pe_acc_init_mask;
-wire [32*ACC_W-1:0]         pe_array_result;    // max 32 output columns (8×32 mode)
-wire [31:0]                 pe_array_valid;
+wire [MAX_TILE_RESULTS*ACC_W-1:0] pe_array_result;
+wire [MAX_TILE_RESULTS-1:0]       pe_array_valid;
 wire [PHY_ROWS*PHY_COLS-1:0] pe_active_dbg;
 
 // Data source from PPBuf
@@ -653,7 +657,18 @@ generate
             assign a_skew_vec[LANE*DATA_W +: DATA_W] =
                 (ctrl_tile_mode && tile_vec_fire) ? a_ppb_rd_vec[LANE*DATA_W +: DATA_W]
                                                   : {DATA_W{1'b0}};
-        end else begin : gen_lane_delay
+        end else if (LANE == 1) begin : gen_lane1_reg
+            // Single-cycle registered delay: captures on vec_fire, holds during
+            // drain so the value is not lost when the pipe input is later cleared.
+            reg [DATA_W-1:0] l1_reg;
+            always @(posedge sys_clk) begin
+                if (!sys_rst_n || !ctrl_tile_mode)
+                    l1_reg <= {DATA_W{1'b0}};
+                else if (tile_vec_fire)
+                    l1_reg <= a_ppb_rd_vec[LANE*DATA_W +: DATA_W];
+            end
+            assign a_skew_vec[LANE*DATA_W +: DATA_W] = l1_reg;
+        end else begin : gen_lane_pipe
             reg [DATA_W-1:0] pipe [0:LANE-1];
             integer stage_i;
             always @(posedge sys_clk) begin
@@ -732,7 +747,7 @@ wire       perf_compute_valid = ctrl_tile_mode ? tile_feed_step : scalar_pe_en;
 
 op_counter #(
     .ROWS(PHY_ROWS),
-    .COLS(32),
+    .COLS(MAX_TILE_RESULTS),
     .FREQ_MHZ(500)
 ) u_op_counter (
     .clk(sys_clk),
@@ -877,6 +892,19 @@ assign scalar_post_result = apply_scalar_quant(scalar_act_result,
                                                pe_mode,
                                                ctrl_post_quant_cfg);
 
+// Tile-mode post-processing: bias -> activation -> quant.
+// Order: accumulator -> bias -> ReLU/ReLU6 -> quant/saturate.
+wire [31:0] tile_bias_val = ctrl_bias_en ? tile_bias_buf[tile_ser_col] : 32'd0;
+wire [ACC_W-1:0] tile_with_bias = tile_result_buf[tile_ser_idx] + tile_bias_val;
+wire [ACC_W-1:0] tile_act_result;
+wire [ACC_W-1:0] tile_post_result;
+assign tile_act_result = apply_scalar_activation(tile_with_bias,
+                                                  pe_mode,
+                                                  ctrl_post_act_mode);
+assign tile_post_result = apply_scalar_quant(tile_act_result,
+                                             pe_mode,
+                                             ctrl_post_quant_cfg);
+
 // WS load row indicator (for debug/status)
 wire [3:0] ws_load_row_status;
 
@@ -884,7 +912,8 @@ reconfig_pe_array #(
     .PHY_ROWS(PHY_ROWS),
     .PHY_COLS(PHY_COLS),
     .DATA_W  (DATA_W),
-    .ACC_W   (ACC_W)
+    .ACC_W   (ACC_W),
+    .MAX_TILE_RESULTS(MAX_TILE_RESULTS)
 ) u_pe_array (
     .clk            (sys_clk),
     .rst_n          (sys_rst_n),
@@ -908,59 +937,87 @@ reconfig_pe_array #(
 );
 
 // ---------------------------------------------------------------------------
-// Result FIFO interface
+// Tile-mode bias buffer.  Captures per-column bias words as the controller
+// fetches them sequentially via dma_bias_start / dma_bias_data.
 // ---------------------------------------------------------------------------
-reg [ACC_W-1:0] tile_result_buf [0:15]; // captured C tile, index = r*4+c
-reg             tile_ser_busy;
-reg [2:0]       tile_ser_active_rows;   // valid rows in current edge/full tile
-reg [2:0]       tile_ser_active_cols;   // valid cols in current edge/full tile
-reg [1:0]       tile_ser_row;           // serializer row r
-reg [1:0]       tile_ser_col;           // serializer col c
+reg [31:0] tile_bias_buf [0:MAX_TILE_LANES-1];
+reg [4:0]  tile_bias_idx;
 
-wire [3:0] tile_ser_idx = {tile_ser_row, tile_ser_col};
+always @(posedge sys_clk) begin
+    if (!sys_rst_n || !ctrl_tile_mode || !ctrl_bias_en) begin
+        tile_bias_idx <= 5'd0;
+    end else if (dma_bias_done && ctrl_bias_en) begin
+        tile_bias_buf[tile_bias_idx] <= dma_bias_data;
+        tile_bias_idx <= tile_bias_idx + 1'b1;
+    end
+end
+
+// ---------------------------------------------------------------------------
+// Result FIFO interface — tile-mode serializer.
+//
+//   Captures the full PE grid output (up to 256 results), then pushes
+//   only the active rows/cols in row-major order into the result FIFO
+//   for DMA row-wise writeback.
+//
+//   grid_rows = (8x32 ? 8 : tile_lane_count)
+//   grid_cols = (8x32 ? 32 : tile_lane_count)
+//   capture   = grid_rows * grid_cols
+// ---------------------------------------------------------------------------
+wire [4:0] tile_grid_rows = (ctrl_cfg_shape == 2'b11) ? 5'd8  : tile_lane_count;
+wire [5:0] tile_grid_cols = (ctrl_cfg_shape == 2'b11) ? 6'd32 : {1'b0, tile_lane_count};
+wire [8:0] tile_capture_cnt = {3'd0, tile_grid_rows} * {2'd0, tile_grid_cols}; // max 256
+
+reg [ACC_W-1:0] tile_result_buf [0:255]; // captured C tile, index = row*grid_cols+col
+reg             tile_ser_busy;
+reg [4:0]       tile_ser_active_rows;   // valid rows in current edge/full tile
+reg [5:0]       tile_ser_active_cols;   // valid cols (6-bit for 8x32)
+reg [4:0]       tile_ser_row;           // serializer row r
+reg [5:0]       tile_ser_col;           // serializer col c
+
+wire [7:0] tile_ser_idx = tile_ser_row * tile_grid_cols + {2'd0, tile_ser_col};
 wire       tile_ser_fire = tile_ser_busy && !r_fifo_full;
-wire       tile_ser_last_col = ({1'b0, tile_ser_col} + 3'd1) >= tile_ser_active_cols;
-wire       tile_ser_last_row = ({1'b0, tile_ser_row} + 3'd1) >= tile_ser_active_rows;
+wire       tile_ser_last_col = (tile_ser_col + 6'd1 >= tile_ser_active_cols);
+wire       tile_ser_last_row = (tile_ser_row + 5'd1 >= tile_ser_active_rows);
 wire       tile_ser_last     = tile_ser_last_col && tile_ser_last_row;
-wire       tile_result_capture = ctrl_tile_mode &&
-                                 pe_stat &&
-                                 pe_array_valid[0] &&
-                                 !tile_ser_busy;
+wire tile_result_capture = ctrl_tile_mode &&
+                             pe_stat &&
+                             pe_array_valid[0] &&
+                             !tile_ser_busy;
 
 integer tile_ser_i;
 always @(posedge sys_clk) begin
     if (!sys_rst_n || !ctrl_tile_mode) begin
         tile_ser_busy       <= 1'b0;
-        tile_ser_active_rows <= 3'd0;
-        tile_ser_active_cols <= 3'd0;
-        tile_ser_row        <= 2'd0;
-        tile_ser_col        <= 2'd0;
-        for (tile_ser_i = 0; tile_ser_i < 16; tile_ser_i = tile_ser_i + 1)
+        tile_ser_active_rows <= 5'd0;
+        tile_ser_active_cols <= 6'd0;
+        tile_ser_row        <= 5'd0;
+        tile_ser_col        <= 6'd0;
+        for (tile_ser_i = 0; tile_ser_i < 256; tile_ser_i = tile_ser_i + 1)
             tile_result_buf[tile_ser_i] <= {ACC_W{1'b0}};
     end else if (tile_result_capture) begin
-        // Capture all 16 PE outputs at once, then push only active rows/cols
-        // into the result FIFO in row-major order for DMA row-wise writeback.
-        for (tile_ser_i = 0; tile_ser_i < 16; tile_ser_i = tile_ser_i + 1)
+        // Capture the full PE grid: result[row*grid_cols+col] = C[m0+row,n0+col]
+        // Only active entries per shape are pushed through the serializer.
+        for (tile_ser_i = 0; tile_ser_i < tile_capture_cnt; tile_ser_i = tile_ser_i + 1)
             tile_result_buf[tile_ser_i] <= pe_array_result[tile_ser_i*ACC_W +: ACC_W];
         tile_ser_active_rows <= ctrl_tile_active_rows;
         tile_ser_active_cols <= ctrl_tile_active_cols;
-        tile_ser_row         <= 2'd0;
-        tile_ser_col         <= 2'd0;
-        tile_ser_busy        <= (ctrl_tile_active_rows != 3'd0) &&
-                                (ctrl_tile_active_cols != 3'd0);
+        tile_ser_row         <= 5'd0;
+        tile_ser_col         <= 6'd0;
+        tile_ser_busy        <= (ctrl_tile_active_rows != 5'd0) &&
+                                (ctrl_tile_active_cols != 6'd0);
     end else if (tile_ser_fire) begin
         if (tile_ser_last) begin
             tile_ser_busy <= 1'b0;
         end else if (tile_ser_last_col) begin
-            tile_ser_row <= tile_ser_row + 1'b1;
-            tile_ser_col <= 2'd0;
+            tile_ser_row <= tile_ser_row + 5'd1;
+            tile_ser_col <= 6'd0;
         end else begin
-            tile_ser_col <= tile_ser_col + 1'b1;
+            tile_ser_col <= tile_ser_col + 6'd1;
         end
     end
 end
 
-assign r_fifo_din   = ctrl_tile_mode ? tile_result_buf[tile_ser_idx] : scalar_post_result;
+assign r_fifo_din   = ctrl_tile_mode ? tile_post_result : scalar_post_result;
 assign r_fifo_wr_en = ctrl_tile_mode ? tile_ser_fire
                                      : (scalar_valid && !r_fifo_full);
 

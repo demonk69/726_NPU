@@ -45,10 +45,11 @@
 `timescale 1ns/1ps
 
 module reconfig_pe_array #(
-    parameter PHY_ROWS = 16,
-    parameter PHY_COLS = 16,
-    parameter DATA_W   = 16,
-    parameter ACC_W    = 32
+    parameter PHY_ROWS         = 16,
+    parameter PHY_COLS         = 16,
+    parameter DATA_W           = 16,
+    parameter ACC_W            = 32,
+    parameter MAX_TILE_RESULTS = 256  // max results per tile (16x16 or 8x32)
 )(
     input  wire                          clk,
     input  wire                          rst_n,
@@ -67,9 +68,9 @@ module reconfig_pe_array #(
     input  wire [PHY_COLS*ACC_W-1:0]     acc_in,      // initial psum (OS mode)
     input  wire [PHY_ROWS*PHY_COLS*ACC_W-1:0] acc_init,
     input  wire [PHY_ROWS*PHY_COLS-1:0]  acc_init_mask,
-    // outputs (max width for 8x32 folded mode = 32 columns)
-    output reg  [32*ACC_W-1:0]           acc_out,
-    output reg  [31:0]                   valid_out,
+    // outputs (max width for 16x16 or 8x32 = 256 results)
+    output reg  [MAX_TILE_RESULTS*ACC_W-1:0] acc_out,
+    output reg  [MAX_TILE_RESULTS-1:0]       valid_out,
     // WS load row indicator (for controller to know current load row)
     output wire [3:0]                    ws_load_row_out,
     // debug
@@ -340,47 +341,63 @@ generate
 endgenerate
 
 // ---------------------------------------------------------------------------
-// Output mapping
+// Output mapping — per-PE row-major grid for all shapes.
+//
+//   cfg_shape  | active physical rows | active physical cols | grid rows | grid cols | total results
+//   -----------|-----------------------|----------------------|-----------|-----------|---------------
+//   4x4        | rows 0..3             | cols 0..3            | 4         | 4         | 16
+//   8x8        | rows 0..7             | cols 0..7            | 8         | 8         | 64
+//   16x16      | rows 0..15            | cols 0..15           | 16        | 16        | 256
+//   8x32 folded | rows 0..7 top+bot    | cols 0..15 ×2 halves | 8         | 32        | 256
+//
+//   result_index = grid_row * grid_cols + grid_col
+//   C[m0 + grid_row, n0 + grid_col]
 // ---------------------------------------------------------------------------
 integer ri, ci;
 always @(*) begin
     // Default: zero-fill everything
-    acc_out   = {32*ACC_W{1'b0}};
-    valid_out = {32{1'b0}};
+    acc_out   = {MAX_TILE_RESULTS*ACC_W{1'b0}};
+    valid_out = {MAX_TILE_RESULTS{1'b0}};
 
     case (cfg_shape)
         MODE_4x4: begin
             for (ri = 0; ri < 4; ri = ri+1) begin
                 for (ci = 0; ci < 4; ci = ci+1) begin
-                    // T2.4 serializer expects row-major C tile order:
-                    // result_index = ri*4 + ci -> C[m0+ri,n0+ci].
                     acc_out[(ri*4+ci)*ACC_W +: ACC_W] = acc_v[ri+1][ci];
                     valid_out[ri*4+ci]                = valid_v[ri+1][ci];
                 end
             end
         end
         MODE_8x8: begin
-            for (ci = 0; ci < PHY_COLS; ci = ci+1) begin
-                if (ci < 8) begin
-                    acc_out[ci*ACC_W +: ACC_W]   = acc_v[8][ci];
-                    valid_out[ci]                  = valid_v[8][ci];
+            for (ri = 0; ri < 8; ri = ri+1) begin
+                for (ci = 0; ci < 8; ci = ci+1) begin
+                    acc_out[(ri*8+ci)*ACC_W +: ACC_W] = acc_v[ri+1][ci];
+                    valid_out[ri*8+ci]                = valid_v[ri+1][ci];
                 end
             end
         end
         MODE_16x16: begin
-            for (ci = 0; ci < PHY_COLS; ci = ci+1) begin
-                acc_out[ci*ACC_W +: ACC_W]   = acc_v[PHY_ROWS][ci];
-                valid_out[ci]                  = valid_v[PHY_ROWS][ci];
+            for (ri = 0; ri < 16; ri = ri+1) begin
+                for (ci = 0; ci < 16; ci = ci+1) begin
+                    acc_out[(ri*16+ci)*ACC_W +: ACC_W] = acc_v[ri+1][ci];
+                    valid_out[ri*16+ci]                = valid_v[ri+1][ci];
+                end
             end
         end
         MODE_8x32: begin
-            for (ci = 0; ci < PHY_COLS; ci = ci+1) begin
-                // Left half  (logical cols 0-15):  from top half row 8
-                acc_out[ci*ACC_W +: ACC_W]         = acc_v[8][ci];
-                valid_out[ci]                       = valid_v[8][ci];
-                // Right half (logical cols 16-31): from bottom half row 16
-                acc_out[(ci+16)*ACC_W +: ACC_W]     = acc_v[PHY_ROWS][ci];
-                valid_out[ci+16]                     = valid_v[PHY_ROWS][ci];
+            // Top half: logical rows 0..7, logical cols 0..15
+            for (ri = 0; ri < 8; ri = ri+1) begin
+                for (ci = 0; ci < 16; ci = ci+1) begin
+                    acc_out[(ri*32+ci)*ACC_W +: ACC_W] = acc_v[ri+1][ci];
+                    valid_out[ri*32+ci]                = valid_v[ri+1][ci];
+                end
+            end
+            // Bottom half: logical rows 0..7, logical cols 16..31 (physical rows 8..15, cols 0..15)
+            for (ri = 0; ri < 8; ri = ri+1) begin
+                for (ci = 0; ci < 16; ci = ci+1) begin
+                    acc_out[(ri*32 + ci + 16)*ACC_W +: ACC_W] = acc_v[ri+9][ci];
+                    valid_out[ri*32 + ci + 16]                = valid_v[ri+9][ci];
+                end
             end
         end
         default: ;

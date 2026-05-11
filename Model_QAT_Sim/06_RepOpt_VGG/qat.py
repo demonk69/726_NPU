@@ -20,12 +20,44 @@ import matplotlib.pyplot as plt
 
 from model import build_model
 
+import torch.ao.quantization as tq
+from torch.ao.quantization import QConfig
+from torch.ao.quantization.fake_quantize import FakeQuantize
+from torch.ao.quantization.observer import (
+    MovingAverageMinMaxObserver,
+    MovingAveragePerChannelMinMaxObserver,
+)
+
 
 CLASSES = [
     "airplane", "automobile", "bird", "cat", "deer",
     "dog", "frog", "horse", "ship", "truck"
 ]
 
+
+def get_qat_qconfig_int8_int8():
+    activation_fake_quant = FakeQuantize.with_args(
+        observer=MovingAverageMinMaxObserver,
+        quant_min=-128,
+        quant_max=127,
+        dtype=torch.qint8,
+        qscheme=torch.per_tensor_symmetric,   # 推荐给你的NPU
+        reduce_range=False
+    )
+
+    weight_fake_quant = FakeQuantize.with_args(
+        observer=MovingAveragePerChannelMinMaxObserver,
+        quant_min=-128,
+        quant_max=127,
+        dtype=torch.qint8,
+        qscheme=torch.per_channel_symmetric,
+        reduce_range=False
+    )
+
+    return QConfig(
+        activation=activation_fake_quant,
+        weight=weight_fake_quant
+    )
 
 def seed_everything(seed=42):
     random.seed(seed)
@@ -276,7 +308,8 @@ def prepare_qat_model(fp32_ckpt_path, device, width_mult=1.0):
     qat_model.train()
 
     # 3) 设置 qconfig 并 prepare_qat
-    qat_model.qconfig = torch.ao.quantization.get_default_qat_qconfig("fbgemm")
+    # qat_model.qconfig = torch.ao.quantization.get_default_qat_qconfig("fbgemm")
+    qat_model.qconfig = get_qat_qconfig_int8_int8()
     torch.ao.quantization.prepare_qat(qat_model, inplace=True)
 
     # 4) 最后再搬到训练设备
@@ -370,10 +403,19 @@ def main(args):
         print(f"\nQAT Epoch [{epoch}/{args.epochs}]")
 
         # 通常QAT后期冻结BN统计更稳一点
+        # if epoch == args.freeze_bn_epoch:
+        #     print("Freezing observers and batch norm stats...")
+        #     model.apply(tq.disable_observer)
+        #     model.apply(tq.freeze_bn_stats)
         if epoch == args.freeze_bn_epoch:
-            print("Freezing observers and batch norm stats...")
+            print("Freezing observers and batch norm stats.")
             model.apply(tq.disable_observer)
-            model.apply(tq.freeze_bn_stats)
+
+            def freeze_bn(m):
+                if isinstance(m, torch.nn.BatchNorm2d):
+                    m.eval()
+
+            model.apply(freeze_bn)
 
         train_loss, train_acc = train_one_epoch(
             model, train_loader, criterion, optimizer, device
@@ -420,23 +462,46 @@ def main(args):
     model.to("cpu")
     model.eval()
 
-    # 转成真正量化模型
-    quantized_model = tq.convert(model, inplace=False)
+    # # 转成真正量化模型
+    # quantized_model = tq.convert(model, inplace=False)
 
-    # 保存量化模型
-    torch.save(
-        {
-            "model_state_dict": quantized_model.state_dict(),
-            "best_val_acc": best_val_acc,
-            "args": vars(args)
-        },
-        save_dir / "qat_int8_quantized.pth"
-    )
+    # # 保存量化模型
+    # torch.save(
+    #     {
+    #         "model_state_dict": quantized_model.state_dict(),
+    #         "best_val_acc": best_val_acc,
+    #         "args": vars(args)
+    #     },
+    #     save_dir / "qat_int8_quantized.pth"
+    # )
 
-    # 量化模型测试通常在CPU上
-    test_loss, test_acc, _, _ = evaluate(quantized_model, test_loader, criterion, torch.device("cpu"), desc="INT8 Test")
-    print(f"\nINT8 Quantized Test Loss: {test_loss:.4f}")
-    print(f"INT8 Quantized Test Acc : {test_acc:.2f}%")
+    # # 量化模型测试通常在CPU上
+    # test_loss, test_acc, _, _ = evaluate(quantized_model, test_loader, criterion, torch.device("cpu"), desc="INT8 Test")
+    # print(f"\nINT8 Quantized Test Loss: {test_loss:.4f}")
+    # print(f"INT8 Quantized Test Acc : {test_acc:.2f}%")
+    try:
+        quantized_model = tq.convert(model, inplace=False)
+
+        torch.save(
+            {
+                "model_state_dict": quantized_model.state_dict(),
+                "best_val_acc": best_val_acc,
+                "args": vars(args)
+            },
+            save_dir / "qat_int8_quantized.pth"
+        )
+
+        test_loss, test_acc, _, _ = evaluate(
+            quantized_model, test_loader, criterion, torch.device("cpu"), desc="INT8 Test"
+        )
+        print(f"\nINT8 Quantized Test Loss: {test_loss:.4f}")
+        print(f"INT8 Quantized Test Acc : {test_acc:.2f}%")
+
+    except Exception as e:
+        print("\n[Warning] tq.convert() failed for custom int8/int8 config.")
+        print("Reason:", e)
+        print("This usually means PyTorch backend does not support direct qint8/qint8 execution.")
+        test_loss, test_acc = None, None
 
     result_json = {
         "best_qat_val_acc": best_val_acc,

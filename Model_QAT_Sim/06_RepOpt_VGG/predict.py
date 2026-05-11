@@ -29,8 +29,8 @@ def get_test_transform():
     ])
 
 
-def load_model(weight_path, device):
-    model = build_model(num_classes=10)
+def load_model(weight_path, device, width_mult=1.0):
+    model = build_model(num_classes=10, width_mult=width_mult)
     ckpt = torch.load(weight_path, map_location=device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.to(device)
@@ -90,6 +90,7 @@ def parse_args():
     parser.add_argument("--weight_path", type=str, required=True, help="Path to best.pth")
     parser.add_argument("--data_root", type=str, default="./data")
     parser.add_argument("--index", type=int, default=None, help="Sample index in test set")
+    parser.add_argument("--width_mult", type=float, default=1.0)
     parser.add_argument("--no_show", action="store_true", help="Do not show image")
     return parser.parse_args()
 
@@ -97,7 +98,7 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     device = get_device()
-    model = load_model(args.weight_path, device)
+    model = load_model(args.weight_path, device, width_mult=args.width_mult)
     predict_one_from_testset(
         model=model,
         data_root=args.data_root,

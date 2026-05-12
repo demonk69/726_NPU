@@ -261,8 +261,13 @@ wire [15:0] cfg_vector_elem_bytes_a = cfg_scalar_elem_bytes * {11'd0, cfg_shape_
 // cfg_start uses live arr_cfg (not latched lk_arr_cfg) because config is
 // latched in the same cycle the initial DMA is launched.  Using tile_mode
 // (which reads lk_arr_cfg) would see stale 0 and drop the packed pad.
-wire [15:0] cfg_packed_pad   = arr_cfg[7] && (INT8_SIMD_LANES > 1) ? cfg_vector_elem_bytes_w : 16'd0;
-wire [15:0] cfg_packed_pad_a = arr_cfg[7] && (INT8_SIMD_LANES > 1) ? cfg_vector_elem_bytes_a : 16'd0;
+wire [3:0]  cfg_packed_k_rem = cfg_start_k_len_32 % {28'd0, INT8_SIMD_LANES};
+wire [15:0] cfg_packed_pad   = arr_cfg[7] && (INT8_SIMD_LANES > 1) && (cfg_packed_k_rem != 4'd0)
+    ? (cfg_vector_elem_bytes_w * ({4'd0, INT8_SIMD_LANES} - {1'b0, cfg_packed_k_rem}))
+    : 16'd0;
+wire [15:0] cfg_packed_pad_a = arr_cfg[7] && (INT8_SIMD_LANES > 1) && (cfg_packed_k_rem != 4'd0)
+    ? (cfg_vector_elem_bytes_a * ({4'd0, INT8_SIMD_LANES} - {1'b0, cfg_packed_k_rem}))
+    : 16'd0;
 wire [15:0] cfg_start_tile_len_raw_w = cfg_start_k_len_32[15:0] *
     (arr_cfg[7] ? cfg_vector_elem_bytes_w : cfg_scalar_elem_bytes)
     + (arr_cfg[7] ? cfg_packed_pad : 16'd0);

@@ -259,9 +259,11 @@ wire [5:0]  cfg_shape_n_lanes = shape_tile_n_lanes(cfg_shape_in);
 wire [15:0] cfg_vector_elem_bytes_w = cfg_scalar_elem_bytes * {11'd0, cfg_shape_n_lanes};
 wire [15:0] cfg_vector_elem_bytes_a = cfg_scalar_elem_bytes * {11'd0, cfg_shape_lanes};
 wire [15:0] cfg_start_tile_len_raw_w = cfg_start_k_len_32[15:0] *
-    (arr_cfg[7] ? cfg_vector_elem_bytes_w : cfg_scalar_elem_bytes);
+    (arr_cfg[7] ? cfg_vector_elem_bytes_w : cfg_scalar_elem_bytes)
+    + (arr_cfg[7] ? packed_pad : 16'd0);
 wire [15:0] cfg_start_tile_len_raw_a = cfg_start_k_len_32[15:0] *
-    (arr_cfg[7] ? cfg_vector_elem_bytes_a : cfg_scalar_elem_bytes);
+    (arr_cfg[7] ? cfg_vector_elem_bytes_a : cfg_scalar_elem_bytes)
+    + (arr_cfg[7] ? packed_pad_a : 16'd0);
 // Tile mode already moves whole words per k and is naturally aligned.
 wire [15:0] cfg_start_tile_len_w = arr_cfg[7] ? cfg_start_tile_len_raw_w
     : ((cfg_start_tile_len_raw_w + 16'd3) & 16'hfffc);
@@ -523,8 +525,13 @@ generate
 endgenerate
 
 // One-tile DMA byte length — W and A may differ for non-square shapes (8x32)
-wire [15:0] tile_len_raw_w = tile_k_len * (tile_mode ? vector_elem_bytes_w : scalar_elem_bytes);
-wire [15:0] tile_len_raw_a = tile_k_len * (tile_mode ? vector_elem_bytes_a : scalar_elem_bytes);
+// Packed INT8 SIMD: add one extra word so the last lane block has a full word pair.
+wire [15:0] packed_pad = tile_mode && (INT8_SIMD_LANES > 1) ? vector_elem_bytes_w : 16'd0;
+wire [15:0] packed_pad_a = tile_mode && (INT8_SIMD_LANES > 1) ? vector_elem_bytes_a : 16'd0;
+wire [15:0] tile_len_raw_w = tile_k_len * (tile_mode ? vector_elem_bytes_w : scalar_elem_bytes)
+                              + (tile_mode ? packed_pad : 16'd0);
+wire [15:0] tile_len_raw_a = tile_k_len * (tile_mode ? vector_elem_bytes_a : scalar_elem_bytes)
+                              + (tile_mode ? packed_pad_a : 16'd0);
 wire [15:0] tile_len_w = tile_mode ? tile_len_raw_w
                                    : ((tile_len_raw_w + 16'd3) & 16'hfffc);
 wire [15:0] tile_len_a = tile_mode ? tile_len_raw_a
@@ -547,8 +554,12 @@ wire is_last_tile = (tile_i == tile_iter_m_count - 1) &&
 
 // Result DMA: scalar mode writes one word; tile mode writes one row burst.
 localparam [15:0] TILE_R_LEN = 16'd4;
+localparam [3:0]  INT8_SIMD_LANES = 2;  // packed INT8 SIMD lanes
 
-wire [15:0] tile_compute_cycles = tile_k_len +
+wire [15:0] tile_k_cycles = tile_mode
+    ? ((tile_k_len + {12'd0, INT8_SIMD_LANES} - 16'd1) / {12'd0, INT8_SIMD_LANES})
+    : tile_k_len;
+wire [15:0] tile_compute_cycles = tile_k_cycles +
                                   tile_active_rows_32[15:0] - 16'd1;
 
 // vec_consume advances one packed A vector and one packed W vector for each
@@ -557,7 +568,7 @@ assign vec_consume = tile_mode &&
                      pe_en &&
                      (state == S_OVERLAP_COMPUTE) &&
                      (lk_stat[0] == 1'b1) &&
-                     (tile_k_cycle < tile_k_len);
+                      (tile_k_cycle < tile_k_cycles);
 
 // ---------------------------------------------------------------------------
 // DMA completion latches
@@ -943,8 +954,12 @@ always @(posedge clk) begin
             // Launch of the next prefetch is delayed to S_PRELOAD after swap.
             // =================================================================
             S_WARMUP_WAIT: begin
-                pe_stat        <= lk_stat[0];
-                pe_load_w      <= (lk_stat[0] == 1'b0) ? 1'b1 : 1'b0;
+                // Tile mode with packed INT8 SIMD must use OS data path so that
+                // W propagates with row skew (same as A).  WS path broadcasts W
+                // to all rows simultaneously, which misaligns K pairs for rows
+                // that receive A data later due to skew.
+                pe_stat        <= (tile_mode && (INT8_SIMD_LANES > 1) && !pe_mode) ? 1'b1 : lk_stat[0];
+                pe_load_w      <= ((lk_stat[0] == 1'b0) && !(tile_mode && (INT8_SIMD_LANES > 1) && !pe_mode)) ? 1'b1 : 1'b0;
                 ws_consume_cnt <= 16'd0;
                 tile_k_cycle   <= 16'd0;
 
@@ -1040,8 +1055,8 @@ always @(posedge clk) begin
                     state <= S_IDLE; busy <= 1'b0;
                     pe_en <= 1'b0; pe_load_w <= 1'b0;
 
-                end else if (lk_stat[0] == 1'b0) begin
-                    // ─── WS mode ───
+                end else if (lk_stat[0] == 1'b0 && !(tile_mode && (INT8_SIMD_LANES > 1) && !pe_mode)) begin
+                    // ─── WS mode (skip when tile+packed: must use OS path) ───
                     pe_load_w <= (ws_consume_cnt < lk_k_dim[15:0]) ? 1'b1 : 1'b0;
                     if (ws_consume_cnt < lk_k_dim[15:0] + 16'd2) begin
                         pe_en <= 1'b1;
@@ -1186,8 +1201,8 @@ always @(posedge clk) begin
                             w_ppb_swap   <= 1'b1;
                             a_ppb_swap   <= 1'b1;
                             r_fifo_clear <= 1'b1;
-                            pe_stat        <= lk_stat[0];
-                            pe_load_w      <= (lk_stat[0] == 1'b0) ? 1'b1 : 1'b0;
+                            pe_stat        <= (tile_mode && (INT8_SIMD_LANES > 1) && !pe_mode) ? 1'b1 : lk_stat[0];
+                            pe_load_w      <= ((lk_stat[0] == 1'b0) && !(tile_mode && (INT8_SIMD_LANES > 1) && !pe_mode)) ? 1'b1 : 1'b0;
                             ws_consume_cnt <= 16'd0;
                             tile_k_cycle   <= 16'd0;
                             dma_w_done_r   <= 1'b0;
@@ -1215,8 +1230,8 @@ always @(posedge clk) begin
                     w_ppb_swap   <= 1'b1;
                     a_ppb_swap   <= 1'b1;
                     r_fifo_clear <= 1'b1;
-                    pe_stat        <= lk_stat[0];
-                    pe_load_w      <= (lk_stat[0] == 1'b0) ? 1'b1 : 1'b0;
+                    pe_stat        <= (tile_mode && (INT8_SIMD_LANES > 1) && !pe_mode) ? 1'b1 : lk_stat[0];
+                    pe_load_w      <= ((lk_stat[0] == 1'b0) && !(tile_mode && (INT8_SIMD_LANES > 1) && !pe_mode)) ? 1'b1 : 1'b0;
                     ws_consume_cnt <= 16'd0;
                     tile_k_cycle   <= 16'd0;
                     dma_w_done_r   <= 1'b0;

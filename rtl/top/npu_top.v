@@ -33,7 +33,7 @@ module npu_top #(
     // End-to-end packed K-lane feed is not enabled yet, so the top-level
     // performance counter defaults to scalar INT8 lanes even though PE-level
     // T7.3/T7.4 SIMD is available.
-    parameter INT8_SIMD_LANES = 1
+    parameter INT8_SIMD_LANES = 2
 )(
     // System
     input  wire              sys_clk,
@@ -254,6 +254,7 @@ wire [1:0] ctrl_post_act_mode;
 wire [31:0] ctrl_post_quant_cfg;
 wire       ctrl_bias_en;
 wire ctrl_tile_mode, ctrl_vec_consume;
+wire ppb_packed_int8 = ctrl_tile_mode && !pe_mode && (INT8_SIMD_LANES > 1);
 wire [31:0] ctrl_tile_m_base, ctrl_tile_n_base; // global C tile origin: m0/n0
 wire [15:0] ctrl_tile_row_valid, ctrl_tile_col_valid; // valid r/c lanes for edge tiles
 wire [4:0]  ctrl_tile_active_rows;
@@ -412,6 +413,7 @@ pingpong_buf #(
     .swap      (ctrl_w_ppb_swap),
     .clear     (ctrl_w_ppb_clear),
     .fp16_mode (pe_mode),
+    .packed_int8(ppb_packed_int8),
     .buf_empty (w_ppb_buf_empty_int),
     .buf_full  (w_ppb_full),
     .buf_ready (w_ppb_buf_ready_int),
@@ -441,6 +443,7 @@ pingpong_buf #(
     .swap      (ctrl_a_ppb_swap),
     .clear     (ctrl_a_ppb_clear),
     .fp16_mode (pe_mode),
+    .packed_int8(ppb_packed_int8),
     .buf_empty (a_ppb_buf_empty_int),
     .buf_full  (a_ppb_full),
     .buf_ready (a_ppb_buf_ready_int),

@@ -52,7 +52,8 @@ module pingpong_buf #(
     input  wire                      swap,       // toggle active bank
     input  wire                      clear,      // reset read/write pointers
     input  wire                      fp16_mode,  // 1=FP16: 16-bit half-word reads (2 per word)
-                                                 // 0=INT8: 8-bit byte reads (SUBW=4 per word)
+                                                  // 0=INT8: 8-bit byte reads (SUBW=4 per word)
+    input  wire                      packed_int8,  // 1=packed INT8 pairs {odd,even} for SIMD
 
     // ---- Status ----
     output wire                      buf_empty,  // no more sub-words to read
@@ -75,7 +76,7 @@ wire [4:0] rd_vec_lanes_eff =
     (rd_vec_lanes == 5'd0)      ? VEC_LANES_5 :
     (rd_vec_lanes > VEC_LANES_5) ? VEC_LANES_5 :
                                    rd_vec_lanes;
-wire [RD_FILL_W-1:0] rd_vec_lanes_fill = rd_vec_lanes_eff;
+wire [RD_FILL_W-1:0] rd_vec_lanes_fill = packed_int8 ? (rd_vec_lanes_eff << 1) : rd_vec_lanes_eff;
 
 // Effective sub-words per word (runtime):
 //   INT8:  eff_subw = 4 (SUBW)
@@ -137,12 +138,20 @@ always @(posedge clk) begin
 end
 
 // Update write pointers & fill counts
+integer mem_init_i;
 always @(posedge clk) begin
-    if (!rst_n || clear) begin
-        wr_ptr_a   <= 0;
-        wr_ptr_b   <= 0;
-        wr_fill_a  <= 0;
-        wr_fill_b  <= 0;
+    if (!rst_n) begin
+        wr_ptr_a   <= 0; wr_ptr_b   <= 0; wr_fill_a  <= 0; wr_fill_b  <= 0;
+        for (mem_init_i = 0; mem_init_i < DEPTH; mem_init_i = mem_init_i + 1) begin
+            mem_a[mem_init_i] <= {DATA_W{1'b0}};
+            mem_b[mem_init_i] <= {DATA_W{1'b0}};
+        end
+    end else if (clear) begin
+        wr_ptr_a   <= 0; wr_ptr_b   <= 0; wr_fill_a  <= 0; wr_fill_b  <= 0;
+        for (mem_init_i = 0; mem_init_i < DEPTH; mem_init_i = mem_init_i + 1) begin
+            mem_a[mem_init_i] <= {DATA_W{1'b0}};
+            mem_b[mem_init_i] <= {DATA_W{1'b0}};
+        end
     end else if (swap) begin
         // Reset the NEW writer's bank (it was just drained by PE)
         // New writer's bank = next_wr_sel (after swap)
@@ -200,7 +209,11 @@ assign rd_data = buf_empty ? {OUT_WIDTH{1'b0}} : rd_data_raw;
 genvar lane_i;
 generate
     for (lane_i = 0; lane_i < VEC_LANES; lane_i = lane_i + 1) begin : gen_rd_vec
-        wire [5:0] lane_abs = {4'b0000, rd_sub} + lane_i[5:0];
+        // Packed INT8 reads each lane's byte at the same sub_idx from two
+        // consecutive words (even/odd K).  Using rd_sub + lane_i (same as
+        // unpacked) is correct because packed mode advances rd_sub by
+        // 2*VEC_LANES per K step, naturally stepping over word pairs.
+        wire [5:0] lane_abs = ({4'b0000, rd_sub} + lane_i[5:0]);
         wire [ADDR_W-1:0] int_word_addr = rd_ptr + lane_abs[5:2];
         wire [ADDR_W-1:0] fp_word_addr  = rd_ptr + lane_abs[5:1];
         wire [1:0] sub_idx      = fp16_mode ? {1'b0, lane_abs[0]} : lane_abs[1:0];
@@ -212,25 +225,40 @@ generate
                               (sub_idx == 2'd1) ? int_word[15: 8] :
                               (sub_idx == 2'd2) ? int_word[23:16] :
                                                    int_word[31:24];
+        // Packed INT8: read the odd-K byte from word that is one K-layer
+        // ahead.  For VEC_LANES active lanes, one K-layer spans
+        // ceil(rd_vec_lanes_eff/4) 32-bit words (4 INT8 per word).
+        wire [ADDR_W-1:0] int_words_per_k = (rd_vec_lanes_eff + 3) >> 2;
+        wire [DATA_W-1:0] int_word2 = packed_int8
+            ? ((rd_sel == 1'b0) ? mem_a[int_word_addr + int_words_per_k]
+                                 : mem_b[int_word_addr + int_words_per_k])
+            : {DATA_W{1'b0}};
+        wire [7:0] vec_byte2 = (sub_idx == 2'd0) ? int_word2[ 7: 0] :
+                               (sub_idx == 2'd1) ? int_word2[15: 8] :
+                               (sub_idx == 2'd2) ? int_word2[23:16] :
+                                                    int_word2[31:24];
         wire [15:0] vec_half = (sub_idx == 2'd0) ? fp_word[15:0] : fp_word[31:16];
 
         wire [OUT_WIDTH-1:0] vec_lane =
-            fp16_mode ? {{(OUT_WIDTH-16){1'b0}}, vec_half}
-                      : {{(OUT_WIDTH-8){vec_byte[7]}}, vec_byte};
+            packed_int8 ? {vec_byte2, vec_byte}  // 16-bit packed pair, no sign ext
+                        : (fp16_mode ? {{(OUT_WIDTH-16){1'b0}}, vec_half}
+                                     : {{(OUT_WIDTH-8){vec_byte[7]}}, vec_byte});
 
-        assign rd_vec[lane_i*OUT_WIDTH +: OUT_WIDTH] =
-            rd_vec_valid ? vec_lane : {OUT_WIDTH{1'b0}};
+            assign rd_vec[lane_i*OUT_WIDTH +: OUT_WIDTH] =
+                rd_vec_valid ? vec_lane : {OUT_WIDTH{1'b0}};
     end
 endgenerate
 
 assign rd_vec_valid = (rd_vec_lanes_eff != 5'd0) && (cur_rd_fill >= rd_vec_lanes_fill);
 
-wire [5:0] vec_abs_next = {4'b0000, rd_sub} + {1'b0, rd_vec_lanes_eff};
+wire [5:0] vec_abs_next = packed_int8
+    ? ({4'b0000, rd_sub} + ({1'b0, rd_vec_lanes_eff} << 1))
+    : ({4'b0000, rd_sub} + {1'b0, rd_vec_lanes_eff});
 wire [ADDR_W:0] vec_word_inc = fp16_mode ? (vec_abs_next >> 1)
-                                         : (vec_abs_next >> 2);
-wire [SUBW_W-1:0] vec_next_sub = fp16_mode
-    ? {{(SUBW_W-1){1'b0}}, vec_abs_next[0]}
-    : vec_abs_next[SUBW_W-1:0];
+                                          : (vec_abs_next >> 2);
+wire [SUBW_W-1:0] vec_next_sub = packed_int8 ? vec_abs_next[SUBW_W-1:0]
+    : (fp16_mode ? {{(SUBW_W-1){1'b0}}, vec_abs_next[0]}
+                 : vec_abs_next[SUBW_W-1:0]);
 
 // Update read pointers & fill counts
 always @(posedge clk) begin

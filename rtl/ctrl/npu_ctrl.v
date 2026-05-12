@@ -258,12 +258,17 @@ wire [31:0] cfg_start_k_len_32 = (k_dim <= cfg_k_tile_elems) ? k_dim
 wire [5:0]  cfg_shape_n_lanes = shape_tile_n_lanes(cfg_shape_in);
 wire [15:0] cfg_vector_elem_bytes_w = cfg_scalar_elem_bytes * {11'd0, cfg_shape_n_lanes};
 wire [15:0] cfg_vector_elem_bytes_a = cfg_scalar_elem_bytes * {11'd0, cfg_shape_lanes};
+// cfg_start uses live arr_cfg (not latched lk_arr_cfg) because config is
+// latched in the same cycle the initial DMA is launched.  Using tile_mode
+// (which reads lk_arr_cfg) would see stale 0 and drop the packed pad.
+wire [15:0] cfg_packed_pad   = arr_cfg[7] && (INT8_SIMD_LANES > 1) ? cfg_vector_elem_bytes_w : 16'd0;
+wire [15:0] cfg_packed_pad_a = arr_cfg[7] && (INT8_SIMD_LANES > 1) ? cfg_vector_elem_bytes_a : 16'd0;
 wire [15:0] cfg_start_tile_len_raw_w = cfg_start_k_len_32[15:0] *
     (arr_cfg[7] ? cfg_vector_elem_bytes_w : cfg_scalar_elem_bytes)
-    + (arr_cfg[7] ? packed_pad : 16'd0);
+    + (arr_cfg[7] ? cfg_packed_pad : 16'd0);
 wire [15:0] cfg_start_tile_len_raw_a = cfg_start_k_len_32[15:0] *
     (arr_cfg[7] ? cfg_vector_elem_bytes_a : cfg_scalar_elem_bytes)
-    + (arr_cfg[7] ? packed_pad_a : 16'd0);
+    + (arr_cfg[7] ? cfg_packed_pad_a : 16'd0);
 // Tile mode already moves whole words per k and is naturally aligned.
 wire [15:0] cfg_start_tile_len_w = arr_cfg[7] ? cfg_start_tile_len_raw_w
     : ((cfg_start_tile_len_raw_w + 16'd3) & 16'hfffc);
@@ -562,12 +567,18 @@ wire [15:0] tile_k_cycles = tile_mode
 wire [15:0] tile_compute_cycles = tile_k_cycles +
                                   tile_active_rows_32[15:0] - 16'd1;
 
+// For tile+packed+INT8, WS must be promoted to OS so that W propagates
+// with row skew.  pe_stat already reflects this override; lk_stat does not.
+// Also advertise OS to vec_consume so data is actually fed to the PE array.
+wire tile_force_os = tile_mode && (INT8_SIMD_LANES > 1) && !pe_mode;
+wire lk_stat0_eff = lk_stat[0] || tile_force_os;
+
 // vec_consume advances one packed A vector and one packed W vector for each
 // logical k. Extra cycles after K drain row-skewed activations through the array.
 assign vec_consume = tile_mode &&
                      pe_en &&
                      (state == S_OVERLAP_COMPUTE) &&
-                     (lk_stat[0] == 1'b1) &&
+                     (lk_stat0_eff == 1'b1) &&
                       (tile_k_cycle < tile_k_cycles);
 
 // ---------------------------------------------------------------------------
@@ -958,8 +969,8 @@ always @(posedge clk) begin
                 // W propagates with row skew (same as A).  WS path broadcasts W
                 // to all rows simultaneously, which misaligns K pairs for rows
                 // that receive A data later due to skew.
-                pe_stat        <= (tile_mode && (INT8_SIMD_LANES > 1) && !pe_mode) ? 1'b1 : lk_stat[0];
-                pe_load_w      <= ((lk_stat[0] == 1'b0) && !(tile_mode && (INT8_SIMD_LANES > 1) && !pe_mode)) ? 1'b1 : 1'b0;
+                pe_stat        <= tile_force_os ? 1'b1 : lk_stat[0];
+                pe_load_w      <= ((lk_stat[0] == 1'b0) && !tile_force_os) ? 1'b1 : 1'b0;
                 ws_consume_cnt <= 16'd0;
                 tile_k_cycle   <= 16'd0;
 
@@ -1055,7 +1066,7 @@ always @(posedge clk) begin
                     state <= S_IDLE; busy <= 1'b0;
                     pe_en <= 1'b0; pe_load_w <= 1'b0;
 
-                end else if (lk_stat[0] == 1'b0 && !(tile_mode && (INT8_SIMD_LANES > 1) && !pe_mode)) begin
+                end else if (lk_stat[0] == 1'b0 && !tile_force_os) begin
                     // ─── WS mode (skip when tile+packed: must use OS path) ───
                     pe_load_w <= (ws_consume_cnt < lk_k_dim[15:0]) ? 1'b1 : 1'b0;
                     if (ws_consume_cnt < lk_k_dim[15:0] + 16'd2) begin
@@ -1075,7 +1086,8 @@ always @(posedge clk) begin
                         if (!pe_en) begin
                             tile_k_cycle <= 16'd0;
                         end else if (tile_k_cycle + 16'd1 >= tile_compute_cycles) begin
-                            pe_en        <= 1'b0;
+                            // Keep pe_en=1 so the PE pipeline drains completely
+                            // before S_DRAIN asserts flush on the next cycle.
                             tile_k_cycle <= 16'd0;
                             if (!k_tile_last) begin
                                 tile_i     <= seq1_i;
@@ -1201,8 +1213,8 @@ always @(posedge clk) begin
                             w_ppb_swap   <= 1'b1;
                             a_ppb_swap   <= 1'b1;
                             r_fifo_clear <= 1'b1;
-                            pe_stat        <= (tile_mode && (INT8_SIMD_LANES > 1) && !pe_mode) ? 1'b1 : lk_stat[0];
-                            pe_load_w      <= ((lk_stat[0] == 1'b0) && !(tile_mode && (INT8_SIMD_LANES > 1) && !pe_mode)) ? 1'b1 : 1'b0;
+                            pe_stat        <= tile_force_os ? 1'b1 : lk_stat[0];
+                            pe_load_w      <= ((lk_stat[0] == 1'b0) && !tile_force_os) ? 1'b1 : 1'b0;
                             ws_consume_cnt <= 16'd0;
                             tile_k_cycle   <= 16'd0;
                             dma_w_done_r   <= 1'b0;
@@ -1230,8 +1242,8 @@ always @(posedge clk) begin
                     w_ppb_swap   <= 1'b1;
                     a_ppb_swap   <= 1'b1;
                     r_fifo_clear <= 1'b1;
-                    pe_stat        <= (tile_mode && (INT8_SIMD_LANES > 1) && !pe_mode) ? 1'b1 : lk_stat[0];
-                    pe_load_w      <= ((lk_stat[0] == 1'b0) && !(tile_mode && (INT8_SIMD_LANES > 1) && !pe_mode)) ? 1'b1 : 1'b0;
+                    pe_stat        <= tile_force_os ? 1'b1 : lk_stat[0];
+                    pe_load_w      <= ((lk_stat[0] == 1'b0) && !tile_force_os) ? 1'b1 : 1'b0;
                     ws_consume_cnt <= 16'd0;
                     tile_k_cycle   <= 16'd0;
                     dma_w_done_r   <= 1'b0;

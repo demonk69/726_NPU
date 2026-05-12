@@ -71,12 +71,13 @@ localparam FILL_W    = ADDR_W + 1;
 localparam SUBW_W    = $clog2(SUBW);             // 2 bits for SUBW=4 index
 localparam RD_FILL_W = $clog2(DEPTH * SUBW) + 1; // max fill: DEPTH*4 sub-words
 localparam [4:0] VEC_LANES_5 = VEC_LANES;
+localparam [2:0] PACKED_LANES = (OUT_WIDTH + 7) / 8;  // 2 for 16b, 4 for 32b
 
 wire [4:0] rd_vec_lanes_eff =
     (rd_vec_lanes == 5'd0)      ? VEC_LANES_5 :
     (rd_vec_lanes > VEC_LANES_5) ? VEC_LANES_5 :
                                    rd_vec_lanes;
-wire [RD_FILL_W-1:0] rd_vec_lanes_fill = packed_int8 ? (rd_vec_lanes_eff << 1) : rd_vec_lanes_eff;
+wire [RD_FILL_W-1:0] rd_vec_lanes_fill = packed_int8 ? (rd_vec_lanes_eff * PACKED_LANES) : rd_vec_lanes_eff;
 
 // Effective sub-words per word (runtime):
 //   INT8:  eff_subw = 4 (SUBW)
@@ -225,22 +226,39 @@ generate
                               (sub_idx == 2'd1) ? int_word[15: 8] :
                               (sub_idx == 2'd2) ? int_word[23:16] :
                                                    int_word[31:24];
-        // Packed INT8: read the odd-K byte from word that is one K-layer
-        // ahead.  For VEC_LANES active lanes, one K-layer spans
-        // ceil(rd_vec_lanes_eff/4) 32-bit words (4 INT8 per word).
+        // Packed INT8: read additional K bytes from K-layers ahead.
+        // word offset = j * int_words_per_k where j runs from 1 to PACKED_LANES-1.
         wire [ADDR_W-1:0] int_words_per_k = (rd_vec_lanes_eff + 3) >> 2;
-        wire [DATA_W-1:0] int_word2 = packed_int8
-            ? ((rd_sel == 1'b0) ? mem_a[int_word_addr + int_words_per_k]
-                                 : mem_b[int_word_addr + int_words_per_k])
+        wire [DATA_W-1:0] int_word2 = packed_int8 && (PACKED_LANES >= 2)
+            ? ((rd_sel == 1'b0) ? mem_a[int_word_addr + 1 * int_words_per_k]
+                                 : mem_b[int_word_addr + 1 * int_words_per_k])
+            : {DATA_W{1'b0}};
+        wire [DATA_W-1:0] int_word3 = packed_int8 && (PACKED_LANES >= 3)
+            ? ((rd_sel == 1'b0) ? mem_a[int_word_addr + 2 * int_words_per_k]
+                                 : mem_b[int_word_addr + 2 * int_words_per_k])
+            : {DATA_W{1'b0}};
+        wire [DATA_W-1:0] int_word4 = packed_int8 && (PACKED_LANES >= 4)
+            ? ((rd_sel == 1'b0) ? mem_a[int_word_addr + 3 * int_words_per_k]
+                                 : mem_b[int_word_addr + 3 * int_words_per_k])
             : {DATA_W{1'b0}};
         wire [7:0] vec_byte2 = (sub_idx == 2'd0) ? int_word2[ 7: 0] :
                                (sub_idx == 2'd1) ? int_word2[15: 8] :
                                (sub_idx == 2'd2) ? int_word2[23:16] :
                                                     int_word2[31:24];
+        wire [7:0] vec_byte3 = (sub_idx == 2'd0) ? int_word3[ 7: 0] :
+                               (sub_idx == 2'd1) ? int_word3[15: 8] :
+                               (sub_idx == 2'd2) ? int_word3[23:16] :
+                                                    int_word3[31:24];
+        wire [7:0] vec_byte4 = (sub_idx == 2'd0) ? int_word4[ 7: 0] :
+                               (sub_idx == 2'd1) ? int_word4[15: 8] :
+                               (sub_idx == 2'd2) ? int_word4[23:16] :
+                                                    int_word4[31:24];
         wire [15:0] vec_half = (sub_idx == 2'd0) ? fp_word[15:0] : fp_word[31:16];
 
         wire [OUT_WIDTH-1:0] vec_lane =
-            packed_int8 ? {vec_byte2, vec_byte}  // 16-bit packed pair, no sign ext
+            packed_int8 ? (PACKED_LANES == 4 ? {vec_byte4, vec_byte3, vec_byte2, vec_byte}
+                         : PACKED_LANES == 3 ? {{(OUT_WIDTH-24){1'b0}}, vec_byte3, vec_byte2, vec_byte}
+                                            : {vec_byte2, vec_byte})
                         : (fp16_mode ? {{(OUT_WIDTH-16){1'b0}}, vec_half}
                                      : {{(OUT_WIDTH-8){vec_byte[7]}}, vec_byte});
 
@@ -252,7 +270,7 @@ endgenerate
 assign rd_vec_valid = (rd_vec_lanes_eff != 5'd0) && (cur_rd_fill >= rd_vec_lanes_fill);
 
 wire [5:0] vec_abs_next = packed_int8
-    ? ({4'b0000, rd_sub} + ({1'b0, rd_vec_lanes_eff} << 1))
+    ? ({4'b0000, rd_sub} + (rd_vec_lanes_eff * PACKED_LANES))
     : ({4'b0000, rd_sub} + {1'b0, rd_vec_lanes_eff});
 wire [ADDR_W:0] vec_word_inc = fp16_mode ? (vec_abs_next >> 1)
                                           : (vec_abs_next >> 2);

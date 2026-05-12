@@ -530,9 +530,16 @@ generate
 endgenerate
 
 // One-tile DMA byte length — W and A may differ for non-square shapes (8x32)
-// Packed INT8 SIMD: add one extra word so the last lane block has a full word pair.
-wire [15:0] packed_pad = tile_mode && (INT8_SIMD_LANES > 1) ? vector_elem_bytes_w : 16'd0;
-wire [15:0] packed_pad_a = tile_mode && (INT8_SIMD_LANES > 1) ? vector_elem_bytes_a : 16'd0;
+// Packed INT8 SIMD: pad so the last lane block has a full SIMD group.
+// General: pad = vector_bytes * (SIMD_LANES - k_len mod SIMD_LANES) when
+// remainder non-zero.  For K=4/LANES=2 this gives 0; K=3/LANES=4 gives 1.
+wire [3:0] packed_k_rem = tile_mode ? (tile_k_len % {12'd0, INT8_SIMD_LANES}) : 4'd0;
+wire [15:0] packed_pad = tile_mode && (INT8_SIMD_LANES > 1) && (packed_k_rem != 4'd0)
+    ? (vector_elem_bytes_w * ({4'd0, INT8_SIMD_LANES} - {1'b0, packed_k_rem}))
+    : 16'd0;
+wire [15:0] packed_pad_a = tile_mode && (INT8_SIMD_LANES > 1) && (packed_k_rem != 4'd0)
+    ? (vector_elem_bytes_a * ({4'd0, INT8_SIMD_LANES} - {1'b0, packed_k_rem}))
+    : 16'd0;
 wire [15:0] tile_len_raw_w = tile_k_len * (tile_mode ? vector_elem_bytes_w : scalar_elem_bytes)
                               + (tile_mode ? packed_pad : 16'd0);
 wire [15:0] tile_len_raw_a = tile_k_len * (tile_mode ? vector_elem_bytes_a : scalar_elem_bytes)
@@ -559,7 +566,7 @@ wire is_last_tile = (tile_i == tile_iter_m_count - 1) &&
 
 // Result DMA: scalar mode writes one word; tile mode writes one row burst.
 localparam [15:0] TILE_R_LEN = 16'd4;
-localparam [3:0]  INT8_SIMD_LANES = 2;  // packed INT8 SIMD lanes
+localparam [3:0]  INT8_SIMD_LANES = 4;  // packed INT8 SIMD lanes
 
 wire [15:0] tile_k_cycles = tile_mode
     ? ((tile_k_len + {12'd0, INT8_SIMD_LANES} - 16'd1) / {12'd0, INT8_SIMD_LANES})

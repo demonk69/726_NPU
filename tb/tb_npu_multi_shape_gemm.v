@@ -6,7 +6,7 @@ module tb_npu_multi_shape_gemm;
 
 initial $display("=== MODULE ELABORATED ===");
 
-localparam DATA_W  = 16;
+localparam DATA_W  = 32;
 localparam ACC_W   = 32;
 localparam CLK_T   = 10;
 

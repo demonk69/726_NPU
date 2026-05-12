@@ -26,14 +26,11 @@ module npu_top #(
     parameter COLS         = 16,
     parameter PHY_ROWS     = 16,       // physical rows
     parameter PHY_COLS     = 16,       // physical cols
-    parameter DATA_W       = 16,
+    parameter DATA_W       = 32,
     parameter ACC_W        = 32,
     parameter PPB_DEPTH    = 64,
     parameter PPB_THRESH   = 16,
-    // End-to-end packed K-lane feed is not enabled yet, so the top-level
-    // performance counter defaults to scalar INT8 lanes even though PE-level
-    // T7.3/T7.4 SIMD is available.
-    parameter INT8_SIMD_LANES = 2
+    parameter INT8_SIMD_LANES = 4
 )(
     // System
     input  wire              sys_clk,

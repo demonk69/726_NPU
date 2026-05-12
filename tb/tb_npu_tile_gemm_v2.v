@@ -8,7 +8,7 @@ module tb_npu_tile_gemm_v2;
 `define OUTPUT_HEX "npu_output.hex"
 `endif
 
-localparam DATA_W  = 16;
+localparam DATA_W  = 32;
 localparam ACC_W   = 32;
 localparam CLK_T   = 10;
 

@@ -2,7 +2,7 @@
 
 面向边缘 AI 推理的异构处理器原型：PicoRV32 CPU 负责控制和任务编排，NPU 负责矩阵乘和卷积中的高负载计算。项目目标是通过 AXI4-Lite 配置通路和 AXI4 DMA 数据通路，实现可验证、可扩展、低功耗的 NPU 加速器。
 
-更新时间：2026-05-04
+更新时间：2026-05-13
 
 ## 当前结论
 
@@ -76,19 +76,27 @@ N = Cout
 
 ## 文档入口
 
-| 文档 | 内容 |
-|---|---|
-| [doc/current_status.md](doc/current_status.md) | 当前 RTL 事实、已验证项和不应再引用的旧结论 |
-| [doc/architecture.md](doc/architecture.md) | 目标 NPU 架构、PE 数据流、FSM、AXI/DMA 带宽设计 |
-| [doc/conv_gemm_mapping.md](doc/conv_gemm_mapping.md) | 卷积映射为 GEMM 的公式、变量含义和索引展开 |
-| [doc/module_reference.md](doc/module_reference.md) | 各 RTL 模块职责、当前差距和改造方向 |
-| [doc/task_breakdown.md](doc/task_breakdown.md) | 后续任务拆分，按优先级一个一个解决 |
-| [doc/user_manual.md](doc/user_manual.md) | CPU 侧编程模型和寄存器/descriptor 规划 |
-| [doc/simulation_guide.md](doc/simulation_guide.md) | 当前可运行仿真、失败入口和后续验证顺序 |
-| [doc/npu_debug_checklist.md](doc/npu_debug_checklist.md) | 调试检查清单 |
-| [doc/soc_integration_plan.md](doc/soc_integration_plan.md) | PicoRV32 + NPU + AXI/DRAM 集成计划 |
-| [doc/architecture_fix_plan.md](doc/architecture_fix_plan.md) | 从当前原型演进到目标架构的修复路线 |
-| [doc/git_guide.md](doc/git_guide.md) | Git 协作说明 |
+下表中的“状态”专指：**我接手当前工程后，是否已经按当前分支的真实可复现状态重新核对 / 整理过这份文档。**
+
+- `已处理`：本轮已重新阅读、引用或更新，能和当前分支状态对齐使用。
+- `未处理`：还没有在本轮重新核对；可以保留为历史参考，但不要默认当成当前事实。
+
+| 文档 | 状态 | 内容 |
+|---|---|---|
+| [doc/current_status.md](doc/current_status.md) | 已处理 | 当前 RTL 事实、已验证项和不应再引用的旧结论；用于判断 4x4/8x8/16x16/8x32 的历史验证边界 |
+| [doc/architecture.md](doc/architecture.md) | 已处理 | 目标 NPU 架构、PE 数据流、P2 tile edge 数据布局和闭环边界 |
+| [doc/conv_gemm_mapping.md](doc/conv_gemm_mapping.md) | 未处理 | 卷积映射为 GEMM 的公式、变量含义和索引展开 |
+| [doc/module_reference.md](doc/module_reference.md) | 未处理 | 各 RTL 模块职责、当前差距和改造方向 |
+| [doc/task_breakdown.md](doc/task_breakdown.md) | 已处理 | 后续任务拆分；P2.3.1 已更新为 4x4 single-lane WS row-vector micro-run 闭合 |
+| [doc/user_manual.md](doc/user_manual.md) | 未处理 | CPU 侧编程模型和寄存器/descriptor 规划 |
+| [doc/simulation_guide.md](doc/simulation_guide.md) | 已处理 | 当前可运行仿真、失败入口和后续验证顺序；包含 4x4 P2 tile edge smoke、8x8/16x16 active lane feed 与 8x32 阵列路由入口 |
+| [doc/npu_debug_checklist.md](doc/npu_debug_checklist.md) | 未处理 | 调试检查清单 |
+| [doc/soc_integration_plan.md](doc/soc_integration_plan.md) | 未处理 | PicoRV32 + NPU + AXI/DRAM 集成计划 |
+| [doc/architecture_fix_plan.md](doc/architecture_fix_plan.md) | 未处理 | 从当前原型演进到目标架构的修复路线 |
+| [doc/git_guide.md](doc/git_guide.md) | 未处理 | Git 协作说明 |
+| [doc/visual_cnn_verification.md](doc/visual_cnn_verification.md) | 已处理 | visual CNN / 边沿检测类验证入口说明；当前走的是 direct scalar Conv2D 主线，不是 tile inference 主线 |
+| [doc/pth_inference_subset.md](doc/pth_inference_subset.md) | 已处理 | `.pth -> host converter -> CPU/NPU split` 的支持范围、tiny/multilayer smoke、RepOpt host/RTL 入口说明 |
+| [doc/repopt_full_soc_inference_worklog.md](doc/repopt_full_soc_inference_worklog.md) | 已处理 | 当前 RepOpt SoC inference 临时实施记录；包含 Step1-Step8、4x4/8x8/16x16/8x32 边界说明和当前 pool/inference 进度 |
 
 ## 目录结构
 
@@ -165,7 +173,7 @@ scripts/run_regression.ps1 -> TOTAL: 2330 PASS, 0 FAIL
 scripts/run_soc_sim.ps1 -> [PASS] SoC integration test PASSED, C00=19 C01=22 C10=43 C11=50
 ```
 
-SoC 仿真入口已修复旧 `.ROWS/.COLS`、`dram_model` `axi_arlen`、PicoRV32 PCPI 端口、AXI-lite bridge AW/W 握手和 SoC 内存 ready/rdata 对齐问题。T2.1-T2.6 已完成 4x4 tile 的 A/W tile-pack、4-lane vector read、tile planner、vector consume、OS row-skew feeder、16-output serializer、row-wise writeback，以及 4x4 INT8/FP16 GEMM golden 测试。T3.1-T3.5 已完成 AXI read/write burst、4KB 边界切分、AXI perf counters、混合 burst 正确性测试和带宽利用率目标测试；T4.1-T4.5 已明确并实现 PSUM/OUT Buffer 的 tile-local RMW 存储、accumulator init、controller k_tile loop 和顶层 K-split GEMM golden。T5.1 已固定 descriptor v1 二进制格式，T5.2 已给 AXI-Lite 增加 `DESC_BASE/DESC_COUNT`，T5.3 已实现第一版 descriptor fetch/decode/next-layer，T5.4 已实现 INT8 OFM->IFM 两层 GEMM 串联，T5.5 已补齐 `STATUS.error`、done/error IRQ 和 `ERR_STATUS(0x74)` W1C 错误状态。T6.1 已完成 DRAM 预展开 Conv2D im2col 仿真；T6.2 已完成 direct scalar on-the-fly Conv2D im2col 仿真；T6.3-T6.5 已完成 direct scalar bias、ReLU/ReLU6 和 INT8 quant/saturate 后处理；T6.6 已完成两层 Conv2D E2E；T7.1-T7.5 已完成宽 lane 供数、8x32 阵列级折叠路由、PE 级 INT8 2/4-lane SIMD 和 TOPS/util 性能计数器报告；全量回归当前为 2330 PASS / 0 FAIL。当前 tile/descriptor 主线是 OS；direct scalar matmul/Conv2D 回归同时覆盖 OS 和 WS。下一步进入 descriptor 化卷积、packed K lane 供数或更大 tile 完整写回。
+SoC 仿真入口已修复旧 `.ROWS/.COLS`、`dram_model` `axi_arlen`、PicoRV32 PCPI 端口、AXI-lite bridge AW/W 握手和 SoC 内存 ready/rdata 对齐问题。T2.1-T2.6 已完成 4x4 tile 的 A/W tile-pack、4-lane vector read、tile planner、vector consume、OS row-skew feeder、16-output serializer、row-wise writeback，以及 4x4 INT8/FP16 GEMM golden 测试。P2.3.1 已额外闭合 `4x4 / single-lane / WS row-vector micro-run` tile edge case：WS 按每个 M row 的 `K=1` micro-run 写回 1x4，testbench 累加为完整 4x4 edge tile 并与 golden 比较。T3.1-T3.5 已完成 AXI read/write burst、4KB 边界切分、AXI perf counters、混合 burst 正确性测试和带宽利用率目标测试；T4.1-T4.5 已明确并实现 PSUM/OUT Buffer 的 tile-local RMW 存储、accumulator init、controller k_tile loop 和顶层 K-split GEMM golden。T5.1 已固定 descriptor v1 二进制格式，T5.2 已给 AXI-Lite 增加 `DESC_BASE/DESC_COUNT`，T5.3 已实现第一版 descriptor fetch/decode/next-layer，T5.4 已实现 INT8 OFM->IFM 两层 GEMM 串联，T5.5 已补齐 `STATUS.error`、done/error IRQ 和 `ERR_STATUS(0x74)` W1C 错误状态。T6.1 已完成 DRAM 预展开 Conv2D im2col 仿真；T6.2 已完成 direct scalar on-the-fly Conv2D im2col 仿真；T6.3-T6.5 已完成 direct scalar bias、ReLU/ReLU6 和 INT8 quant/saturate 后处理；T6.6 已完成两层 Conv2D E2E；T7.1-T7.5 已完成宽 lane 供数、8x32 阵列级折叠路由、PE 级 INT8 2/4-lane SIMD 和 TOPS/util 性能计数器报告；全量回归当前为 2330 PASS / 0 FAIL。当前 descriptor 主线仍是 OS；direct scalar matmul/Conv2D 回归同时覆盖 OS 和 WS。P2.3.1 不代表 8x8/16x16/8x32 WS、multi-lane packed K 或完整 CPU+NPU 推理闭环已通过；下一步进入 descriptor 化卷积、packed K lane 供数或更大 tile 完整写回。
 
 ## 性能目标口径
 

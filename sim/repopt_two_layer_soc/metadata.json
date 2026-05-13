@@ -1,0 +1,35 @@
+{
+  "schema": "repopt_two_layer_soc_case_v1",
+  "sample_index": 0,
+  "cifar_label": 3,
+  "input_quant_scale": 0.02159789204597473,
+  "input_quant_zero_point": 0,
+  "stage1_0_full_tiles": 144,
+  "stage1_1_window": {
+    "m_base": 32,
+    "n_base": 4,
+    "m_tiles": 2,
+    "n_tiles": 1,
+    "m_bases": [
+      32,
+      36
+    ]
+  },
+  "layout": {
+    "repack0_base": "0x00007500",
+    "w1_base": "0x00017500",
+    "a1_base": "0x00018000",
+    "q1_base": "0x00018a00",
+    "repack1_base": "0x00018b00",
+    "pool_base": "0x00028b00",
+    "marker_addr": "0x00018b00",
+    "dram_words": 163840
+  },
+  "expected_q2_count": 32,
+  "with_pool": false,
+  "pool_row_base": 0,
+  "pool_rows": 1,
+  "pool_col_base": 0,
+  "pool_cols": 4,
+  "note": "First layer runs full and repacks to NCHW int8. Second layer consumes that repacked IFM through CPU-built tile scratch data. Optional mode repacks stage1_1 output and runs CPU MaxPool strips."
+}

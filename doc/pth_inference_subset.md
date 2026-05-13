@@ -271,3 +271,161 @@ R = [28, 22, 25, 37]
 
 - 参考 CPU 可以连续调度多个 `.pth` 转换出来的 NPU Conv/ReLU 层。
 - 层间必须由 CPU 把 NPU row-major int32 OFM 重新打包成下一层 Conv 所需的 NCHW int8 IFM。
+
+## RepOpt VGG host 整网状态
+
+RepOpt VGG 的 int8 checkpoint 使用 signed qint8 activation；当前 PyTorch CPU quantized Conv 后端期望 quint8 activation，因此不能直接把该 checkpoint 当作 stock PyTorch eager int8 模型运行。已新增 host-side CPU/NPU split interpreter：
+
+```powershell
+python tools\pth\run_repopt_vgg_host.py `
+  --index 0 `
+  --out-json sim\pth_repopt_host_run\host_run_idx0.json
+```
+
+图片输入使用同一入口：
+
+```powershell
+python tools\pth\run_repopt_vgg_host.py `
+  --image path\to\image.png `
+  --conv-backend tile4 `
+  --out-json sim\pth_repopt_host_run\image_tile4.json
+```
+
+图片路径会执行 `RGB -> resize 32x32 -> ToTensor -> CIFAR-10 Normalize -> qint8 quantize`。模型仍是 CIFAR-10 分类器，只会输出 10 类之一。
+
+该解释器按当前计划分工执行整网：
+
+```text
+NPU 语义：Conv2D int8*int8 -> int32 accumulator + bias + ReLU
+CPU 语义：per-channel requant、NCHW repack、MaxPool、AvgPool、Flatten、Linear
+```
+
+已确认 CIFAR-10 test 样本：
+
+```text
+index 0: true=cat  pred=cat  logits_int8=-14 -8 -3 96 -28 9 6 -11 -17 -30
+index 1: true=ship pred=ship logits_int8=7 16 -17 -14 -22 -21 -16 -20 92 -6
+index 2: true=ship pred=ship logits_int8=8 52 -16 -16 -16 -24 -16 -20 59 -11
+```
+
+这说明 RepOpt VGG 已经可以在 host 上按“参考 CPU + NPU 语义”跑完整推理。下一步不是立刻全网 SoC，而是抽取 RepOpt 的实际 Conv 层做 RTL 分段验证；全网 SoC 仍需要扩大 DRAM 和模型资产 loader。
+
+当前 host 解释器已有两个 Conv backend：
+
+```text
+direct: full Conv accumulator model，等价于 NPU Conv2D + bias + ReLU 后再 CPU requant
+tile4 : 全网 Conv-as-GEMM 4x4 tile 调度，CPU 做 bias/ReLU、per-channel requant、pool、linear
+```
+
+已用 CIFAR-10 样本 0 导出的 PNG 验证图片入口：
+
+```text
+image_idx0_direct: pred=cat
+image_idx0_tile4 : pred=cat
+```
+
+`tile4` backend 的全网层调度已经覆盖 9 个 Conv 层，tile 数分别为：
+
+```text
+4096, 4096, 2048, 2048, 1024, 1024, 1024, 512, 512
+```
+
+## RepOpt VGG 分段 RTL 状态
+
+已新增 `tools/pth/gen_repopt_layer_case.py` 和 `scripts/run_repopt_layer_case.ps1`，用于把 RepOpt 的真实 Conv 层抽出来送进现有 `npu_top` direct Conv2D testbench。默认先跑第一层 `stage1_0_conv` 的左上角 `4x4` 输出窗口：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_repopt_layer_case.ps1 -Index 0
+```
+
+当前通过结果：
+
+```text
+layer=stage1_0_conv sample_index=0 cifar_label=3
+output_window=4x4 of full 32x32
+GEMM M=16 K=27 N=64 results=1024
+ALL 1024 CHECKS PASSED
+```
+
+该 case 使用 `.pth` 中的真实 int8 权重、真实 int32 bias、CIFAR-10 样本 0 的真实量化输入，比较点是 NPU 输出的 `Conv2D + bias + ReLU` int32 accumulator，尚未进入 CPU per-channel requant。完整第一层是 `M=1024, K=27, N=64`，在当前 1x1 标量 Verilog 仿真下运行时间较长，因此先以 tile 方式建立可重复的 RTL golden。若要请求完整第一层，可使用 `-TileOH 0 -TileOW 0`。
+
+注意：上面的 `4x4` 是输出空间窗口裁剪，仍走 direct scalar Conv2D 路径，并不是 `ARR_CFG[7]` 的硬件 4x4 tile-mode。
+
+真正的 4x4 tile-mode 入口为 `tools/pth/gen_repopt_tile_case.py` 和 `scripts/run_repopt_tile_case.ps1`：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_repopt_tile_case.ps1 `
+  -Index 0 -MBase 0 -NBase 0
+```
+
+当前已通过两个 RepOpt 第一层真实 tile：
+
+```text
+repopt_stage1_0_conv_tile4_m0_n0_idx0 : ALL 16 CHECKS PASSED
+repopt_stage1_0_conv_tile4_m33_n4_idx0: ALL 16 CHECKS PASSED
+```
+
+这个 case 把 Conv2D 展开为一个局部 `4x27x4` GEMM tile，预打包为 `A_TILE[k][r]` 和 `W_TILE[k][c]`，并启用 `ARR_CFG[7]`。当前 tile-mode 写回比较的是 raw int32 MAC accumulator；bias/ReLU/per-channel requant 还没有并入 tile 写回路径，需要后续再做。
+
+已新增 `tools/pth/run_repopt_layer_tile_rtl.py`，用于把多个真实 RTL tile 串起来形成一个局部 layer window，并在 host CPU 上执行后处理：
+
+```powershell
+python tools\pth\run_repopt_layer_tile_rtl.py `
+  --index 0 `
+  --m-base 0 --n-base 0 `
+  --m-tiles 2 --n-tiles 2 `
+  --out-json sim\pth_repopt_tile_rtl\stage1_0_m0_n0_2x2.json
+```
+
+当前通过结果：
+
+```text
+layer=stage1_0_conv sample_index=0 window=M[0:8) N[0:8)
+tiles_run=4 raw_min=-19045 raw_max=24423
+q_min=0 q_max=24
+```
+
+该入口真实运行 4 个 `ARR_CFG[7]` tile case，收集每个 case 的 `npu_output.hex`，拼成 `8x8` raw accumulator window，然后由 CPU 执行 `bias/ReLU/per-channel requant`。后处理后的 qint8 window 已和 host 第一层 golden 对比，当前 mismatch 为 0。
+
+进一步已新增 `tools/pth/gen_repopt_tile_soc_case.py` 和 `scripts/run_repopt_tile_soc.ps1`，把 tile 调度和第一层后处理下沉到参考 CPU 固件：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_repopt_tile_soc.ps1 `
+  -Index 0 -MBase 0 -NBase 0 -MTiles 2 -NTiles 2
+```
+
+当前通过结果：
+
+```text
+[PASS] RepOpt tile-window SoC MMIO + CPU postprocess test PASSED!
+Cycles: 8743
+window: M[0:8) N[0:8)
+tiles scheduled by CPU: 4
+first tile result[0] = 7383
+first postprocess q[0] = 11
+```
+
+这一步生成一次 DRAM image 和一次 RV32I firmware；仿真中参考 CPU 通过 MMIO 连续配置多个 `4x27x4` tile，NPU 在同一次 RTL 仿真内逐 tile 运算。随后 CPU 固件从 DRAM 读回 raw int32 MAC window，执行真实 bias、ReLU 和 per-channel 固定点 requant，并把 qint8 window 写回 DRAM。testbench 会同时校验 raw MAC 结果和固件后处理 q 结果。
+
+固件现在使用嵌套循环调度 tile，不再按 tile 展开指令，因此已经可以跑完整第一层窗口：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_repopt_tile_soc.ps1 `
+  -Index 0 -FullLayer
+```
+
+当前完整第一层通过结果：
+
+```text
+[PASS] RepOpt tile-window SoC MMIO + CPU postprocess test PASSED!
+Cycles: 8851650
+window: M[0:1024) N[0:64)
+tiles scheduled by CPU: 4096
+first tile result[0] = 7383
+first postprocess q[0] = 11
+firmware words: 91
+q_base: 0x00049500, q_count: 65536
+marker: 0x00089500, dram_words: 141312
+```
+
+如果只想检查生成和编译，可加 `-CompileOnly`。完整第一层仿真需要调度 4096 个 NPU tile，在 Icarus Verilog 下耗时较长，所以不作为默认 smoke。

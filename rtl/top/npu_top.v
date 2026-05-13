@@ -637,6 +637,7 @@ wire [PHY_ROWS*PHY_COLS-1:0] pe_acc_init_mask;
 wire [32*ACC_W-1:0]         pe_array_result;    // max 32 output columns (8×32 mode)
 wire [31:0]                 pe_array_valid;
 wire [PHY_ROWS*PHY_COLS-1:0] pe_active_dbg;
+wire                         pe_array_load_w;
 
 // Data source from PPBuf
 wire [DATA_W-1:0] pe_w_data = w_ppb_rd_data;
@@ -709,6 +710,8 @@ endgenerate
 assign pe_acc_in = {PHY_COLS*ACC_W{1'b0}};
 assign pe_acc_init = {PHY_ROWS*PHY_COLS*ACC_W{1'b0}};
 assign pe_acc_init_mask = {PHY_ROWS*PHY_COLS{1'b0}};
+assign pe_array_load_w = pe_load_w &&
+                         (!ctrl_tile_mode || pe_stat || tile_vec_fire);
 
 // ---------------------------------------------------------------------------
 // Scalar compatibility PE
@@ -893,7 +896,7 @@ reconfig_pe_array #(
     .stat_mode      (pe_stat),
     .en             (pe_en),
     .flush          (pe_flush),
-    .load_w         (pe_load_w),
+    .load_w         (pe_array_load_w),
     .swap_w         (pe_swap_w),
     .acc_init_en    (1'b0),
     .w_in           (pe_w_in),
@@ -922,10 +925,11 @@ wire       tile_ser_fire = tile_ser_busy && !r_fifo_full;
 wire       tile_ser_last_col = ({1'b0, tile_ser_col} + 3'd1) >= tile_ser_active_cols;
 wire       tile_ser_last_row = ({1'b0, tile_ser_row} + 3'd1) >= tile_ser_active_rows;
 wire       tile_ser_last     = tile_ser_last_col && tile_ser_last_row;
+wire       tile_ws_rowvec_mode = ctrl_tile_mode && !pe_stat && (ctrl_cfg_shape == 2'b00);
 wire       tile_result_capture = ctrl_tile_mode &&
-                                 pe_stat &&
-                                 pe_array_valid[0] &&
-                                 !tile_ser_busy;
+                                 !tile_ser_busy &&
+                                 (tile_ws_rowvec_mode ? pe_array_valid[0]
+                                                      : |pe_array_valid);
 
 integer tile_ser_i;
 always @(posedge sys_clk) begin
@@ -938,15 +942,25 @@ always @(posedge sys_clk) begin
         for (tile_ser_i = 0; tile_ser_i < 16; tile_ser_i = tile_ser_i + 1)
             tile_result_buf[tile_ser_i] <= {ACC_W{1'b0}};
     end else if (tile_result_capture) begin
-        // Capture all 16 PE outputs at once, then push only active rows/cols
-        // into the result FIFO in row-major order for DMA row-wise writeback.
-        for (tile_ser_i = 0; tile_ser_i < 16; tile_ser_i = tile_ser_i + 1)
-            tile_result_buf[tile_ser_i] <= pe_array_result[tile_ser_i*ACC_W +: ACC_W];
-        tile_ser_active_rows <= ctrl_tile_active_rows;
+        // WS 4x4 row-vector micro-runs emit a 1x4 vector from row 0. OS keeps the
+        // original row-major 4x4 capture behavior.
+        if (tile_ws_rowvec_mode) begin
+            for (tile_ser_i = 0; tile_ser_i < 16; tile_ser_i = tile_ser_i + 1)
+                tile_result_buf[tile_ser_i] <= (tile_ser_i < 4)
+                                               ? pe_array_result[tile_ser_i*ACC_W +: ACC_W]
+                                               : {ACC_W{1'b0}};
+            tile_ser_active_rows <= 3'd1;
+        end else begin
+            for (tile_ser_i = 0; tile_ser_i < 16; tile_ser_i = tile_ser_i + 1)
+                tile_result_buf[tile_ser_i] <= pe_array_valid[tile_ser_i]
+                                               ? pe_array_result[tile_ser_i*ACC_W +: ACC_W]
+                                               : {ACC_W{1'b0}};
+            tile_ser_active_rows <= ctrl_tile_active_rows;
+        end
         tile_ser_active_cols <= ctrl_tile_active_cols;
         tile_ser_row         <= 2'd0;
         tile_ser_col         <= 2'd0;
-        tile_ser_busy        <= (ctrl_tile_active_rows != 3'd0) &&
+        tile_ser_busy        <= ((tile_ws_rowvec_mode ? 3'd1 : ctrl_tile_active_rows) != 3'd0) &&
                                 (ctrl_tile_active_cols != 3'd0);
     end else if (tile_ser_fire) begin
         if (tile_ser_last) begin

@@ -1,0 +1,32 @@
+{
+  "name": "p2_edge_4x4_ws_l4",
+  "shape": "4x4",
+  "dataflow": "ws",
+  "lanes": 4,
+  "batch": 1,
+  "cin": 1,
+  "cout": 4,
+  "ih": 8,
+  "iw": 8,
+  "oh": 8,
+  "ow": 8,
+  "m_dim": 64,
+  "n_dim": 4,
+  "k_dim": 9,
+  "tile_m": 4,
+  "tile_n": 4,
+  "m_base": 9,
+  "n_base": 0,
+  "filter_names": [
+    "sobel_x",
+    "sobel_y",
+    "laplacian_4",
+    "laplacian_8"
+  ],
+  "a_words": 12,
+  "w_words": 12,
+  "expected_words": 16,
+  "stream_elem_bits": 32,
+  "packed_k_groups": 3,
+  "packed_high_lane_contributes": true
+}

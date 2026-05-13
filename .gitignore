@@ -20,6 +20,7 @@ sim/*_out.txt
 sim/pe_test_out.txt
 sim_soc_out.txt
 soc_out*.txt
+sim/*.pid
 /soc_test.hex
 
 # Python cache
@@ -29,3 +30,4 @@ __pycache__/
 # Local model/checkpoint inputs and generated conversion probes
 /.06_RepOpt_VGG/
 /sim/pth_*/
+/sim/repopt_tile_soc/

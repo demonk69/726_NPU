@@ -1,6 +1,6 @@
 # 当前实现状态
 
-更新时间：2026-05-04
+更新时间：2026-05-13
 
 
 
@@ -30,6 +30,8 @@ $env:Path = 'E:\iverilog\bin;' + $env:Path
 | `tb/tb_npu_tile_lane_feed.v` | PASS | 8x8/16x16 tile feeder 可通过真实 AXI/DMA 路径把 active W/A lane 送到阵列边界 |
 | `tb/tb_npu_tile_gemm.v` + `tb/tile4/int8_4x4x4` | PASS | 4x4 INT8 GEMM 与 Python golden 一致 |
 | `tb/tb_npu_tile_gemm.v` + `tb/tile4/fp16_4x4x4` | PASS | 4x4 FP16 GEMM 与 FP32 golden 容差一致 |
+| `scripts/run_tile_edge_case.ps1 -Shape 4x4 -Mode OS -Lanes 1` | PASS | P2 tile edge 4x4 single-lane OS 走 tile mode，16 个 OFM 与 golden 一致 |
+| `scripts/run_tile_edge_case.ps1 -Shape 4x4 -Mode WS -Lanes 1 -DumpResult` | PASS | P2.3.1 以 WS row-vector micro-run 方式闭合 4x4 single-lane edge tile，testbench 累加 16 个结果并输出 `npu_output.hex` |
 | `tb/tb_dma_read_burst.v` | PASS | DMA 读通道可产生 INCR burst，支持连续地址和 4KB 边界切分 |
 | `tb/tb_dma_write_burst.v` | PASS | DMA 写通道可产生 INCR burst，支持多 burst 和 4KB 边界切分 |
 | `tb/tb_dma_burst.v` | PASS | 混合读写场景下 8/16 beat burst 地址和数据正确 |
@@ -91,7 +93,7 @@ $env:Path = 'E:\iverilog\bin;' + $env:Path
 27. T5.3 已给 `npu_dma` 增加 64-byte descriptor fetch 目标，并给 `npu_ctrl` 增加 `FETCH_DESC/DECODE_DESC/NEXT_LAYER` 控制流，可把 descriptor v1 映射到当前 4x4 OS tile GEMM 直配语义并顺序执行多个 descriptor。
 28. T5.4 已增加 `desc_ctrl[23] IFM_FROM_PREV_OFM`：`npu_ctrl` 记录上一层 `ofm_addr`，下一层置位后由 `npu_dma` 从上一层 row-major 32-bit OFM gather/repack 为 4-lane INT8 A tile stream。
 29. T5.5 已接入 done/error 可见性：`STATUS[2]`、`INT_EN/INT_CLR`、`ERR_STATUS(0x74)` W1C 和 controller descriptor 错误锁存可用。
-30. 仿真口径已明确：4x4 tile、K-split、descriptor 主线当前基于 OS；direct scalar matmul 回归同时覆盖 OS 和 WS，`tb_npu_ctrl_dataflow_modes.v` 额外显式覆盖 OS/WS 控制分支。
+30. 仿真口径已明确：4x4 tile、K-split、descriptor 主线当前基于 OS；P2.3.1 已额外验证 `4x4 / single-lane / WS row-vector micro-run` tile edge case；direct scalar matmul 回归同时覆盖 OS 和 WS，`tb_npu_ctrl_dataflow_modes.v` 额外显式覆盖 OS/WS 控制分支。
 31. `scripts/run_matmul_case.ps1` 可按参数生成并运行 direct scalar 大矩阵功能测试，已验证 32x32x32 INT8 OS/WS、16x16x16 FP16 OS，以及 K 非 32-bit 对齐的 25x18x3 INT8 OS。
 32. T6.1 已完成第一版 DRAM 预展开 im2col 仿真：`tb/conv2d/gen_conv2d_im2col_data.py` 生成 IFM/weight、`A_im2col`、`W_col`、DRAM image 和 Conv2D golden，`scripts/run_conv2d_im2col_case.ps1` 复用 direct matmul testbench 做端到端校验。
 33. T6.2 已完成 direct scalar on-the-fly im2col：`CTRL[8]` 启用后，`npu_dma` 从 raw NCHW IFM 按 Conv2D 窗口地址 gather A 行并写入 A PPBuf，不再要求 DRAM 保存完整 `A_im2col` 中间矩阵；`scripts/run_conv2d_otf_case.ps1` 已覆盖默认 INT8 OS/WS 和 FP16 OS case。
@@ -108,7 +110,7 @@ $env:Path = 'E:\iverilog\bin;' + $env:Path
 
 ## 当前关键差距
 
-1. 当前 4x4 tile-mode GEMM 已通过 INT8/FP16 基础验证，8x8/16x16 已有宽向量供数验证，8x32 阵列级折叠路由和 PE 级 INT8 2/4-lane SIMD 已验证；但阵列/top 仍默认 `DATA_W=16`，32-bit packed K lane 供数、8x8/16x16 完整结果收集/写回以及顶层 8x32 32-output 写回仍未完成。
+1. 当前 4x4 tile-mode GEMM 已通过 INT8/FP16 基础验证，P2.3.1 已闭合 4x4 single-lane WS row-vector edge tile，8x8/16x16 已有宽向量供数验证，8x32 阵列级折叠路由和 PE 级 INT8 2/4-lane SIMD 已验证；但阵列/top 仍默认 `DATA_W=16`，32-bit packed K lane 供数、8x8/16x16 完整结果收集/写回、8x8/16x16/8x32 WS tile edge 以及顶层 8x32 32-output 写回仍未完成。
 2. 顶层 K-split GEMM golden 已通过；外部 PSUM surface 的 DMA read/writeback 尚未接入多层 descriptor 流。
 3. Descriptor v1 fetch/decode/next-layer 已具备第一版：支持 `OP=GEMM_TILEPACK`、`DTYPE=INT8/FP16`、`DATAFLOW=OS`、`SHAPE=4x4`、`TILE_PACKED=1` 映射到现有 tile GEMM 数据通路；T5.4 已验证 INT8 层间 OFM 作为下一层 IFM；T5.5 已让 unsupported descriptor 和 descriptor count exhausted 等错误对 CPU 可见。外部 PSUM surface、FP16 OFM 格式转换、bias/activation/quant 进入 descriptor/tile 主线仍未接入。
 4. DMA 读写 burst、混合 8/16 beat 正确性、基础带宽计数、60%/80% 利用率目标报告和 T7.5 TOPS/util 报告已具备；后续若要冲 80% write util，需要允许多 outstanding write burst 或重叠 B response 间隔。

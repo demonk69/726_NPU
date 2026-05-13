@@ -532,8 +532,10 @@ wire [15:0] tile_compute_cycles = tile_k_len +
 assign vec_consume = tile_mode &&
                      pe_en &&
                      (state == S_OVERLAP_COMPUTE) &&
-                     (lk_stat[0] == 1'b1) &&
-                     (tile_k_cycle < tile_k_len);
+                     ((lk_stat[0] == 1'b0)
+                        ? ((ws_consume_cnt != 16'd0) &&
+                           (ws_consume_cnt <= tile_k_len))
+                        : (tile_k_cycle < tile_k_len));
 
 // ---------------------------------------------------------------------------
 // DMA completion latches

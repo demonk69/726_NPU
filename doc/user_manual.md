@@ -22,6 +22,74 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_pth_multilayer_s
 
 该入口额外验证参考 CPU 连续调度多个 NPU Conv/ReLU 层，并在层间执行 NPU 输出到下一层 NCHW int8 输入的 repack。
 
+RepOpt VGG host 整网基准入口：
+
+```powershell
+python tools\pth\run_repopt_vgg_host.py `
+  --index 0 `
+  --out-json sim\pth_repopt_host_run\host_run_idx0.json
+```
+
+该入口不调用 PyTorch quantized Conv 后端，而是按当前 V1 CPU/NPU 分工解释执行整网，用于生成后续 RTL/SoC 分段验证的 golden。
+
+图片输入和全网 4x4 tile 调度入口：
+
+```powershell
+python tools\pth\run_repopt_vgg_host.py `
+  --image path\to\image.png `
+  --conv-backend tile4 `
+  --out-json sim\pth_repopt_host_run\image_tile4.json
+```
+
+该入口会把图片 resize 到 `32x32`，按 CIFAR-10 mean/std 归一化并量化，然后输出 10 类分类结果。`tile4` backend 会遍历所有 Conv 层的 4x4 GEMM tile，CPU 负责 bias/ReLU、per-channel requant、pooling 和 classifier。
+
+RepOpt VGG 第一层 RTL 分段验证入口：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_repopt_layer_case.ps1 -Index 0
+```
+
+默认验证 `stage1_0_conv` 的 `4x4` 输出窗口；当前已通过 `ALL 1024 CHECKS PASSED`。该入口比较的是 `Conv2D + bias + ReLU` 后的 int32 accumulator，CPU per-channel requant 仍在后续软件步骤中完成。
+
+RepOpt VGG 第一层 4x4 tile-mode 入口：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_repopt_tile_case.ps1 `
+  -Index 0 -MBase 0 -NBase 0
+```
+
+该入口启用 `ARR_CFG[7]`，把真实 Conv 数据预打包为一个局部 `4x27x4` GEMM tile；当前已通过 `ALL 16 CHECKS PASSED`。注意该 tile-mode case 比较 raw int32 MAC accumulator，不包含 bias/ReLU。
+
+多个 RTL tile 拼接和 CPU 后处理入口：
+
+```powershell
+python tools\pth\run_repopt_layer_tile_rtl.py `
+  --index 0 `
+  --m-base 0 --n-base 0 `
+  --m-tiles 2 --n-tiles 2 `
+  --out-json sim\pth_repopt_tile_rtl\stage1_0_m0_n0_2x2.json
+```
+
+该入口会连续运行多个真实 RTL tile case，收集 `npu_output.hex`，拼接 raw accumulator window，并由 CPU 执行 `bias/ReLU/per-channel requant`。当前 `2x2` tile window 已通过，并与 host 第一层 golden 对齐。
+
+参考 CPU 固件/MMIO 调度多个 tile 并执行后处理的 SoC 入口：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_repopt_tile_soc.ps1 `
+  -Index 0 -MBase 0 -NBase 0 -MTiles 2 -NTiles 2
+```
+
+该入口在一次 RTL 仿真中由参考 CPU 连续配置 4 个 NPU tile，并由固件执行 bias/ReLU/per-channel 固定点 requant 后写回 qint8 window。testbench 同时校验 raw int32 MAC 输出和固件后处理输出；当前已通过 `RepOpt tile-window SoC MMIO + CPU postprocess test PASSED`。
+
+完整第一层窗口使用：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_repopt_tile_soc.ps1 `
+  -Index 0 -FullLayer
+```
+
+该命令运行 `M[0:1024) N[0:64)` 的 4096 个 tile；当前完整第一层已通过，周期数为 8851650，固件仍为 91 words，DRAM 自动扩到 141312 words。若只想检查生成和编译，可加 `-CompileOnly`。
+
 ## 当前可用能力
 
 可以依赖：
@@ -226,7 +294,7 @@ if QUANT_CFG[0] and INT8:
 write R_ADDR + (m*N+j)*4
 ```
 
-INT8 direct scalar 未开启 quant 时仍输出 signed 32-bit accumulator word；开启 quant 后输出 sign-extended signed int8 word，范围为 `[-128,127]`。FP16 direct scalar 输出是 FP32 word，ReLU6 clamp 到 `[0.0,6.0]`，`QUANT_CFG` 对 FP16 无效。当前 tile/descriptor 主线尚未接入该 postprocess。
+INT8 direct scalar 未开启 quant 时仍输出 signed 32-bit accumulator word；开启 quant 后输出 sign-extended signed int8 word，范围为 `[-128,127]`。FP16 direct scalar 输出是 FP32 word，ReLU6 clamp 到 `[0.0,6.0]`，`QUANT_CFG` 对 FP16 无效。当前 tile/descriptor 硬件主线尚未接入该 postprocess；RepOpt 第一层 SoC tile-window 用例先由参考 CPU 固件完成等价的 bias/ReLU/per-channel requant。
 
 ## 当前 GEMM 数据布局意图
 
@@ -301,6 +369,71 @@ C 输出仍按 row-major 地址检查：
 ```text
 C_ADDR(r,c) = R_ADDR + ((m0+r) * N + (n0+c)) * 4
 ```
+
+### P2 packed K-lane tile edge 约定
+
+P2 的 multi-lane tile edge case 使用 PE 内 INT8 SIMD，把 GEMM 的 K 维打包到同一个 PE 的 `a_in/w_in` 中。它和 tile 的空间 lane 不同：
+
+```text
+空间 lane: r/c -> 不同 PE，覆盖 M/N tile
+packed K lane: s -> 同一个 PE 内的一拍多个 INT8 product
+```
+
+single-lane：
+
+```text
+INT8_SIMD_LANES = 1
+K groups        = K
+A_TILE[m_tile][k][r] = A[m0+r,k]
+W_TILE[n_tile][k][c] = W[k,n0+c]
+```
+
+multi-lane：
+
+```text
+L = INT8_SIMD_LANES  // 2 or 4
+g = floor(k / L)
+s = k % L
+
+A_PACK[m_tile][g][r].lane[s] = (g*L+s < K) ? A[m0+r,g*L+s] : 0
+W_PACK[n_tile][g][c].lane[s] = (g*L+s < K) ? W[g*L+s,n0+c] : 0
+```
+
+packed byte order:
+
+```text
+lane0 -> bits[ 7: 0]
+lane1 -> bits[15: 8]
+lane2 -> bits[23:16]
+lane3 -> bits[31:24]
+```
+
+2-lane uses `DATA_W=16`:
+
+```text
+word[ 7: 0] = lane0
+word[15: 8] = lane1
+```
+
+4-lane uses `DATA_W=32`:
+
+```text
+word[ 7: 0] = lane0
+word[15: 8] = lane1
+word[23:16] = lane2
+word[31:24] = lane3
+```
+
+K tail rule:
+
+```text
+valid_k(g,s) = (g*L+s) < K
+invalid tail lane must be packed as 0 and must not contribute MAC
+```
+
+CPU/testbench 生成 multi-lane case 时，不能把旧 sign-extended scalar 输入当作 packed 输入。当前 PE 会把 `16'hFFFF` 这类高位全是 lane0 符号扩展的输入识别成 single-lane 兼容编码，而不是两个 `-1` lane。multi-lane 验收必须让 lane1/lane2/lane3 对 golden 有可观测贡献。
+
+P2.0.3 只是固定软件/生成器/descriptor 应遵守的 packed K 语义。当前已验证事实仍然是：PE 级 2/4-lane SIMD 通过；tile/descriptor 主线的 packed K-lane 供数、valid 对齐、结果写回和端到端吞吐尚未闭环。
 
 ## Descriptor 模式规划
 

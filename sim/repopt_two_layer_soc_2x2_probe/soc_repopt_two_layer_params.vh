@@ -1,0 +1,17 @@
+`define REP_TWO_SOC_FW_HEX "../sim/repopt_two_layer_soc_2x2_probe/soc_repopt_two_layer.hex"
+`define REP_TWO_SOC_DRAM_HEX "../sim/repopt_two_layer_soc_2x2_probe/dram_init.hex"
+`define REP_TWO_SOC_EXPECTED_Q2_HEX "../sim/repopt_two_layer_soc_2x2_probe/expected_q2.hex"
+`define REP_TWO_SOC_FW_WORDS 242
+`define REP_TWO_SOC_DRAM_WORDS 163840
+`define REP_TWO_SOC_TIMEOUT_CYCLES 12000000
+`define REP_TWO_SOC_MARKER_ADDR 32'h00017b00
+`define REP_TWO_SOC_REPACK0_BASE 32'h00005c00
+`define REP_TWO_SOC_Q2_BASE 32'h00017a00
+`define REP_TWO_SOC_Q2_COUNT 64
+`define REP_TWO_SOC_STAGE0_TILE_COUNT 96
+`define REP_TWO_SOC_STAGE1_TILE_COUNT 4
+`define REP_TWO_SOC_STAGE1_M_BASE 0
+`define REP_TWO_SOC_STAGE1_N_BASE 0
+`define REP_TWO_SOC_STAGE1_M_TILES 2
+`define REP_TWO_SOC_STAGE1_N_TILES 2
+`define REP_TWO_SOC_CIFAR_LABEL 3

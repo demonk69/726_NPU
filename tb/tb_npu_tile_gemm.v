@@ -4,9 +4,18 @@ module tb_npu_tile_gemm;
 
 `include "test_params.vh"
 
+`ifdef OUTPUT_HEX_VH
+`include "output_hex_define.vh"
+`endif
+
+`ifndef OUTPUT_HEX
+`define OUTPUT_HEX "npu_output.hex"
+`endif
+
 localparam DATA_W  = 16;
 localparam ACC_W   = 32;
 localparam CLK_T   = 10;
+localparam PE_ACTIVE_W = 256;
 
 localparam REG_CTRL      = 32'h00;
 localparam REG_STATUS    = 32'h04;
@@ -18,6 +27,9 @@ localparam REG_A_ADDR    = 32'h24;
 localparam REG_R_ADDR    = 32'h28;
 localparam REG_ARR_CFG   = 32'h30;
 localparam REG_CFG_SHAPE = 32'h3C;
+localparam WS_RUN_W_ADDR = 32'h00006000;
+localparam WS_RUN_A_ADDR = 32'h00006400;
+localparam WS_RUN_R_ADDR = 32'h00006800;
 
 localparam ARR_TILE4     = 32'h80; // ARR_CFG[7]: enable 4x4 tile planner/data path
 localparam CFG_4X4       = 32'h0;  // CFG_SHAPE=00: use the left-top 4x4 PE array
@@ -77,6 +89,12 @@ reg [31:0] expected [0:`NUM_RESULTS-1];
 integer aw_count;   // number of result row write bursts observed
 integer pass_cnt;
 integer fail_cnt;
+integer dump_fd;
+integer ws_accum [0:15];
+
+`ifdef EDGE_SHAPE
+reg edge_full_tile_seen;
+`endif
 
 initial begin
     $readmemh(`DRAM_HEX, dram);
@@ -311,6 +329,45 @@ function fp32_close;
     end
 endfunction
 
+`ifdef EDGE_SHAPE
+generate
+    if ((`EDGE_PE_ACTIVE_EXPECT == 16) &&
+        (`EDGE_PE_VALID_EXPECT == 16) &&
+        (`CTRL == 32'h00000011)) begin : gen_edge_4x4_full_tile_monitor
+        localparam [31:0] EDGE_VALID_MASK = 32'h0000_FFFF;
+
+        function [PE_ACTIVE_W-1:0] expected_active_mask;
+            integer rr;
+            integer cc;
+            begin
+                expected_active_mask = {PE_ACTIVE_W{1'b0}};
+                for (rr = 0; rr < `TILE_M; rr = rr + 1) begin
+                    for (cc = 0; cc < `TILE_N; cc = cc + 1) begin
+                        expected_active_mask[(rr * 16) + cc] = 1'b1;
+                    end
+                end
+            end
+        endfunction
+
+        always @(posedge clk) begin
+            if (!rst_n) begin
+                edge_full_tile_seen <= 1'b0;
+            end else if (!edge_full_tile_seen &&
+                         u_npu.status_busy &&
+                         u_npu.ctrl_tile_mode &&
+                         (u_npu.pe_array_valid === EDGE_VALID_MASK)) begin
+                if (u_npu.pe_active_dbg !== expected_active_mask()) begin
+                    $display("[FAIL] %s full-tile active mask mismatch: got=0x%064h exp=0x%064h",
+                             `TEST_NAME, u_npu.pe_active_dbg, expected_active_mask());
+                    fail_cnt = fail_cnt + 1;
+                end
+                edge_full_tile_seen <= 1'b1;
+            end
+        end
+    end
+endgenerate
+`endif
+
 task check_result;
     input integer idx;
     reg [31:0] got;
@@ -340,7 +397,118 @@ task check_result;
     end
 endtask
 
+`ifdef EDGE_SHAPE
+task prepare_ws_block;
+    input integer row_idx;
+    input integer k_base;
+    input integer blk_len;
+    integer t;
+    reg [31:0] src_word;
+    reg [7:0]  lane_byte;
+    begin
+        for (t = 0; t < `TILE_N; t = t + 1)
+            dram[(WS_RUN_R_ADDR >> 2) + t] = 32'd0;
+        for (t = 0; t < 4; t = t + 1) begin
+            dram[(WS_RUN_W_ADDR >> 2) + t] = 32'd0;
+            dram[(WS_RUN_A_ADDR >> 2) + t] = 32'd0;
+        end
+        if (blk_len > 0) begin
+            src_word = dram[(`A_ADDR >> 2) + k_base];
+            case (row_idx)
+                0: lane_byte = src_word[7:0];
+                1: lane_byte = src_word[15:8];
+                2: lane_byte = src_word[23:16];
+                default: lane_byte = src_word[31:24];
+            endcase
+            dram[(WS_RUN_A_ADDR >> 2)] = {24'd0, lane_byte};
+
+            dram[(WS_RUN_W_ADDR >> 2)] = dram[(`W_ADDR >> 2) + k_base];
+        end
+    end
+endtask
+
+task run_ws_block;
+    input integer row_idx;
+    input integer k_base;
+    input integer blk_len;
+    integer aw_before;
+    integer col_idx;
+    begin
+        prepare_ws_block(row_idx, k_base, blk_len);
+        aw_before = aw_count;
+
+        axi_write(REG_M_DIM, 32'd1);
+        axi_write(REG_N_DIM, `TILE_N);
+        axi_write(REG_K_DIM, 32'd1);
+        axi_write(REG_W_ADDR, WS_RUN_W_ADDR);
+        axi_write(REG_A_ADDR, WS_RUN_A_ADDR);
+        axi_write(REG_R_ADDR, WS_RUN_R_ADDR);
+        axi_write(REG_ARR_CFG, ARR_TILE4);
+        axi_write(REG_CFG_SHAPE, `CFG_SHAPE);
+        axi_write(REG_CTRL, `CTRL);
+        wait_done(5000);
+
+        if (aw_count !== aw_before + 1) begin
+            $display("[FAIL] %s WS row%0d k%0d expected one row write burst, got delta=%0d",
+                     `TEST_NAME, row_idx, k_base,
+                     aw_count - aw_before);
+            fail_cnt = fail_cnt + 1;
+        end
+
+        for (col_idx = 0; col_idx < `TILE_N; col_idx = col_idx + 1)
+            ws_accum[row_idx * `TILE_N + col_idx] =
+                ws_accum[row_idx * `TILE_N + col_idx] +
+                $signed(dram[(WS_RUN_R_ADDR >> 2) + col_idx]);
+    end
+endtask
+
+task check_ws_accum_result;
+    input integer idx;
+    begin
+        if (ws_accum[idx] === $signed(expected[idx])) begin
+            pass_cnt = pass_cnt + 1;
+        end else begin
+            $display("[FAIL] %s WS C[%0d][%0d] got=%0d exp=%0d",
+                     `TEST_NAME, idx / `TILE_N, idx % `TILE_N,
+                     ws_accum[idx], $signed(expected[idx]));
+            fail_cnt = fail_cnt + 1;
+        end
+    end
+endtask
+
+task check_internal_result;
+    input integer r;
+    input integer c;
+    reg [31:0] got;
+    reg [31:0] exp;
+    begin
+        got = u_npu.u_pe_array.acc_v[r+1][c];
+        exp = expected[r * `TILE_N + c];
+        if (`IS_FP16) begin
+            if (fp32_close(got, exp)) begin
+                pass_cnt = pass_cnt + 1;
+            end else begin
+                $display("[FAIL] %s internal C[%0d][%0d] got=0x%08h exp=0x%08h",
+                         `TEST_NAME, r, c, got, exp);
+                fail_cnt = fail_cnt + 1;
+            end
+        end else begin
+            if (got === exp) begin
+                pass_cnt = pass_cnt + 1;
+            end else begin
+                $display("[FAIL] %s internal C[%0d][%0d] got=%0d (0x%08h) exp=%0d (0x%08h)",
+                         `TEST_NAME, r, c, $signed(got), got, $signed(exp), exp);
+                fail_cnt = fail_cnt + 1;
+            end
+        end
+    end
+endtask
+`endif
+
 integer i;
+integer ws_row_idx;
+integer ws_k_base;
+integer ws_blk_len;
 
 initial begin
     s_awaddr = 0; s_wdata = 0; s_wstrb = 0;
@@ -348,13 +516,22 @@ initial begin
     s_araddr = 0; s_arvalid = 0; s_rready = 0;
     pass_cnt = 0;
     fail_cnt = 0;
+`ifdef EDGE_SHAPE
+    edge_full_tile_seen = 1'b0;
+    for (i = 0; i < 16; i = i + 1)
+        ws_accum[i] = 0;
+`endif
 
     @(posedge rst_n);
     repeat (4) @(posedge clk);
 
     $display("");
     $display("################################################################");
+`ifdef EDGE_SHAPE
+    $display("  Tile GEMM Test (%s): %s", `EDGE_SHAPE, `TEST_NAME);
+`else
     $display("  4x4 Tile GEMM Test: %s", `TEST_NAME);
+`endif
     $display("################################################################");
 
     axi_write(REG_M_DIM, `M_DIM);
@@ -364,11 +541,56 @@ initial begin
     axi_write(REG_A_ADDR, `A_ADDR);
     axi_write(REG_R_ADDR, `R_ADDR);
     axi_write(REG_ARR_CFG, ARR_TILE4);
+`ifdef EDGE_SHAPE
+    axi_write(REG_CFG_SHAPE, `CFG_SHAPE);
+`else
     axi_write(REG_CFG_SHAPE, CFG_4X4);
+`endif
+`ifdef EDGE_SHAPE
+    if (`CTRL != 32'h00000001) begin
+        axi_write(REG_CTRL, `CTRL);
+        wait_done((`TILE_M == 4) ? 5000 : ((`TILE_M == 8) ? 20000 : 50000));
+    end
+`else
     axi_write(REG_CTRL, `CTRL);
-
     wait_done(5000);
+`endif
 
+`ifdef EDGE_SHAPE
+    if ((`TILE_M == 4) && (`TILE_N == 4) && (`CTRL == 32'h00000011) && !edge_full_tile_seen) begin
+        $display("[FAIL] %s did not observe a full-tile valid cycle", `TEST_NAME);
+        fail_cnt = fail_cnt + 1;
+    end
+`endif
+
+`ifdef EDGE_SHAPE
+    if (`CTRL == 32'h00000001) begin
+        for (ws_row_idx = 0; ws_row_idx < `TILE_M; ws_row_idx = ws_row_idx + 1) begin
+            ws_k_base = 0;
+            while (ws_k_base < `K_DIM) begin
+                ws_blk_len = 1;
+                run_ws_block(ws_row_idx, ws_k_base, ws_blk_len);
+                ws_k_base = ws_k_base + 1;
+            end
+        end
+        for (i = 0; i < `NUM_RESULTS; i = i + 1)
+            check_ws_accum_result(i);
+    end else if ((`TILE_M == 4) && (`TILE_N == 4)) begin
+        if (aw_count !== 4) begin
+            $display("[FAIL] %s expected 4 row write bursts, got %0d", `TEST_NAME, aw_count);
+            $finish;
+        end
+        for (i = 0; i < `NUM_RESULTS; i = i + 1)
+            check_result(i);
+    end else begin
+        $display("[INFO] %s skipping row-writeback compare; checking internal PE array results", `TEST_NAME);
+        for (i = 0; i < `TILE_M; i = i + 1) begin
+            integer j;
+            for (j = 0; j < `TILE_N; j = j + 1)
+                check_internal_result(i, j);
+        end
+    end
+`else
     if (aw_count !== 4) begin
         // For a full 4x4 tile, npu_ctrl should issue 4 row-wise write bursts.
         $display("[FAIL] %s expected 4 row write bursts, got %0d", `TEST_NAME, aw_count);
@@ -377,9 +599,49 @@ initial begin
 
     for (i = 0; i < `NUM_RESULTS; i = i + 1)
         check_result(i);
+`endif
+
+    `ifdef DUMP_RESULT_HEX
+    dump_fd = $fopen(`OUTPUT_HEX, "w");
+    if (dump_fd == 0) begin
+        $display("[FAIL] %s could not open output dump: %s", `TEST_NAME, `OUTPUT_HEX);
+        fail_cnt = fail_cnt + 1;
+    end else begin
+        `ifdef EDGE_SHAPE
+        if (`CTRL == 32'h00000001) begin
+            for (i = 0; i < `NUM_RESULTS; i = i + 1)
+                $fdisplay(dump_fd, "%08h", ws_accum[i][31:0]);
+        end else if ((`TILE_M == 4) && (`TILE_N == 4)) begin
+            for (i = 0; i < `NUM_RESULTS; i = i + 1)
+                $fdisplay(dump_fd, "%08h", dram[(`R_ADDR >> 2) + i]);
+        end else begin
+            for (i = 0; i < `TILE_M; i = i + 1) begin
+                integer j;
+                for (j = 0; j < `TILE_N; j = j + 1)
+                    $fdisplay(dump_fd, "%08h", u_npu.u_pe_array.acc_v[i+1][j]);
+            end
+        end
+        `else
+        for (i = 0; i < `NUM_RESULTS; i = i + 1)
+            $fdisplay(dump_fd, "%08h", dram[(`R_ADDR >> 2) + i]);
+        `endif
+        $fclose(dump_fd);
+        $display("[DUMP] %s wrote %s", `TEST_NAME, `OUTPUT_HEX);
+    end
+    `endif
 
     if (fail_cnt == 0) begin
+        `ifdef EDGE_SHAPE
+        if (`CTRL == 32'h00000001) begin
+            $display("[PASS] %s: WS row-pass compare passed (%0d checks)", `TEST_NAME, pass_cnt);
+        end else if ((`TILE_M == 4) && (`TILE_N == 4)) begin
+            $display("[PASS] %s: ALL %0d CHECKS PASSED", `TEST_NAME, pass_cnt);
+        end else begin
+            $display("[PASS] %s: internal PE-array compare passed (%0d checks)", `TEST_NAME, pass_cnt);
+        end
+        `else
         $display("[PASS] %s: ALL %0d CHECKS PASSED", `TEST_NAME, pass_cnt);
+        `endif
     end else begin
         $display("[FAIL] %s: %0d passed, %0d failed", `TEST_NAME, pass_cnt, fail_cnt);
         $fatal;

@@ -1,8 +1,8 @@
 # 仿真指南
 
-更新时间：2026-05-03
+更新时间：2026-05-13
 
-本文给出当前可复现的仿真入口和后续验证顺序。Phase 1 已恢复顶层标量兼容路径；Phase 2 已完成可验证的 4x4 tile-mode GEMM 路径；Phase 3 已完成 AXI read/write burst、perf counters 和带宽目标测试；T4.2-T4.5 已完成独立 PSUM/OUT buffer RMW、PE accumulator init、controller k_tile loop 单测和顶层 K-split GEMM golden；T5.1-T5.5 已完成 descriptor v1 ABI、AXI-Lite descriptor 提交寄存器、descriptor fetch/decode/next-layer、INT8 OFM->IFM 串联和 IRQ/error status；T6.1 已完成 DRAM 预展开 Conv2D im2col golden 仿真；T6.2 已完成 direct scalar on-the-fly Conv2D im2col 仿真；T6.3-T6.5 已完成 direct scalar bias、ReLU/ReLU6 和 INT8 quant/saturate 后处理；T6.6 已完成两层 Conv2D E2E；T7.1 已完成 8x8/16x16 active lane 供数验证；T7.2 已完成阵列级 8x32 折叠路由验证；T7.3/T7.4 已完成 PE 级 INT8 2/4-lane SIMD 验证；T7.5 已完成 TOPS/util 性能计数器报告；SoC smoke 已恢复。更大 tile 完整写回、packed K lane 供数和 descriptor 化卷积仍是后续任务。
+本文给出当前可复现的仿真入口和后续验证顺序。Phase 1 已恢复顶层标量兼容路径；Phase 2 已完成可验证的 4x4 tile-mode GEMM 路径，P2.3.1 额外闭合 `4x4 / single-lane / WS row-vector micro-run` tile edge case；Phase 3 已完成 AXI read/write burst、perf counters 和带宽目标测试；T4.2-T4.5 已完成独立 PSUM/OUT buffer RMW、PE accumulator init、controller k_tile loop 单测和顶层 K-split GEMM golden；T5.1-T5.5 已完成 descriptor v1 ABI、AXI-Lite descriptor 提交寄存器、descriptor fetch/decode/next-layer、INT8 OFM->IFM 串联和 IRQ/error status；T6.1 已完成 DRAM 预展开 Conv2D im2col golden 仿真；T6.2 已完成 direct scalar on-the-fly Conv2D im2col 仿真；T6.3-T6.5 已完成 direct scalar bias、ReLU/ReLU6 和 INT8 quant/saturate 后处理；T6.6 已完成两层 Conv2D E2E；T7.1 已完成 8x8/16x16 active lane 供数验证；T7.2 已完成阵列级 8x32 折叠路由验证；T7.3/T7.4 已完成 PE 级 INT8 2/4-lane SIMD 验证；T7.5 已完成 TOPS/util 性能计数器报告；SoC smoke 已恢复。8x8/16x16/8x32 WS、multi-lane packed K 供数、更大 tile 完整写回和 descriptor 化卷积仍是后续任务。
 
 ## 工具
 
@@ -137,6 +137,28 @@ tb_reconfig_pe_8x32.v                       -> PASS，8x32 output order/fold rou
 tb_pe_top.v                                 -> PASS，INT8 packed 2/4-lane OS/WS and scalar compatibility
 tb_npu_axi_lite_desc.v                      -> PASS
 ```
+
+### P2 tile edge smoke
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_tile_edge_case.ps1 -Shape 4x4 -Mode OS -Lanes 1 -CaseName p2_edge_4x4_os_l1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_tile_edge_case.ps1 -Shape 4x4 -Mode WS -Lanes 1 -CaseName p2_edge_4x4_ws_l1 -DumpResult
+```
+
+当前结果：
+
+```text
+[PASS] p2_edge_4x4_os_l1: ALL 16 CHECKS PASSED
+[PASS] p2_edge_4x4_ws_l1: WS row-pass compare passed (16 checks)
+Output: E:\NPU_prj\tb\edge\p2_edge_4x4_ws_l1\npu_output.hex
+```
+
+用途：
+
+- 验证 P2 tile edge 数据生成、tile mode 启动和 4x4 single-lane golden compare。
+- OS case 走现有 4x4 full-tile writeback。
+- WS case 按当前 row-vector 物理语义执行每个 M row 的 `K=1` micro-run，并在 testbench 侧累加成完整 4x4 edge tile。
+- 该入口不代表 8x8/16x16/8x32 WS、multi-lane packed K feeder 或完整 CPU+NPU 推理闭环已经通过。
 
 ### DMA read burst
 
@@ -1012,6 +1034,132 @@ R = [28, 22, 25, 37]
 ```
 
 用途：验证参考 CPU 连续调度 3 个 `.pth` 转换出来的 NPU Conv/ReLU 层，并在层间执行 `row-major int32 OFM -> NCHW int8 IFM` repack。
+
+RepOpt VGG host 整网运行入口：
+
+```powershell
+python tools\pth\run_repopt_vgg_host.py `
+  --index 0 `
+  --out-json sim\pth_repopt_host_run\host_run_idx0.json
+```
+
+图片输入入口：
+
+```powershell
+python tools\pth\run_repopt_vgg_host.py `
+  --image path\to\image.png `
+  --conv-backend tile4 `
+  --out-json sim\pth_repopt_host_run\image_tile4.json
+```
+
+当前结果：
+
+```text
+index 0: true=cat  pred=cat
+index 1: true=ship pred=ship
+index 2: true=ship pred=ship
+image_idx0_direct: pred=cat
+image_idx0_tile4 : pred=cat
+```
+
+用途：在不上全网 SoC 的情况下，先用 host 解释器按 V1 CPU/NPU 分工跑完整 RepOpt VGG，得到分段 RTL/SoC 后续必须对齐的 golden trace。
+
+`--conv-backend tile4` 会对全网 9 个 Conv 层执行 4x4 Conv-as-GEMM tile 调度，再由 CPU 完成 bias/ReLU、per-channel requant、pooling 和 classifier。
+
+RepOpt VGG 第一层分段 RTL 入口：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_repopt_layer_case.ps1 -Index 0
+```
+
+当前默认跑 `stage1_0_conv` 的 `4x4` 输出窗口，使用真实 `.pth` 权重、真实 CIFAR-10 样本输入和现有 `npu_top` direct Conv2D 路径。当前结果：
+
+```text
+output_window=4x4 of full 32x32
+GEMM M=16 K=27 N=64 results=1024
+ALL 1024 CHECKS PASSED
+```
+
+用途：先验证真实 RepOpt Conv/ReLU 层在 RTL 上的 accumulator 是否与 host golden 一致。完整第一层可用 `-TileOH 0 -TileOW 0` 请求，但当前 1x1 标量仿真较慢。
+
+RepOpt VGG 第一层 4x4 tile-mode 入口：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_repopt_tile_case.ps1 `
+  -Index 0 -MBase 0 -NBase 0
+```
+
+当前结果：
+
+```text
+repopt_stage1_0_conv_tile4_m0_n0_idx0 : ALL 16 CHECKS PASSED
+repopt_stage1_0_conv_tile4_m33_n4_idx0: ALL 16 CHECKS PASSED
+```
+
+用途：启用 `ARR_CFG[7]`，验证真实 RepOpt Conv 展开后的一个局部 `4x27x4` GEMM tile。该路径目前比较 raw int32 MAC accumulator，不包含 direct scalar 路径中的 bias/ReLU。
+
+RepOpt VGG 第一层 RTL tile window + CPU 后处理入口：
+
+```powershell
+python tools\pth\run_repopt_layer_tile_rtl.py `
+  --index 0 `
+  --m-base 0 --n-base 0 `
+  --m-tiles 2 --n-tiles 2 `
+  --out-json sim\pth_repopt_tile_rtl\stage1_0_m0_n0_2x2.json
+```
+
+当前结果：
+
+```text
+layer=stage1_0_conv sample_index=0 window=M[0:8) N[0:8)
+tiles_run=4 raw_min=-19045 raw_max=24423
+q_min=0 q_max=24
+```
+
+用途：连续运行多个真实 RTL tile，收集 `npu_output.hex`，拼接 raw accumulator window，并由 CPU 执行 `bias/ReLU/per-channel requant`。当前后处理 qint8 window 与 host 第一层 golden 对比 mismatch 为 0。
+
+RepOpt VGG 第一层 SoC/MMIO tile 调度 + 固件后处理入口：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_repopt_tile_soc.ps1 `
+  -Index 0 -MBase 0 -NBase 0 -MTiles 2 -NTiles 2
+```
+
+当前结果：
+
+```text
+[PASS] RepOpt tile-window SoC MMIO + CPU postprocess test PASSED!
+Cycles: 8743
+window: M[0:8) N[0:8)
+tiles scheduled by CPU: 4
+first tile result[0] = 7383
+first postprocess q[0] = 11
+```
+
+用途：在一次 RTL 仿真内让参考 CPU 固件通过 MMIO 连续调度多个 NPU tile，避免逐 tile 重新编译/启动仿真。当前固件会在 tile 运算后执行 bias/ReLU/per-channel 固定点 requant，并把 qint8 window 写回 DRAM；testbench 同时校验 raw MAC window 和固件后处理 q window。
+
+完整第一层 RTL 仿真：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_repopt_tile_soc.ps1 `
+  -Index 0 -FullLayer
+```
+
+当前结果：
+
+```text
+[PASS] RepOpt tile-window SoC MMIO + CPU postprocess test PASSED!
+Cycles: 8851650
+window: M[0:1024) N[0:64)
+tiles scheduled by CPU: 4096
+first tile result[0] = 7383
+first postprocess q[0] = 11
+firmware words: 91
+q_base: 0x00049500, q_count: 65536
+marker: 0x00089500, dram_words: 141312
+```
+
+用途：确认完整第一层的 4096 个 tile 可以在一次 SoC RTL 仿真中由参考 CPU 固件调度，且 raw MAC window 和固件后处理 q window 均与 golden 一致。若只想检查生成和编译，可加 `-CompileOnly`。
 
 快速 smoke：
 

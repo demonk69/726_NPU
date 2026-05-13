@@ -99,6 +99,35 @@ integer pass_cnt;
 integer fail_cnt;
 integer dump_fd;
 
+// Diagnostic: snapshot PPBuf output on fire cycles (ifdef DIAG_TRACE only)
+`ifdef DIAG_TRACE
+reg [16*32-1:0] dbg_a_snap;
+reg [16*32-1:0] dbg_w_snap;
+reg [16*32-1:0] dbg_a_snap2;
+reg [16*32-1:0] dbg_w_snap2;
+reg             dbg_a_snapped;
+reg             dbg_a_snapped2;
+
+always @(posedge clk) begin
+    if (!rst_n) begin
+        dbg_a_snapped  <= 1'b0;
+        dbg_a_snapped2 <= 1'b0;
+        dbg_a_snap     <= 0;
+        dbg_w_snap     <= 0;
+        dbg_a_snap2    <= 0;
+        dbg_w_snap2    <= 0;
+    end else if (!dbg_a_snapped && u_npu.a_ppb_rd_vec_valid) begin
+        dbg_a_snapped <= 1'b1;
+        dbg_a_snap    <= u_npu.a_ppb_rd_vec;
+        dbg_w_snap    <= u_npu.w_ppb_rd_vec;
+    end else if (dbg_a_snapped && !dbg_a_snapped2 && u_npu.a_ppb_rd_vec_valid) begin
+        dbg_a_snapped2 <= 1'b1;
+        dbg_a_snap2    <= u_npu.a_ppb_rd_vec;
+        dbg_w_snap2    <= u_npu.w_ppb_rd_vec;
+    end
+end
+`endif
+
 initial begin
     $readmemh(`DRAM_HEX, dram);
     $readmemh(`EXPECTED_HEX, expected);
@@ -220,6 +249,10 @@ always @(posedge clk) begin
 
         if (wr_phase && m_wvalid && m_wready) begin
             dram[((wr_base >> 2) + wr_cnt) % `DRAM_SIZE] <= m_wdata;
+            `ifdef DIAG_DRAM_WR
+            $display("[DIAG_WR] aw=%0d addr=0x%08h cnt=%0d data=0x%08h",
+                     aw_count, wr_base, wr_cnt, m_wdata);
+            `endif
             wr_cnt <= wr_cnt + 1'b1;
             if (m_wlast) begin
                 wr_phase  <= 1'b0;
@@ -242,23 +275,36 @@ task axi_write;
     input [31:0] data;
     integer guard;
     begin
-        s_awaddr  <= addr;
-        s_awvalid <= 1'b1;
-        s_wdata   <= data;
-        s_wstrb   <= 4'hF;
-        s_wvalid  <= 1'b1;
-        s_bready  <= 1'b1;
+        // Drive at negedge for clean setup before posedge
+        @(negedge clk);
+        s_awaddr  = addr;
+        s_awvalid = 1'b1;
+        s_wdata   = data;
+        s_wstrb   = 4'hF;
+        s_wvalid  = 1'b1;
+        s_bready  = 1'b1;
+        // Wait for DUT to accept and respond
         @(posedge clk);
-        while (!s_awready) @(posedge clk);
-        @(posedge clk);
-        s_awvalid <= 1'b0;
-        s_wvalid  <= 1'b0;
+        guard = 0;
+        while (!s_awready && guard < 100) begin
+            @(posedge clk);
+            guard = guard + 1;
+        end
+        guard = 0;
+        while (!s_wready && guard < 100) begin
+            @(posedge clk);
+            guard = guard + 1;
+        end
         guard = 0;
         while (!s_bvalid && guard < 100) begin
             @(posedge clk);
             guard = guard + 1;
         end
-        s_bready <= 1'b0;
+        // After bvalid seen, de-assert on negedge for clean teardown
+        @(negedge clk);
+        s_awvalid = 1'b0;
+        s_wvalid  = 1'b0;
+        s_bready  = 1'b0;
         if (guard >= 100) begin
             $display("[FAIL] AXI-Lite write timeout at 0x%08h", addr);
             $finish;
@@ -271,20 +317,25 @@ task axi_read;
     output [31:0] data;
     integer guard;
     begin
-        s_araddr  <= addr;
-        s_arvalid <= 1'b1;
-        s_rready  <= 1'b1;
+        @(negedge clk);
+        s_araddr  = addr;
+        s_arvalid = 1'b1;
+        s_rready  = 1'b1;
         @(posedge clk);
-        while (!s_arready) @(posedge clk);
-        @(posedge clk);
-        s_arvalid <= 1'b0;
+        guard = 0;
+        while (!s_arready && guard < 100) begin
+            @(posedge clk);
+            guard = guard + 1;
+        end
         guard = 0;
         while (!s_rvalid && guard < 100) begin
             @(posedge clk);
             guard = guard + 1;
         end
         data = s_rdata;
-        s_rready <= 1'b0;
+        @(negedge clk);
+        s_arvalid = 1'b0;
+        s_rready  = 1'b0;
         if (guard >= 100) begin
             $display("[FAIL] AXI-Lite read timeout at 0x%08h", addr);
             $finish;
@@ -307,6 +358,28 @@ task wait_done;
         if (!status[1]) begin
             $display("[FAIL] NPU timeout state=%0d dma=%0d",
                      u_npu.u_ctrl.state, u_npu.u_dma.dma_state);
+            $display("[DBG] rst_n=%0d busy=%0d done=%0d",
+                     rst_n, u_npu.u_ctrl.busy, u_npu.u_ctrl.done);
+            $display("[DBG] ctrl_reg=0x%08h desc_mode=%0d start=%0d",
+                     u_npu.u_axi_lite.ctrl_reg,
+                     u_npu.u_axi_lite.ctrl_reg[7],
+                     u_npu.u_axi_lite.ctrl_reg[0]);
+            $display("[DBG] cfg_start_d1=%0d cfg_start_rise=%0d direct_start_rise=%0d",
+                     u_npu.u_ctrl.cfg_start_d1,
+                     u_npu.u_ctrl.cfg_start_rise,
+                     u_npu.u_ctrl.direct_start_rise);
+            $display("[DBG] tile_mode=%0d cfg_shape=%0d arr_cfg=0x%02h",
+                     u_npu.u_ctrl.tile_mode,
+                     u_npu.u_ctrl.cfg_shape_latched,
+                     u_npu.u_axi_lite.arr_cfg);
+            $display("[DBG] m_dim=%0d n_dim=%0d k_dim=%0d",
+                     u_npu.u_axi_lite.m_dim,
+                     u_npu.u_axi_lite.n_dim,
+                     u_npu.u_axi_lite.k_dim);
+            $display("[DBG] w_addr=0x%08h a_addr=0x%08h r_addr=0x%08h",
+                     u_npu.u_axi_lite.w_addr,
+                     u_npu.u_axi_lite.a_addr,
+                     u_npu.u_axi_lite.r_addr);
             $finish;
         end
         axi_write(REG_CTRL, 32'h0);
@@ -399,6 +472,20 @@ initial begin
 `endif
 
     wait_done(5000);
+
+    `ifdef DIAG_TRACE
+    begin
+        integer pe_c;
+        $display("[PE_ACC] Post-sim PE accumulators:");
+        for (pe_c = 0; pe_c < 4; pe_c = pe_c + 1) begin
+            $display("[PE_ACC] PE(0,%0d)=0x%08h PE(8,%0d)=0x%08h",
+                     pe_c,
+                     u_npu.u_pe_array.acc_out[(0*32+pe_c)*32 +: 32],
+                     pe_c,
+                     u_npu.u_pe_array.acc_out[(0*32 + pe_c + 16)*32 +: 32]);
+        end
+    end
+    `endif
 
     if (aw_count !== AW_EXPECT) begin
         $display("[FAIL] %s expected %0d row write bursts, got %0d", `TEST_NAME, AW_EXPECT, aw_count);

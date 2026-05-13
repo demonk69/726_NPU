@@ -257,7 +257,6 @@ generate
 
         wire [OUT_WIDTH-1:0] vec_lane =
             packed_int8 ? (PACKED_LANES == 4 ? {vec_byte4, vec_byte3, vec_byte2, vec_byte}
-                         : PACKED_LANES == 3 ? {{(OUT_WIDTH-24){1'b0}}, vec_byte3, vec_byte2, vec_byte}
                                             : {vec_byte2, vec_byte})
                         : (fp16_mode ? {{(OUT_WIDTH-16){1'b0}}, vec_half}
                                      : {{(OUT_WIDTH-8){vec_byte[7]}}, vec_byte});
@@ -269,7 +268,7 @@ endgenerate
 
 assign rd_vec_valid = (rd_vec_lanes_eff != 5'd0) && (cur_rd_fill >= rd_vec_lanes_fill);
 
-wire [5:0] vec_abs_next = packed_int8
+wire [7:0] vec_abs_next = packed_int8
     ? ({4'b0000, rd_sub} + (rd_vec_lanes_eff * PACKED_LANES))
     : ({4'b0000, rd_sub} + {1'b0, rd_vec_lanes_eff});
 wire [ADDR_W:0] vec_word_inc = fp16_mode ? (vec_abs_next >> 1)
@@ -299,6 +298,12 @@ always @(posedge clk) begin
         end
     end else if (do_vec_read) begin
         if (rd_sel == 1'b0) begin
+            `ifdef DIAG_PPBUF
+            $display("[DIAG_PPBUF] vec_read: old_ptr=%0d old_fill=%0d inc=%0d new_ptr=%0d new_fill=%0d",
+                     rd_ptr_a, rd_fill_a, vec_word_inc[ADDR_W-1:0],
+                     rd_ptr_a + vec_word_inc[ADDR_W-1:0],
+                     rd_fill_a - rd_vec_lanes_fill);
+            `endif
             rd_ptr_a  <= rd_ptr_a + vec_word_inc[ADDR_W-1:0];
             rd_sub_a  <= vec_next_sub;
             rd_fill_a <= rd_fill_a - rd_vec_lanes_fill;

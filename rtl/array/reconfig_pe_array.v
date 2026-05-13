@@ -62,6 +62,7 @@ module reconfig_pe_array #(
     input  wire                          load_w,
     input  wire                          swap_w,
     input  wire                          acc_init_en,
+    input  wire                          half_en,     // 8x32: 0=top half active, 1=bottom half active
     // data inputs
     input  wire [PHY_COLS*DATA_W-1:0]    w_in,        // weight: per-column
     input  wire [PHY_ROWS*DATA_W-1:0]    act_in,      // activation: per-row
@@ -246,8 +247,16 @@ generate
 
             wire pe_clk_en = row_active && col_active;
             assign pe_active_flat[r * PHY_COLS + c] = pe_clk_en;
+            // 8x32 two-pass: half_en gates which half-array is active.
+            // half_en=0: rows 0-7 active (top half, logical cols 0-15)
+            // half_en=1: rows 8-15 active (bottom half, logical cols 16-31)
+            // other shapes: fold_enable=0 → all rows always active
+            // During flush, enable all PEs regardless of half_en so that
+            // valid_out propagates from all rows and capture triggers correctly.
+            wire pe_half_active = flush || !fold_enable || (half_en ? (r >= 8) : (r < 8));
             wire pe_acc_init_en = acc_init_en &&
                                   pe_clk_en &&
+                                  pe_half_active &&
                                   acc_init_mask[r * PHY_COLS + c];
 
             // ── Weight input selection ──
@@ -270,11 +279,16 @@ generate
             // WS mode: use cascade-delayed activation (row-to-row propagation)
             wire [DATA_W-1:0] pe_a_in;
             if (r >= 8) begin : fold_a_in
-                assign pe_a_in = fold_enable
-                              ? (stat_mode ? fold_act_from_top[r-8]
-                                           : act_row_skewed[r-8])
-                              : (stat_mode ? act_in[r*DATA_W +: DATA_W]
-                                           : act_row_skewed[r]);
+                // 8x32 OS two-pass: route same activation to both halves.
+                // The fold delay (16-cycle horizontal shift) is incompatible
+                // with the single-fire packed SIMD architecture — bottom half
+                // would see activation 16 cycles after weight injection.
+                assign pe_a_in = (fold_enable && stat_mode)
+                               ? act_in[(r-8)*DATA_W +: DATA_W]
+                               : (fold_enable
+                                  ? act_row_skewed[r-8]
+                                  : (stat_mode ? act_in[r*DATA_W +: DATA_W]
+                                               : act_row_skewed[r]));
             end else begin : normal_a_in
                 assign pe_a_in = stat_mode ? act_in[r*DATA_W +: DATA_W]
                                            : act_row_skewed[r];
@@ -293,7 +307,7 @@ generate
                 .rst_n    (rst_n),
                 .mode     (mode),
                 .stat_mode(stat_mode),
-                .en       (en && pe_clk_en),
+                .en       (en && pe_clk_en && pe_half_active),
                 .flush    (flush),
                 .load_w   (pe_load_w),
                 .swap_w   (swap_w),
@@ -413,5 +427,55 @@ generate
         assign pe_active[idx] = pe_active_flat[idx];
     end
 endgenerate
+
+// ---------------------------------------------------------------------------
+// Diagnostic: log weight vertical chain per cycle
+// ---------------------------------------------------------------------------
+`ifdef DIAG_WCHAIN
+reg [15:0] diag_wcyc;
+reg        diag_wactive;
+integer    diag_wr, diag_wc;
+
+always @(posedge clk) begin
+    if (!rst_n || en === 1'b0) begin
+        diag_wcyc    <= 16'd0;
+        diag_wactive <= 1'b0;
+    end else if (!diag_wactive) begin
+        diag_wactive <= 1'b1;
+        diag_wcyc    <= 16'd0;
+    end else if (diag_wcyc < 20) begin
+        diag_wcyc <= diag_wcyc + 16'd1;
+    end
+end
+
+always @(posedge clk) begin
+    if (diag_wactive && diag_wcyc < 20) begin
+        for (diag_wr = 0; diag_wr < 16; diag_wr = diag_wr + 1) begin
+            if (w_v[diag_wr][0] != 0)
+                $display("[DIAG_W] cyc=%0d w_v[%0d][0]=0x%08h",
+                         diag_wcyc, diag_wr, w_v[diag_wr][0]);
+        end
+    end
+end
+`endif
+
+// ---------------------------------------------------------------------------
+// Diagnostic: probe PE(8,0) every clock cycle
+// ---------------------------------------------------------------------------
+`ifdef DIAG_8X32_PE
+always @(posedge clk) begin
+    if (en)  // log only when array-level en is active
+        $display("[DIAG_PE80] t=%0t half=%0d pe_en=%0d s0a=0x%04h s0w=0x%04h s0v=%0d s1v=%0d s1m=%0d os=%0d acc=%0d",
+                 $time, half_en,
+                 gen_row[8].gen_col[0].u_pe.en,
+                 gen_row[8].gen_col[0].u_pe.s0_a,
+                 gen_row[8].gen_col[0].u_pe.s0_w,
+                 gen_row[8].gen_col[0].u_pe.s0_valid,
+                 gen_row[8].gen_col[0].u_pe.s1_valid,
+                 gen_row[8].gen_col[0].u_pe.s1_mul,
+                 gen_row[8].gen_col[0].u_pe.os_acc,
+                 gen_row[8].gen_col[0].u_pe.acc_out);
+end
+`endif
 
 endmodule

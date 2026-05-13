@@ -21,6 +21,80 @@ SHAPE_CONFIGS = {
     "8x32": {"cfg_shape": 3, "grid_rows": 8, "grid_cols": 32},
 }
 
+PPB_DEPTH = 64       # PPBuf word depth
+SIMD_LANES = 4
+
+def compute_k_tile_elems(shape_cfg, is_8x32_half=False):
+    """Max K elements per k_tile matching controller logic.
+       For 8x32 half-pass, W uses only 16 columns."""
+    rows = shape_cfg["grid_rows"]
+    cols = shape_cfg["grid_cols"]
+    bytes_a = rows * 1  # INT8
+    bytes_w = (16 if is_8x32_half else cols) * 1
+    max_bytes = max(bytes_a, bytes_w)
+    return max(1, (PPB_DEPTH * 4) // max_bytes)
+
+def packed_pad_words(elem_bytes_per_k, k_len):
+    """Zero-word pad count when k_len not multiple of SIMD_LANES."""
+    k_rem = k_len % SIMD_LANES
+    if k_rem == 0:
+        return 0
+    pad_bytes = elem_bytes_per_k * (SIMD_LANES - k_rem)
+    return (pad_bytes + 3) // 4
+
+def pack_tile_a_ksplit(A, M, K, grid_rows, kt_elems):
+    """Pack A into tile-stream with K-split support.
+       Each k_tile chunk is zero-padded for SIMD alignment."""
+    words_per_k = (grid_rows + 3) // 4
+    packed = []
+    num_m = (M + grid_rows - 1) // grid_rows
+    for mt in range(num_m):
+        m0 = mt * grid_rows
+        kpos = 0
+        while kpos < K:
+            k_len = min(K - kpos, kt_elems)
+            for k in range(kpos, kpos + k_len):
+                for w in range(words_per_k):
+                    word = 0
+                    for r in range(4):
+                        lane = w * 4 + r
+                        if lane < grid_rows:
+                            mr = m0 + lane
+                            val = A[mr][k] if mr < M else 0
+                            word |= (val & 0xFF) << (r * 8)
+                    packed.append(word)
+            pw = packed_pad_words(grid_rows * 1, k_len)
+            for _ in range(pw):
+                packed.append(0)
+            kpos += k_len
+    return packed
+
+def pack_tile_w_ksplit(W, K, N, grid_cols, kt_elems):
+    """Pack W into tile-stream with K-split support."""
+    words_per_k = (grid_cols + 3) // 4
+    packed = []
+    num_n = (N + grid_cols - 1) // grid_cols
+    for nt in range(num_n):
+        n0 = nt * grid_cols
+        kpos = 0
+        while kpos < K:
+            k_len = min(K - kpos, kt_elems)
+            for k in range(kpos, kpos + k_len):
+                for w in range(words_per_k):
+                    word = 0
+                    for c in range(4):
+                        lane = w * 4 + c
+                        if lane < grid_cols:
+                            nc = n0 + lane
+                            val = W[k][nc] if nc < N else 0
+                            word |= (val & 0xFF) << (c * 8)
+                    packed.append(word)
+            pw = packed_pad_words(grid_cols * 1, k_len)
+            for _ in range(pw):
+                packed.append(0)
+            kpos += k_len
+    return packed
+
 def gen_golden(A, W, M, K, N):
     """A[M,K] * W[K,N] = C[M,N], signed INT8 x INT8 -> int32."""
     C = [[0]*N for _ in range(M)]
@@ -32,11 +106,17 @@ def gen_golden(A, W, M, K, N):
             C[m][n] = s & 0xFFFFFFFF  # 32-bit two's complement
     return C
 
-def pack_tile_a(A, M, K, grid_rows):
+def pack_tile_a(A, M, K, grid_rows, min_words_per_k=1):
     """Pack A into tile-stream: A_TILE[m_tile][k][r]
-       Full tile data (zero-padded for edge tiles) to match DMA load size."""
+       Pad to at least min_words_per_k per K so DMA load length matches PPBuf expectation.
+       Also pad with zero words at end of each tile when K is not multiple of SIMD_LANES=4."""
+    SIMD_LANES = 4
+    words_per_k = max(min_words_per_k, (grid_rows + 3) // 4)
+    # packed_pad bytes per tile when K % SIMD_LANES != 0
+    k_rem = K % SIMD_LANES
+    packed_pad_bytes = (grid_rows * 1) * (SIMD_LANES - k_rem) if k_rem != 0 else 0
+    packed_pad_words = (packed_pad_bytes + 3) // 4
     packed = []
-    words_per_k = (grid_rows + 3) // 4
     for m_tile in range((M + grid_rows - 1) // grid_rows):
         m0 = m_tile * grid_rows
         for k in range(K):
@@ -50,13 +130,20 @@ def pack_tile_a(A, M, K, grid_rows):
                         val_byte = val & 0xFF
                         word |= val_byte << (r * 8)
                 packed.append(word)
+        for _ in range(packed_pad_words):
+            packed.append(0)
     return packed
 
 def pack_tile_w(W, K, N, grid_cols):
     """Pack W into tile-stream: W_TILE[n_tile][k][c]
-       Full tile data (zero-padded for edge tiles) to match DMA load size."""
-    packed = []
+       Full tile data (zero-padded for edge tiles) to match DMA load size.
+       Also pad with zero words at end of each tile when K is not multiple of SIMD_LANES=4."""
+    SIMD_LANES = 4
     words_per_k = (grid_cols + 3) // 4
+    k_rem = K % SIMD_LANES
+    packed_pad_bytes = (grid_cols * 1) * (SIMD_LANES - k_rem) if k_rem != 0 else 0
+    packed_pad_words = (packed_pad_bytes + 3) // 4
+    packed = []
     for n_tile in range((N + grid_cols - 1) // grid_cols):
         n0 = n_tile * grid_cols
         for k in range(K):
@@ -70,6 +157,37 @@ def pack_tile_w(W, K, N, grid_cols):
                         val_byte = val & 0xFF
                         word |= val_byte << (c * 8)
                 packed.append(word)
+        for _ in range(packed_pad_words):
+            packed.append(0)
+    return packed
+
+def pack_tile_w_8x32_pass(W, K, N, pass_idx, kt_elems):
+    """Pack W for 8x32 two-pass: pass 0 = logical cols 0-15, pass 1 = cols 16-31.
+       Each pass produces 4 words per K (16 cols / 4 lanes per word), contiguous.
+       Supports K-split with packed SIMD pad per k_tile."""
+    packed = []
+    num_tiles_n = (N + 31) // 32
+    half_cols = 16
+    words_per_k = 4
+    for n_tile in range(num_tiles_n):
+        n0 = n_tile * 32
+        kpos = 0
+        while kpos < K:
+            k_len = min(K - kpos, kt_elems)
+            for k in range(kpos, kpos + k_len):
+                for w in range(words_per_k):
+                    word = 0
+                    for c in range(4):
+                        lane = w * 4 + c
+                        logical_c = n0 + pass_idx * half_cols + lane
+                        val = W[k][logical_c] if logical_c < N else 0
+                        val_byte = val & 0xFF
+                        word |= val_byte << (c * 8)
+                    packed.append(word)
+            pw = packed_pad_words(half_cols * 1, k_len)
+            for _ in range(pw):
+                packed.append(0)
+            kpos += k_len
     return packed
 
 def gen_expected(C, M, N):
@@ -94,6 +212,7 @@ def main():
     cfg = SHAPE_CONFIGS[args.shape]
     grid_rows = cfg["grid_rows"]
     grid_cols = cfg["grid_cols"]
+    kt_elems = compute_k_tile_elems(cfg, is_8x32_half=(args.shape == "8x32"))
     M = args.M
     K = args.K
     N = args.N
@@ -112,18 +231,26 @@ def main():
     W = [[rng_s8() for _ in range(N)] for _ in range(K)]
 
     C = gen_golden(A, W, M, K, N)
-    a_tile = pack_tile_a(A, M, K, grid_rows)
-    w_tile = pack_tile_w(W, K, N, grid_cols)
-    expected = gen_expected(C, M, N)
 
     # DRAM layout:
-    #   0x0000: packed W tile stream
+    #   0x0000: packed W tile stream (split into two halves for 8x32)
     #   0x1000: packed A tile stream
     #   0x2000: result area (row-major C)
     W_BASE = 0x0000
     A_BASE = 0x1000
     R_BASE = 0x2000
     DRAM_SIZE = 0x4000 // 4  # 16K words
+
+    a_tile = pack_tile_a_ksplit(A, M, K, grid_rows, kt_elems)
+    if args.shape == "8x32":
+        w_tile0 = pack_tile_w_8x32_pass(W, K, N, 0, kt_elems)  # cols 0-15
+        w_tile1 = pack_tile_w_8x32_pass(W, K, N, 1, kt_elems)  # cols 16-31
+        w_tile = w_tile0 + w_tile1
+        W_ADDR2 = W_BASE + len(w_tile0) * 4  # second pass starts after first
+    else:
+        w_tile = pack_tile_w_ksplit(W, K, N, grid_cols, kt_elems)
+        W_ADDR2 = 0  # unused
+    expected = gen_expected(C, M, N)
 
     dram = [0] * DRAM_SIZE
     for i, v in enumerate(w_tile):
@@ -146,16 +273,24 @@ def main():
         f.write(f"`define N_DIM {N}\n")
         f.write(f"`define K_DIM {K}\n")
         f.write(f"`define W_ADDR 32'h{W_BASE:08X}\n")
+        if args.shape == "8x32":
+            f.write(f"`define W_ADDR2 32'h{W_ADDR2:08X}\n")
         f.write(f"`define A_ADDR 32'h{A_BASE:08X}\n")
         f.write(f"`define R_ADDR 32'h{R_BASE:08X}\n")
         f.write(f"`define ARR_CFG 32'h{0x80:02X}\n")
         f.write(f"`define CFG_SHAPE_VAL {cfg['cfg_shape']}\n")
         f.write(f"`define GRID_COLS_VAL {grid_cols}\n")
-        # Compute exact AW count: each tile writes min(remaining M rows, grid_rows) row bursts
+        # Compute exact AW count: each tile row writes one or more bursts,
+        # limited by BURST_MAX=16 (64 bytes). 32-bit words, 4 bytes each.
         aw_expect = 0
+        BURST_MAX_BYTES = 64  # 16 beats * 4 bytes
         for mt in range(num_tiles_m):
             mr = min(M - mt * grid_rows, grid_rows)
-            aw_expect += mr * num_tiles_n
+            for nt in range(num_tiles_n):
+                nc = min(N - nt * grid_cols, grid_cols)
+                row_bytes = nc * 4
+                bursts_per_row = (row_bytes + BURST_MAX_BYTES - 1) // BURST_MAX_BYTES
+                aw_expect += mr * bursts_per_row
         f.write(f"`define AW_EXPECT_VAL {aw_expect}\n")
         f.write(f"`define GRID_ROWS {grid_rows}\n")
         f.write(f"`define GRID_COLS {grid_cols}\n")

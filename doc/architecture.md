@@ -236,6 +236,38 @@ FP16 目标：
 
 因此 0.5-1 TOPS 目标要求 16x16 阵列配合 PE 内 INT8 SIMD。T7.3/T7.4 已提供 PE 级 2-lane/4-lane 理论 0.512/1.024 TOPS 基础；T7.5 已提供 `TOPS_X1E6`、compute/e2e utilization 和 peak ops/cycle 性能计数口径。端到端高吞吐还取决于后续 packed K lane 供数、结果收集和写回。
 
+### 4-lane SIMD 加速方向
+
+```text
+单 lane PE（每拍 1 个 K 值）:
+  K=4 需要 4 拍完成一个 C 元素的点积
+
+4-lane PE（每拍 4 个 K 值）:
+  K=4 只需 1 拍完成一个 C 元素的点积
+
+4-lane 加速的是 K 方向（归约维度），不替代其他 PE。
+```
+
+以 4×4 阵列做 4×4×4 GEMM 为例：
+
+```text
+PE(r,c) → C[r,c] = Σ_k A[r,k]·W[k,c]
+
+PE[0,0] 内部 4 lane:
+  a_in = {A[0,3], A[0,2], A[0,1], A[0,0]}   // 同一行，不同 K
+  w_in = {W[3,0], W[2,0], W[1,0], W[0,0]}   // 同一列，不同 K
+  lane3·lane2·lane1·lane0 并行乘加 → C[0,0]
+
+PE[0,1] 内部 4 lane（同时）:
+  a_in = {A[0,3], A[0,2], A[0,1], A[0,0]}   // 与 PE[0,0] 相同的 A 行
+  w_in = {W[3,1], W[2,1], W[1,1], W[0,1]}   // 不同的 W 列
+  → C[0,1]
+```
+
+16 个 PE 并行算 16 个 C 元素（不同行列），每个 PE 内部 4 lane 并行算 4 个 K 位置。**总计 16×4=64 MAC/fire，等于 GEMM 总 MAC 数——没有空闲 PE，也没有空闲 lane。**
+
+K 不足 4 的倍数时，末尾会用 pad 零填充废 lane（硬件自动，不产生多余乘积）。
+
 ## 4x4 Tile 数据布局
 
 T2.1 采用固定的 4x4 逻辑 tile，先让 16 个 PE 在 OS 模式下真正同时产生 16 个输出。后续 8x8/16x16 只把 `TILE_M/TILE_N` 从 4 扩展到 8/16，不改变基本地址和 lane 口径。

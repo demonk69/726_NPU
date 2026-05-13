@@ -244,6 +244,7 @@ wire [31:0] desc_fetch_addr;
 wire [511:0] desc_fetch_words;
 wire pe_en, pe_flush, pe_mode, pe_stat;
 wire pe_load_w, pe_swap_w, pe_acc_init_en;   // WS mode weight control and accumulator init
+wire pe_half_en;           // 8x32: half-array enable (0=top, 1=bottom)
 wire ctrl_w_ppb_swap, ctrl_a_ppb_swap, ctrl_w_ppb_clear, ctrl_a_ppb_clear;
 wire ctrl_r_fifo_clear;
 wire [1:0] ctrl_cfg_shape;
@@ -361,6 +362,7 @@ npu_ctrl #(
     .pe_load_w    (pe_load_w),
     .pe_swap_w    (pe_swap_w),
     .pe_acc_init_en(pe_acc_init_en),
+    .pe_half_en   (pe_half_en),
     .w_ppb_ready  (u_w_ppb.buf_ready),
     .w_ppb_empty  (u_w_ppb.buf_empty),
     .a_ppb_ready  (u_a_ppb.buf_ready),
@@ -461,7 +463,7 @@ npu_dma #(
     .BURST_MAX   (16),
     .PPB_DEPTH   (PPB_DEPTH),
     .PPB_THRESH  (PPB_THRESH),
-    .R_FIFO_DEPTH(64)
+    .R_FIFO_DEPTH(256)
 ) u_dma (
     .clk            (sys_clk),
     .rst_n          (sys_rst_n),
@@ -629,6 +631,17 @@ assign a_ppb_rd_en = ctrl_tile_mode ? 1'b0 : pe_consume;
 assign w_ppb_rd_vec_en = tile_vec_fire;
 assign a_ppb_rd_vec_en = tile_vec_fire;
 
+`ifdef DIAG_FIRE_K5
+always @(posedge sys_clk) begin
+    if (tile_vec_fire) begin
+        $display("[DIAG_FIRE] rd_fill_a=%0d rd_fill_b=%0d rd_ptr_a=%0d rd_ptr_b=%0d lane0=0x%08h",
+                 u_w_ppb.rd_fill_a, u_w_ppb.rd_fill_b,
+                 u_w_ppb.rd_ptr_a, u_w_ppb.rd_ptr_b,
+                 w_ppb_rd_vec[0*DATA_W +: DATA_W]);
+    end
+end
+`endif
+
 // ---------------------------------------------------------------------------
 // Reconfigurable PE Array (16×16 physical)
 // ---------------------------------------------------------------------------
@@ -656,7 +669,7 @@ generate
         if (LANE == 0) begin : gen_lane0
             assign a_skew_vec[LANE*DATA_W +: DATA_W] =
                 (ctrl_tile_mode && tile_vec_fire) ? a_ppb_rd_vec[LANE*DATA_W +: DATA_W]
-                                                  : {DATA_W{1'b0}};
+                                                   : {DATA_W{1'b0}};
         end else if (LANE == 1) begin : gen_lane1_reg
             // Single-cycle registered delay: captures on vec_fire, holds during
             // drain so the value is not lost when the pipe input is later cleared.
@@ -686,6 +699,43 @@ generate
         end
     end
 endgenerate
+
+// ---------------------------------------------------------------------------
+// Diagnostic: log A-skew outputs and weight inputs every cycle after fire
+// ---------------------------------------------------------------------------
+`ifdef DIAG_SKEW
+reg [15:0] diag_cyc;
+reg        diag_active;
+reg [511:0] diag_a_fire, diag_w_fire;
+integer    diag_r;
+
+always @(posedge sys_clk) begin
+    if (!sys_rst_n || !ctrl_tile_mode) begin
+        diag_cyc    <= 16'd0;
+        diag_active <= 1'b0;
+    end else if (tile_vec_fire && !diag_active) begin
+        diag_active  <= 1'b1;
+        diag_cyc     <= 16'd0;
+        diag_a_fire  <= a_ppb_rd_vec;
+        diag_w_fire  <= w_ppb_rd_vec;
+    end else if (diag_active && diag_cyc < 20) begin
+        diag_cyc <= diag_cyc + 16'd1;
+    end
+end
+
+always @(posedge sys_clk) begin
+    if (diag_active && diag_cyc < 20) begin
+        for (diag_r = 0; diag_r < 16; diag_r = diag_r + 1) begin
+            if (a_skew_vec[diag_r*DATA_W +: DATA_W] != 0)
+                $display("[DIAG] cyc=%0d askew[%0d]=0x%08h (fire_A[%0d]=0x%08h)",
+                         diag_cyc, diag_r,
+                         a_skew_vec[diag_r*DATA_W +: DATA_W],
+                         diag_r,
+                         diag_a_fire[diag_r*DATA_W +: DATA_W]);
+        end
+    end
+end
+`endif
 
 genvar feed_col;
 generate
@@ -925,6 +975,7 @@ reconfig_pe_array #(
     .load_w         (pe_load_w),
     .swap_w         (pe_swap_w),
     .acc_init_en    (1'b0),
+    .half_en        (pe_half_en),
     .w_in           (pe_w_in),
     .act_in         (pe_a_in),
     .acc_in         (pe_acc_in),
@@ -979,10 +1030,28 @@ wire       tile_ser_fire = tile_ser_busy && !r_fifo_full;
 wire       tile_ser_last_col = (tile_ser_col + 6'd1 >= tile_ser_active_cols);
 wire       tile_ser_last_row = (tile_ser_row + 5'd1 >= tile_ser_active_rows);
 wire       tile_ser_last     = tile_ser_last_col && tile_ser_last_row;
-wire tile_result_capture = ctrl_tile_mode &&
-                             pe_stat &&
-                             pe_array_valid[0] &&
-                             !tile_ser_busy;
+wire tile_result_capture_pending = ctrl_tile_mode &&
+                              pe_stat &&
+                              pe_array_valid[0] &&
+                              !tile_ser_busy;
+
+`ifdef DIAG_8X32
+always @(posedge sys_clk) begin
+    if (tile_result_capture_pending)
+        $display("[DIAG_CAP] capture pending: tile_ser_busy=%0d pe_flush=%0d",
+                 tile_ser_busy, pe_flush);
+end
+`endif
+
+// Delay capture by 1 cycle so acc_out NB from flush has taken effect
+reg tile_cap_d1;
+always @(posedge sys_clk) begin
+    if (!sys_rst_n || !ctrl_tile_mode)
+        tile_cap_d1 <= 1'b0;
+    else
+        tile_cap_d1 <= tile_result_capture_pending;
+end
+wire tile_result_capture = tile_cap_d1;
 
 integer tile_ser_i;
 always @(posedge sys_clk) begin
@@ -995,8 +1064,7 @@ always @(posedge sys_clk) begin
         for (tile_ser_i = 0; tile_ser_i < 256; tile_ser_i = tile_ser_i + 1)
             tile_result_buf[tile_ser_i] <= {ACC_W{1'b0}};
     end else if (tile_result_capture) begin
-        // Capture the full PE grid: result[row*grid_cols+col] = C[m0+row,n0+col]
-        // Only active entries per shape are pushed through the serializer.
+        // Capture the full PE grid
         for (tile_ser_i = 0; tile_ser_i < tile_capture_cnt; tile_ser_i = tile_ser_i + 1)
             tile_result_buf[tile_ser_i] <= pe_array_result[tile_ser_i*ACC_W +: ACC_W];
         tile_ser_active_rows <= ctrl_tile_active_rows;
@@ -1005,6 +1073,11 @@ always @(posedge sys_clk) begin
         tile_ser_col         <= 6'd0;
         tile_ser_busy        <= (ctrl_tile_active_rows != 5'd0) &&
                                 (ctrl_tile_active_cols != 6'd0);
+        `ifdef DIAG_8X32
+        $display("[DIAG_CAP] capture done: buf[0]=0x%08h buf[16]=0x%08h",
+                 pe_array_result[0*ACC_W +: ACC_W],
+                 pe_array_result[16*ACC_W +: ACC_W]);
+        `endif
     end else if (tile_ser_fire) begin
         if (tile_ser_last) begin
             tile_ser_busy <= 1'b0;
@@ -1014,12 +1087,33 @@ always @(posedge sys_clk) begin
         end else begin
             tile_ser_col <= tile_ser_col + 6'd1;
         end
+        `ifdef DIAG_8X32
+        if (tile_ser_idx == 16 || tile_ser_idx == 0)
+            $display("[DIAG_SER] serializer fire idx=%0d r=%0d c=%0d din=0x%08h",
+                     tile_ser_idx, tile_ser_row, tile_ser_col, r_fifo_din);
+        `endif
     end
 end
 
 assign r_fifo_din   = ctrl_tile_mode ? tile_post_result : scalar_post_result;
 assign r_fifo_wr_en = ctrl_tile_mode ? tile_ser_fire
                                      : (scalar_valid && !r_fifo_full);
+
+// ---------------------------------------------------------------------------
+// Diagnostic: log serializer output to FIFO
+// ---------------------------------------------------------------------------
+`ifdef DIAG_FIFO
+reg [8:0] diag_fifo_idx;
+always @(posedge sys_clk) begin
+    if (!sys_rst_n || !ctrl_tile_mode)
+        diag_fifo_idx <= 9'd0;
+    else if (r_fifo_wr_en) begin
+        $display("[DIAG_FIFO] seq=%0d (r=%0d c=%0d) data=0x%08h",
+                 diag_fifo_idx, tile_ser_row, tile_ser_col, r_fifo_din);
+        diag_fifo_idx <= diag_fifo_idx + 9'd1;
+    end
+end
+`endif
 
 // ---------------------------------------------------------------------------
 // Power Management

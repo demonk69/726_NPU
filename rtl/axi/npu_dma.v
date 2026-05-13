@@ -22,7 +22,7 @@ module npu_dma #(
     parameter BURST_MAX = 16,
     parameter PPB_DEPTH = 32,
     parameter PPB_THRESH= 16,
-    parameter R_FIFO_DEPTH = 64
+    parameter R_FIFO_DEPTH = 256
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -448,6 +448,9 @@ always @(posedge clk) begin
                     desc_bytes_done  <= 16'd0;
                     desc_word_idx    <= 5'd0;
                 end else if (w_start && (w_len_bytes != 16'd0) && !w_ppb_full) begin
+                    `ifdef DIAG_8X32
+                    $display("[DIAG_DMA] W DMA start: addr=0x%08h len=%0d", w_base_addr, w_len_bytes);
+                    `endif
                     load_state    <= L_WREAD;
                     load_addr_cnt <= w_base_addr;
                     load_byte_cnt <= 16'd0;

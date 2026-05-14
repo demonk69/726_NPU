@@ -30,6 +30,7 @@ run_test() {
     echo "===================================================================="
     echo "  $name  (expect $expect PASS)"
     echo "===================================================================="
+    rm -rf obj_dir
     verilator --binary +incdir+${name} --top-module tb_npu_tile_gemm_v2 \
       --timing $WFLAGS $RTL ../tb_npu_tile_gemm_v2.v 2>&1 | tail -1
     ./obj_dir/Vtb_npu_tile_gemm_v2 | grep -E "PASS|FAIL" | head -3

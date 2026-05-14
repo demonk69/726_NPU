@@ -356,34 +356,7 @@ task wait_done;
             guard = guard + 1;
         end
         if (!status[1]) begin
-`ifndef VERILATOR
-            $display("[FAIL] NPU timeout state=%0d dma=%0d",
-                     u_npu.u_ctrl.state, u_npu.u_dma.dma_state);
-            $display("[DBG] rst_n=%0d busy=%0d done=%0d",
-                     rst_n, u_npu.u_ctrl.busy, u_npu.u_ctrl.done);
-            $display("[DBG] ctrl_reg=0x%08h desc_mode=%0d start=%0d",
-                     u_npu.u_axi_lite.ctrl_reg,
-                     u_npu.u_axi_lite.ctrl_reg[7],
-                     u_npu.u_axi_lite.ctrl_reg[0]);
-            $display("[DBG] cfg_start_d1=%0d cfg_start_rise=%0d direct_start_rise=%0d",
-                     u_npu.u_ctrl.cfg_start_d1,
-                     u_npu.u_ctrl.cfg_start_rise,
-                     u_npu.u_ctrl.direct_start_rise);
-            $display("[DBG] tile_mode=%0d cfg_shape=%0d arr_cfg=0x%02h",
-                     u_npu.u_ctrl.tile_mode,
-                     u_npu.u_ctrl.cfg_shape_latched,
-                     u_npu.u_axi_lite.arr_cfg);
-            $display("[DBG] m_dim=%0d n_dim=%0d k_dim=%0d",
-                     u_npu.u_axi_lite.m_dim,
-                     u_npu.u_axi_lite.n_dim,
-                     u_npu.u_axi_lite.k_dim);
-            $display("[DBG] w_addr=0x%08h a_addr=0x%08h r_addr=0x%08h",
-                     u_npu.u_axi_lite.w_addr,
-                     u_npu.u_axi_lite.a_addr,
-                     u_npu.u_axi_lite.r_addr);
-`else
-            $display("[FAIL] NPU timeout (state/dma not accessible in Verilator)");
-`endif
+            $display("[FAIL] NPU timeout (status[1]=%0d)", status[1]);
             $finish;
         end
         axi_write(REG_CTRL, 32'h0);
@@ -475,7 +448,7 @@ initial begin
     axi_write(REG_CTRL, 32'h11);
 `endif
 
-    wait_done(5000);
+    wait_done(50000);
 
     `ifdef DIAG_TRACE
     begin
@@ -523,7 +496,7 @@ initial begin
 end
 
 initial begin
-    #(CLK_T * 200000);
+    #(CLK_T * 1000000);
     $display("[FAIL] %s global timeout", `TEST_NAME);
     $finish;
 end

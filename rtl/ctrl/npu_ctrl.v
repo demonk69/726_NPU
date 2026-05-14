@@ -1069,6 +1069,10 @@ always @(posedge clk) begin
                 // Tile-mode bias: sequential per-column fetch
                 if (lk_bias_en && tile_mode && (bias_col < tile_active_cols)) begin
                     if (!bias_pending) begin
+                        `ifdef DIAG_BIAS
+                        $display("[DIAG_BIAS] fetch col=%0d addr=0x%08h", bias_col,
+                                 lk_bias_addr + ((tile_n_base + {27'd0, bias_col}) << 2));
+                        `endif
                         dma_bias_start <= 1'b1;
                         dma_bias_addr <= lk_bias_addr + ((tile_n_base + {27'd0, bias_col}) << 2);
                         bias_pending  <= 1'b1;

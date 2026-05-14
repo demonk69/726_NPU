@@ -643,7 +643,6 @@ end
 `endif
 
 `ifdef VERILATOR_TRACE
-// Diagnostic: print W/A PPBuf lane 0 on each fire for Verilator debug
 always @(posedge sys_clk) begin
     if (ctrl_vec_consume)
         $display("[V_TRACE] fire: w_lane0=0x%08h a_lane0=0x%08h",

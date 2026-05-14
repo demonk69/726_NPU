@@ -190,6 +190,58 @@ def pack_tile_w_8x32_pass(W, K, N, pass_idx, kt_elems):
             kpos += k_len
     return packed
 
+def gen_int32_bias(N, seed=None):
+    """Generate random signed int32 bias vector."""
+    import random as _r
+    rng = _r.Random(seed) if seed is not None else _r.Random()
+    return [rng.randint(-2**20, 2**20) for _ in range(N)]  # reasonable range
+
+def apply_bias(C, bias, M, N):
+    """Apply per-column bias: C_bias[m][n] = C[m][n] + bias[n]."""
+    out = [[0]*N for _ in range(M)]
+    for m in range(M):
+        for n in range(N):
+            out[m][n] = (C[m][n] + bias[n]) & 0xFFFFFFFF
+    return out
+
+def apply_relu(C, M, N):
+    """ReLU: max(0, int32 value)."""
+    out = [[0]*N for _ in range(M)]
+    for m in range(M):
+        for n in range(N):
+            v = signed32(C[m][n])
+            out[m][n] = (0 if v < 0 else v) & 0xFFFFFFFF
+    return out
+
+def apply_relu6(C, M, N):
+    """ReLU6: clamp to [0, 6] for int32."""
+    out = [[0]*N for _ in range(M)]
+    for m in range(M):
+        for n in range(N):
+            v = signed32(C[m][n])
+            if v < 0: v = 0
+            elif v > 6: v = 6
+            out[m][n] = v & 0xFFFFFFFF
+    return out
+
+def apply_quant(C, M, N, scale, shift, rounding):
+    """INT8 quantize: (value * scale) >> shift, clamp [-128, 127]."""
+    out = [[0]*N for _ in range(M)]
+    for m in range(M):
+        for n in range(N):
+            v = signed32(C[m][n])
+            prod = v * scale
+            if rounding and shift > 0:
+                offset = (1 << (shift - 1))
+                prod = prod + offset if prod >= 0 else prod + offset - 1
+            shifted = prod >> shift if shift < 31 else (0 if prod >= 0 else -1)
+            shifted = max(-128, min(127, shifted))
+            out[m][n] = (shifted & 0xFF) | ((0xFFFFFF if shifted < 0 else 0) << 8)
+    return out
+
+def signed32(v):
+    return v if v < 0x80000000 else v - 0x100000000
+
 def gen_expected(C, M, N):
     """Flatten C to row-major 32-bit words (expected order)."""
     flat = []
@@ -207,6 +259,12 @@ def main():
     parser.add_argument("--out-dir", default=".")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--name", default=None)
+    parser.add_argument("--bias", action="store_true", help="Add per-column int32 bias")
+    parser.add_argument("--activation", choices=["none","relu","relu6"], default="none")
+    parser.add_argument("--quant", action="store_true", help="Apply INT8 quantize/saturate")
+    parser.add_argument("--quant-scale", type=int, default=1)
+    parser.add_argument("--quant-shift", type=int, default=3)
+    parser.add_argument("--quant-round", action="store_true")
     args = parser.parse_args()
 
     cfg = SHAPE_CONFIGS[args.shape]
@@ -232,13 +290,42 @@ def main():
 
     C = gen_golden(A, W, M, K, N)
 
+    # ── Bias ──
+    BIAS_BASE = 0x3000
+    bias = None
+    bias_words = []
+    if args.bias:
+        bias = gen_int32_bias(N, args.seed + 1000)
+        bias_words = [v & 0xFFFFFFFF for v in bias]
+        C = apply_bias(C, bias, M, N)
+    # ── Activation ──
+    ctrl_val = 0x11  # base: INT8(00) + OS(01) + start
+    if args.bias:
+        ctrl_val |= (1 << 9)  # CTRL[9] = bias enable
+    if args.activation == 'relu':
+        C = apply_relu(C, M, N)
+        ctrl_val |= (1 << 10)  # CTRL[11:10] = 01
+    elif args.activation == 'relu6':
+        C = apply_relu6(C, M, N)
+        ctrl_val |= (2 << 10)  # CTRL[11:10] = 10
+    # ── Quant ──
+    quant_cfg = 0x00010000  # default: disabled (bit0=0)
+    if args.quant:
+        scale = args.quant_scale & 0xFFFF
+        shift = args.quant_shift & 0xFF
+        round_bit = 1 if args.quant_round else 0
+        quant_cfg = (scale << 16) | (shift << 8) | (round_bit << 1) | 1  # bit0=enable
+        C = apply_quant(C, M, N, args.quant_scale, args.quant_shift, args.quant_round)
+
     # DRAM layout:
     #   0x0000: packed W tile stream (split into two halves for 8x32)
     #   0x1000: packed A tile stream
     #   0x2000: result area (row-major C)
+    #   0x3000: bias vector (if --bias)
     W_BASE = 0x0000
     A_BASE = 0x1000
     R_BASE = 0x2000
+    BIAS_BASE = 0x3000
     DRAM_SIZE = 0x4000 // 4  # 16K words
 
     # Effective tile lanes for A PPBuf = shape_tile_lanes(shape)
@@ -260,6 +347,9 @@ def main():
         dram[(W_BASE >> 2) + i] = v
     for i, v in enumerate(a_tile):
         dram[(A_BASE >> 2) + i] = v
+    if bias_words:
+        for j, word in enumerate(bias_words):
+            dram[(BIAS_BASE >> 2) + j] = word & 0xFFFFFFFF
 
     num_tiles_m = (M + grid_rows - 1) // grid_rows
     num_tiles_n = (N + grid_cols - 1) // grid_cols
@@ -302,6 +392,11 @@ def main():
         f.write(f"`define NUM_TILES_N {num_tiles_n}\n")
         f.write(f"`define OUTPUT_HEX \"{out_dir.as_posix()}/npu_output.hex\"\n")
         f.write(f"`define IS_FP16 0\n")
+        if args.bias:
+            f.write(f"`define BIAS_ADDR_VAL 32'h{BIAS_BASE:08X}\n")
+        f.write(f"`define CTRL_VAL 32'h{ctrl_val:08X}\n")
+        if args.quant:
+            f.write(f"`define QUANT_CFG_VAL 32'h{quant_cfg:08X}\n")
 
     # Write dram.hex
     dram_path = out_dir / "dram.hex"

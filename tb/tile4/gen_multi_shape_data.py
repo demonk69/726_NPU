@@ -42,10 +42,10 @@ def packed_pad_words(elem_bytes_per_k, k_len):
     pad_bytes = elem_bytes_per_k * (SIMD_LANES - k_rem)
     return (pad_bytes + 3) // 4
 
-def pack_tile_a_ksplit(A, M, K, grid_rows, kt_elems):
+def pack_tile_a_ksplit(A, M, K, grid_rows, kt_elems, eff_lanes=0):
     """Pack A into tile-stream with K-split support.
-       Each k_tile chunk is zero-padded for SIMD alignment."""
-    words_per_k = (grid_rows + 3) // 4
+       eff_lanes: PPBuf output lane count (shape_tile_lanes), used to pad words_per_k."""
+    words_per_k = max((grid_rows + 3) // 4, (eff_lanes + 3) // 4)
     packed = []
     num_m = (M + grid_rows - 1) // grid_rows
     for mt in range(num_m):
@@ -241,7 +241,10 @@ def main():
     R_BASE = 0x2000
     DRAM_SIZE = 0x4000 // 4  # 16K words
 
-    a_tile = pack_tile_a_ksplit(A, M, K, grid_rows, kt_elems)
+    # Effective tile lanes for A PPBuf = shape_tile_lanes(shape)
+    # 8x32: 16, 16x16: 16, 8x8: 8, 4x4: 4
+    a_eff_lanes = 16 if args.shape == "8x32" else grid_rows
+    a_tile = pack_tile_a_ksplit(A, M, K, grid_rows, kt_elems, a_eff_lanes)
     if args.shape == "8x32":
         w_tile0 = pack_tile_w_8x32_pass(W, K, N, 0, kt_elems)  # cols 0-15
         w_tile1 = pack_tile_w_8x32_pass(W, K, N, 1, kt_elems)  # cols 16-31

@@ -356,6 +356,7 @@ task wait_done;
             guard = guard + 1;
         end
         if (!status[1]) begin
+`ifndef VERILATOR
             $display("[FAIL] NPU timeout state=%0d dma=%0d",
                      u_npu.u_ctrl.state, u_npu.u_dma.dma_state);
             $display("[DBG] rst_n=%0d busy=%0d done=%0d",
@@ -380,6 +381,9 @@ task wait_done;
                      u_npu.u_axi_lite.w_addr,
                      u_npu.u_axi_lite.a_addr,
                      u_npu.u_axi_lite.r_addr);
+`else
+            $display("[FAIL] NPU timeout (state/dma not accessible in Verilator)");
+`endif
             $finish;
         end
         axi_write(REG_CTRL, 32'h0);

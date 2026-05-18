@@ -141,10 +141,11 @@ def main():
     emit(LW("t1","t0",0)); emit(LW("t2","s1",0))
     emit(r_type(0x00,reg("t2"),reg("t1"),0x0,reg("t1"),0x33))  # ADD
     emit(SRAI("t2","t1",31))  # sign bit
-    i=len(ins); emit(0); lbl("relu_ok")
-    emit(*li_insns("t1",0))
-    patch_beqz(i,"relu_ok","t2")
-    emit(SW("t1","t0",0))
+    i=len(ins); emit(0)       # BEQZ placeholder
+    emit(*li_insns("t1",0))   # if negative: zero t1
+    lbl("relu_ok")            # BEQZ target: skip zeroing
+    patch_beqz(i,"relu_ok","t2")  # if t2==0 (positive), skip t1=0
+    emit(SW("t1","t0",0))     # store
 
     # PASS
     emit(*li_insns("t0",MARKER)); emit(*li_insns("t1",PASS)); emit(SW("t1","t0",0))

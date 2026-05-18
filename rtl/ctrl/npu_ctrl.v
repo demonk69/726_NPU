@@ -1064,9 +1064,6 @@ always @(posedge clk) begin
                     dma_a_im2col_dilation_w <= lk_conv_dilation_w;
                     dma_a_im2col_fp16_mode <= (lk_mode == 2'b10);
                     dma_bias_addr <= lk_bias_addr + (seq1_j << 2);
-                    dma_w_start <= 1'b1;
-                    dma_a_start <= 1'b1;
-                    dma_bias_start <= lk_bias_en && !tile_mode;
                 end
 
                 // Tile-mode bias: sequential per-column fetch
@@ -1128,6 +1125,46 @@ always @(posedge clk) begin
                     if (tile_mode) begin
                         pe_en <= 1'b1;
                         if (!pe_en) begin
+                            // ── Deferred prefetch launch ──
+                            // Was in S_PRELOAD but moved here to avoid racing bias_start
+                            // with w_start/a_start on the shared DMA channel.
+                            // Launched once per k_tile compute entry.
+                            if (!is_last_seq) begin
+                                dma_w_addr  <= pfetch_w_addr;
+                                dma_w_len   <= seq1_len_bytes_w;
+                                dma_a_addr  <= (lk_a_from_prev_ofm && tile_mode) ? lk_a_addr :
+                                               (lk_conv_im2col && !tile_mode) ? lk_a_addr :
+                                               pfetch_a_addr;
+                                dma_a_len   <= seq1_len_bytes_a;
+                                dma_a_ofm_mode <= lk_a_from_prev_ofm && tile_mode;
+                                dma_a_im2col_mode <= lk_conv_im2col && !tile_mode && !lk_a_from_prev_ofm;
+                                dma_a_ofm_stride <= lk_k_dim;
+                                dma_a_ofm_m_base <= seq1_m_base;
+                                dma_a_ofm_k_base <= seq1_k_base;
+                                dma_a_ofm_k_len <= seq1_k_len_32[15:0];
+                                dma_a_ofm_active_rows <= seq1_active_rows;
+                                dma_a_ofm_fp16_mode <= (lk_mode == 2'b10);
+                                dma_a_im2col_m_index <= seq1_m_base;
+                                dma_a_im2col_k_len <= lk_k_dim[15:0];
+                                dma_a_im2col_ih <= lk_conv_ih;
+                                dma_a_im2col_iw <= lk_conv_iw;
+                                dma_a_im2col_cin <= lk_conv_cin;
+                                dma_a_im2col_kh <= lk_conv_kh;
+                                dma_a_im2col_kw <= lk_conv_kw;
+                                dma_a_im2col_oh <= lk_conv_oh;
+                                dma_a_im2col_ow <= lk_conv_ow;
+                                dma_a_im2col_stride_h <= lk_conv_stride_h;
+                                dma_a_im2col_stride_w <= lk_conv_stride_w;
+                                dma_a_im2col_pad_h <= lk_conv_pad_h;
+                                dma_a_im2col_pad_w <= lk_conv_pad_w;
+                                dma_a_im2col_dilation_h <= lk_conv_dilation_h;
+                                dma_a_im2col_dilation_w <= lk_conv_dilation_w;
+                                dma_a_im2col_fp16_mode <= (lk_mode == 2'b10);
+                                dma_w_start <= 1'b1;
+                                dma_a_start <= 1'b1;
+                                dma_w_done_r <= 1'b0;
+                                dma_a_done_r <= 1'b0;
+                            end
                             tile_k_cycle <= 16'd0;
                         end else if (tile_k_cycle + 16'd1 >= tile_compute_cycles) begin
                     // Keep pe_en=1 so the PE pipeline drains completely

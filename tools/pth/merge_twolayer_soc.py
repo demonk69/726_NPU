@@ -160,6 +160,7 @@ def main():
     # Place W1
     for i, w in enumerate(l1_w):
         dram[(W1_ADDR >> 2) + i] = w
+    # A1 is NOT pre-filled — firmware repack will write it at runtime
 
     write_hex(out_dir / "dram_init.hex", dram)
 
@@ -198,11 +199,77 @@ def main():
     # Layer 0
     launch(W0_ADDR, A0_ADDR, R0_ADDR, K0)
 
-    # Repack is done in Python: A1 data is already in DRAM at A1_ADDR.
-    # Firmware just needs to schedule L0, then schedule L1 with pre-packed A1.
-    # No runtime repack needed — this proves 2-layer NPU chaining.
+    # ── CPU repack: C0[M×N] int32 (R0) → A1[M×K1] int8 tile-packed (A1) ──
+    # For each output K (k=0..K1-1):
+    #   For each word-group w (0..wpk-1):
+    #     Read C0[w*4+0][k], C0[w*4+1][k], C0[w*4+2][k], C0[w*4+3][k]
+    #     Shift each right by SHIFT, mask to u8, pack into one word
+    #     Store to A1_ADDR + (k * wpk + w) * 4
+    SHIFT = 5
+    wpk = (M + 3) // 4  # words per K (=4 for M=16)
 
-    # Layer 1
+    emit(*li_insns("s1", R0_ADDR))     # s1 = R0 base
+    emit(*li_insns("s2", A1_ADDR))     # s2 = A1 base
+    emit(*li_insns("s3", N * 4))       # s3 = stride between rows (64)
+    emit(*li_insns("s4", wpk))         # s4 = words per K (4)
+    emit(*li_insns("s5", K1))          # s5 = K1 count
+    emit(*li_insns("s6", SHIFT))       # s6 = shift amount
+    emit(*li_insns("s7", 0))           # s7 = k (0..K1-1)
+    emit(*li_insns("s8", 0))           # s8 = w (0..wpk-1)
+
+    lbl("repack_k")
+    # For current k, iterate w
+    emit(*li_insns("s8", 0))           # w = 0
+    lbl("repack_w")
+
+    # ── Compute base address for row group ──
+    # a0 = w * s3 * 4 = w * 256  (row-group offset bytes)
+    emit(SLLI("a0", "s8", 2))          # a0 = w*4
+    emit(SLLI("a0", "a0", 6))          # a0 = w*4*64 = w*256
+    # a1 = k * 4 (column offset bytes)
+    emit(SLLI("a1", "s7", 2))          # a1 = k*4
+    # a2 = s1 + a0 + a1 (base = R0_ADDR + row_group_offset + col_offset)
+    emit(r_type(0x00, reg("a0"), reg("s1"), 0x0, reg("a2"), 0x33))  # ADD a2, s1, a0
+    emit(r_type(0x00, reg("a1"), reg("a2"), 0x0, reg("a2"), 0x33))  # ADD a2, a2, a1
+
+    # ── Load 4 consecutive rows at column k ──
+    emit(LW("t1", "a2", 0))            # C0[w*4+0][k]
+    emit(r_type(0x00, reg("s3"), reg("a2"), 0x0, reg("a2"), 0x33))  # a2 += s3 (next row)
+    emit(LW("t2", "a2", 0))            # C0[w*4+1][k]
+    emit(r_type(0x00, reg("s3"), reg("a2"), 0x0, reg("a2"), 0x33))  # a2 += s3
+    emit(LW("t3", "a2", 0))            # C0[w*4+2][k]
+    emit(r_type(0x00, reg("s3"), reg("a2"), 0x0, reg("a2"), 0x33))  # a2 += s3
+    emit(LW("t4", "a2", 0))            # C0[w*4+3][k]
+
+    # ── Shift right (int32 → int8 range), mask to u8 ──
+    emit(SRAI("t1", "t1", SHIFT)); emit(ANDI("t1", "t1", 0xFF))
+    emit(SRAI("t2", "t2", SHIFT)); emit(ANDI("t2", "t2", 0xFF))
+    emit(SRAI("t3", "t3", SHIFT)); emit(ANDI("t3", "t3", 0xFF))
+    emit(SRAI("t4", "t4", SHIFT)); emit(ANDI("t4", "t4", 0xFF))
+
+    # ── Pack 4 bytes into one word: t1 | t2<<8 | t3<<16 | t4<<24 ──
+    emit(SLLI("t2", "t2", 8));  emit(ORR("t1", "t1", "t2"))
+    emit(SLLI("t3", "t3", 16)); emit(ORR("t1", "t1", "t3"))
+    emit(SLLI("t4", "t4", 24)); emit(ORR("t1", "t1", "t4"))
+
+    # ── Store to A1_ADDR + (k * wpk + w) * 4 ──
+    emit(SLLI("a0", "s7", 2))          # a0 = k * 4
+    emit(r_type(0x00, reg("s8"), reg("a0"), 0x0, reg("a0"), 0x33))  # ADD a0, a0, s8  → a0 = k*4 + w
+    emit(SLLI("a0", "a0", 2))          # a0 = (k*4+w) * 4 = (k*wpk+w) * 4
+    emit(r_type(0x00, reg("a0"), reg("s2"), 0x0, reg("a0"), 0x33))  # ADD a0, s2, a0
+    emit(SW("t1", "a0", 0))
+
+    # ── w++, if w < wpk goto repack_w ──
+    emit(ADDI("s8", "s8", 1))          # w++
+    emit(r_type(0x20, reg("s8"), reg("s4"), 0x0, reg("a0"), 0x33)) # SUB a0, s4, s8
+    i = len(insns); emit(0); patch_beqz(i, "repack_w")
+
+    # ── k++, if k < K1 goto repack_k ──
+    emit(ADDI("s7", "s7", 1))          # k++
+    emit(r_type(0x20, reg("s7"), reg("s5"), 0x0, reg("a0"), 0x33)) # SUB a0, s5, s7
+    i = len(insns); emit(0); patch_beqz(i, "repack_k")
+
+    # Layer 1 — A1 is now repacked in DRAM
     launch(W1_ADDR, A1_ADDR, R1_ADDR, K1)
 
     # Verify: compare R1[0] with expected

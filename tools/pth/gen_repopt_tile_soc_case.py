@@ -57,6 +57,7 @@ CFG_SHAPE_DEFAULT = 0x00000000  # 4x4; 1=8x8, 2=16x16, 3=8x32
 
 BASE_ADDR = 0x00002000
 REQUANT_SHIFT = 24
+PPB_DEPTH = 64  # must match RTL npu_top PPB_DEPTH parameter
 
 
 def ADD(rd, rs1, rs2):
@@ -174,11 +175,24 @@ def build_case_tiles(plan, plan_dir, state_dict, args):
     results_per_tile = tile_rows * tile_cols
     words_per_k_a = (tile_rows + 3) // 4
     words_per_k_w = (tile_cols + 3) // 4
-    a_total_bytes = args.m_tiles * k_dim * words_per_k_a * 4
-    w_total_bytes = args.n_tiles * k_dim * words_per_k_w * 4
+
+    # Compute padded per-tile stream size (must match controller DMA with SIMD padding)
+    kt_elems = ((PPB_DEPTH << 2) // max(tile_rows, tile_cols))
+    SIMD = 4
+    kpos = 0
+    a_padded_words_total = 0
+    w_padded_words_total = 0
+    while kpos < k_dim:
+        k_len = min(k_dim - kpos, kt_elems)
+        a_padded_words_total += ((k_len + SIMD - 1) // SIMD) * SIMD * words_per_k_a
+        w_padded_words_total += ((k_len + SIMD - 1) // SIMD) * SIMD * words_per_k_w
+        kpos += k_len
+    a_total_bytes = args.m_tiles * a_padded_words_total * 4
+    w_total_bytes = args.n_tiles * w_padded_words_total * 4
+
     a_base = BASE_ADDR
     w_base = align(a_base + a_total_bytes, 0x100)
-    bias_base = align(w_base + args.n_tiles * k_dim * 4, 0x100)
+    bias_base = align(w_base + w_total_bytes, 0x100)
     multiplier_base = align(bias_base + len(bias_window) * 4, 0x100)
     r_base = align(multiplier_base + len(multiplier_window) * 4, 0x100)
     q_base = align(r_base + tile_count * results_per_tile * 4, 0x100)
@@ -220,12 +234,23 @@ def build_case_tiles(plan, plan_dir, state_dict, args):
                     }
                 )
 
+            # Compute K-padded per-tile stream size
+            kt_elems = ((PPB_DEPTH << 2) // max(tile_rows, tile_cols))
+            kpos = 0
+            padded_k_strides = 0
+            while kpos < k_dim:
+                k_len = min(k_dim - kpos, kt_elems)
+                padded_k_strides += ((k_len + 3) // 4) * 4
+                kpos += k_len
+            padded_w_bytes = padded_k_strides * words_per_k_w * 4
+            padded_a_bytes = padded_k_strides * words_per_k_a * 4
+
             tiles.append(
                 {
                     "m_base": m_base,
                     "n_base": n_base,
-                    "w_addr": w_base + nt * k_dim * 4,
-                    "a_addr": a_base + mt * k_dim * 4,
+                    "w_addr": w_base + nt * padded_w_bytes,
+                    "a_addr": a_base + mt * padded_a_bytes,
                     "r_addr": r_base + tile_idx * results_per_tile * 4,
                     "q_addr": q_base + tile_idx * results_per_tile * 4,
                     "k_dim": k_dim,
@@ -260,6 +285,7 @@ def build_case_tiles(plan, plan_dir, state_dict, args):
         "results_per_tile": results_per_tile,
         "words_per_k_a": words_per_k_a,
         "words_per_k_w": words_per_k_w,
+        "kt_elems": ((PPB_DEPTH << 2) // max(tile_rows, tile_cols)),
     }
     return layer, label, in_scale, in_zp, tiles, layout
 
@@ -270,17 +296,57 @@ def write_dram_init(out_dir, tiles, layout):
     words_per_k_a = (layout["tile_rows"] + 3) // 4
     words_per_k_w = (layout["tile_cols"] + 3) // 4
 
+    # SIMD padding: round up K count to SIMD_LANES (4) per k_tile,
+    # then compute total padded words per tile stream.
+    SIMD = 4
+    k_dim = layout["k_dim"]
+    kt_elems = layout.get("kt_elems", 16)
+    # Padded A stream size (words): for each k_tile, pad to SIMD boundary
+    a_padded_words = 0
+    w_padded_words = 0
+    kpos = 0
+    while kpos < k_dim:
+        k_len = min(k_dim - kpos, kt_elems)
+        a_padded_words += ((k_len + SIMD - 1) // SIMD) * SIMD * words_per_k_a
+        w_padded_words += ((k_len + SIMD - 1) // SIMD) * SIMD * words_per_k_w
+        kpos += k_len
+
     for mt, a_tile in enumerate(layout["a_tiles"]):
-        base = (layout["a_base"] >> 2) + mt * layout["k_dim"] * words_per_k_a
-        for k_index, lanes in enumerate(a_tile):
-            for w in range(words_per_k_a):
-                dram[base + k_index * words_per_k_a + w] = pack4_int8(lanes[w*4:w*4+4])
+        base = (layout["a_base"] >> 2) + mt * a_padded_words
+        k_index_offset = 0
+        kpos = 0
+        while kpos < k_dim:
+            k_len = min(k_dim - kpos, kt_elems)
+            for k_rel in range(k_len):
+                k_index = kpos + k_rel
+                lanes = a_tile[k_index]
+                for w in range(words_per_k_a):
+                    dram[base + k_index_offset + k_rel * words_per_k_a + w] = pack4_int8(lanes[w*4:w*4+4])
+            # pad to SIMD boundary
+            pad_k = ((k_len + SIMD - 1) // SIMD) * SIMD
+            pad_words = pad_k * words_per_k_a
+            for p in range(k_len * words_per_k_a, pad_words):
+                dram[base + k_index_offset + p] = 0
+            k_index_offset += pad_words
+            kpos += k_len
 
     for nt, w_tile in enumerate(layout["w_tiles"]):
-        base = (layout["w_base"] >> 2) + nt * layout["k_dim"] * words_per_k_w
-        for k_index, lanes in enumerate(w_tile):
-            for w in range(words_per_k_w):
-                dram[base + k_index * words_per_k_w + w] = pack4_int8(lanes[w*4:w*4+4])
+        base = (layout["w_base"] >> 2) + nt * w_padded_words
+        k_index_offset = 0
+        kpos = 0
+        while kpos < k_dim:
+            k_len = min(k_dim - kpos, kt_elems)
+            for k_rel in range(k_len):
+                k_index = kpos + k_rel
+                lanes = w_tile[k_index]
+                for w in range(words_per_k_w):
+                    dram[base + k_index_offset + k_rel * words_per_k_w + w] = pack4_int8(lanes[w*4:w*4+4])
+            pad_k = ((k_len + SIMD - 1) // SIMD) * SIMD
+            pad_words = pad_k * words_per_k_w
+            for p in range(k_len * words_per_k_w, pad_words):
+                dram[base + k_index_offset + p] = 0
+            k_index_offset += pad_words
+            kpos += k_len
 
     for idx, value in enumerate(layout["bias_window"]):
         dram[(layout["bias_base"] >> 2) + idx] = value & 0xFFFFFFFF
@@ -293,7 +359,7 @@ def write_dram_init(out_dir, tiles, layout):
         dram[(layout["q_base"] >> 2) + idx] = 0
     dram[layout["marker_addr"] >> 2] = 0
     write_hex(out_dir / "dram_init.hex", dram)
-
+    return dram
 
 def assemble_firmware(layout, args):
     insns = []

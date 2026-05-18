@@ -39,9 +39,9 @@ module soc_top #(
     parameter DRAM_WORDS  = 15360,      // DRAM: ~60KB
     parameter NPU_ROWS    = 4,
     parameter NPU_COLS    = 4,
-    parameter NPU_DATA_W  = 16,
+    parameter NPU_DATA_W  = 32,
     parameter NPU_ACC_W   = 32,
-    parameter NPU_PPB_DEPTH  = 32,
+    parameter NPU_PPB_DEPTH  = 64,
     parameter NPU_PPB_THRESH = 16
 )(
     input  wire        clk,

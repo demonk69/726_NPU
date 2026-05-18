@@ -94,6 +94,7 @@ module npu_top #(
 );
 
 localparam MAX_TILE_LANES = 16;
+localparam TILE_BIAS_DEPTH = 32;   // max tile columns (8x32)
 localparam MAX_TILE_RESULTS = 256;  // 16x16 or 8x32 grid
 localparam [3:0] PERF_SIMD_LANES = INT8_SIMD_LANES;
 
@@ -1000,12 +1001,12 @@ reconfig_pe_array #(
 // Tile-mode bias buffer.  Captures per-column bias words as the controller
 // fetches them sequentially via dma_bias_start / dma_bias_data.
 // ---------------------------------------------------------------------------
-reg [31:0] tile_bias_buf [0:MAX_TILE_LANES-1];
-reg [4:0]  tile_bias_idx;
+reg [31:0] tile_bias_buf [0:TILE_BIAS_DEPTH-1];
+reg [5:0]  tile_bias_idx;
 
 always @(posedge sys_clk) begin
     if (!sys_rst_n || !ctrl_tile_mode || !ctrl_bias_en) begin
-        tile_bias_idx <= 5'd0;
+        tile_bias_idx <= 6'd0;
     end else if (dma_bias_done && ctrl_bias_en) begin
         tile_bias_buf[tile_bias_idx] <= dma_bias_data;
         tile_bias_idx <= tile_bias_idx + 1'b1;

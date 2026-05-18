@@ -481,8 +481,11 @@ wire [15:0] half_vector_elem_bytes_w = scalar_elem_bytes * 16'd16;  // 16 cols f
 wire [15:0] bytes_per_k_w_8x32 = is_8x32 ? half_vector_elem_bytes_w : bytes_per_k_w;
 wire [31:0] bytes_per_k_w_32 = {16'd0, bytes_per_k_w_8x32};
 wire [31:0] bytes_per_k_a_32 = {16'd0, bytes_per_k_a};
-// 8x32 pass-1 W address offset: skip the pass-0 data for all K values
-wire [31:0] w_addr_pass1_offset = is_8x32 ? (lk_k_dim * {16'd0, half_vector_elem_bytes_w}) : 32'd0;
+// 8x32 pass-1 W address offset: skip the pass-0 data for all K values.
+// K is rounded up to multiple of SIMD_LANES (4) because the packed W stream
+// includes zero padding when K is not SIMD-aligned.
+wire [31:0] pass0_k_padded = (lk_k_dim + 32'd3) & ~32'd3;
+wire [31:0] w_addr_pass1_offset = is_8x32 ? (pass0_k_padded * {16'd0, half_vector_elem_bytes_w}) : 32'd0;
 
 // ---------------------------------------------------------------------------
 // Tile-loop counters:
@@ -493,7 +496,7 @@ reg [31:0] tile_i;
 reg [31:0] tile_j;
 reg [31:0] k_tile_idx;
 reg [4:0]  wb_row;  // tile-mode writeback row r within the current C tile
-reg [4:0]  bias_col; // tile-mode bias fetch column counter
+reg [5:0]  bias_col; // tile-mode bias fetch column counter
 reg         bias_pending; // set when bias_start issued, cleared when done received
 reg         pass_idx; // 0 or 1 for 8x32 two-pass weight scheduling
 wire        is_8x32 = tile_mode && (lk_shape == 2'b11);
@@ -609,20 +612,6 @@ assign vec_consume = tile_mode &&
 reg dma_w_done_r, dma_a_done_r, dma_bias_done_r, dma_r_done_r;
 wire dma_load_done = dma_w_done_r && dma_a_done_r;
 
-always @(posedge clk) begin
-    if (!rst_n) begin
-        dma_w_done_r <= 1'b0;
-        dma_a_done_r <= 1'b0;
-        dma_bias_done_r <= 1'b0;
-        dma_r_done_r <= 1'b0;
-    end else begin
-        if (dma_w_done) dma_w_done_r <= 1'b1;
-        if (dma_a_done) dma_a_done_r <= 1'b1;
-        if (dma_bias_done) dma_bias_done_r <= 1'b1;
-        if (dma_r_done) dma_r_done_r <= 1'b1;
-    end
-end
-
 // ---------------------------------------------------------------------------
 // WS consume counter
 // ---------------------------------------------------------------------------
@@ -679,8 +668,19 @@ wire [31:0] seq1_k_rem = (lk_k_dim > seq1_k_base) ? (lk_k_dim - seq1_k_base) : 3
 wire [31:0] seq1_k_len_32 = tile_mode ?
                             ((seq1_k_rem > k_tile_elems) ? k_tile_elems : seq1_k_rem) :
                             lk_k_dim;
-wire [15:0] seq1_len_bytes_raw_w = seq1_k_len_32[15:0] * bytes_per_k_w_8x32;
-wire [15:0] seq1_len_bytes_raw_a = seq1_k_len_32[15:0] * bytes_per_k_a;
+wire [3:0] seq1_packed_k_rem = tile_mode ? (seq1_k_len_32 % {28'd0, INT8_SIMD_LANES}) : 4'd0;
+wire [15:0] seq1_packed_pad = tile_mode && (INT8_SIMD_LANES > 1) && (seq1_packed_k_rem != 4'd0)
+    ? (vector_elem_bytes_w * ({4'd0, INT8_SIMD_LANES} - {1'b0, seq1_packed_k_rem}))
+    : 16'd0;
+wire [15:0] seq1_packed_pad_a = tile_mode && (INT8_SIMD_LANES > 1) && (seq1_packed_k_rem != 4'd0)
+    ? (vector_elem_bytes_a * ({4'd0, INT8_SIMD_LANES} - {1'b0, seq1_packed_k_rem}))
+    : 16'd0;
+wire [15:0] seq1_len_bytes_raw_w = tile_mode
+    ? (seq1_k_len_32[15:0] * bytes_per_k_w_8x32 + seq1_packed_pad)
+    : (seq1_k_len_32[15:0] * bytes_per_k_w_8x32);
+wire [15:0] seq1_len_bytes_raw_a = tile_mode
+    ? (seq1_k_len_32[15:0] * bytes_per_k_a + seq1_packed_pad_a)
+    : (seq1_k_len_32[15:0] * bytes_per_k_a);
 wire [15:0] seq1_len_bytes_w = tile_mode ? seq1_len_bytes_raw_w
                                        : ((seq1_len_bytes_raw_w + 16'd3) & 16'hfffc);
 wire [15:0] seq1_len_bytes_a = tile_mode ? seq1_len_bytes_raw_a
@@ -792,6 +792,12 @@ always @(posedge clk) begin
         pe_acc_init_en <= 1'b0;
         err_set_mask <= 32'd0;
 
+        // ── Latch DMA done pulses into registered flags ──
+        if (dma_w_done)   dma_w_done_r   <= 1'b1;
+        if (dma_a_done)   dma_a_done_r   <= 1'b1;
+        if (dma_bias_done) dma_bias_done_r <= 1'b1;
+        if (dma_r_done)   dma_r_done_r   <= 1'b1;
+
         // ── IRQ Clear: CPU writes ctrl_reg[6] = 1 to acknowledge IRQ ──
         if (cfg_irq_clr) irq <= 1'b0;
 
@@ -859,7 +865,7 @@ always @(posedge clk) begin
         pass_idx   <= 1'b0;
         wb_row         <= 3'd0;
         pass_idx   <= 1'b0;
-        bias_col       <= 5'd0;
+        bias_col       <= 6'd0;
         bias_pending   <= 1'b0;
 
                     // Clear all buffers for fresh layer start
@@ -1061,9 +1067,6 @@ always @(posedge clk) begin
                     dma_w_start <= 1'b1;
                     dma_a_start <= 1'b1;
                     dma_bias_start <= lk_bias_en && !tile_mode;
-                    dma_w_done_r <= 1'b0;
-                    dma_a_done_r <= 1'b0;
-                    dma_bias_done_r <= 1'b0;
                 end
 
                 // Tile-mode bias: sequential per-column fetch
@@ -1082,7 +1085,7 @@ always @(posedge clk) begin
                         bias_pending   <= 1'b0;
                     end
                 end else begin
-                    bias_col    <= 5'd0;
+                    bias_col    <= 6'd0;
                     bias_pending <= 1'b0;
                 end
 

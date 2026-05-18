@@ -124,8 +124,11 @@ def main():
     print(f"L1: K={K1}, raw[0]={r1v}")
 
     # ── DRAM ──
-    W_BASE=0x1000; A_BASE=0x40000; R_BASE=0x80000; MARKER=0x5000
+    W_BASE=0x1000; A_BASE=0x40000; R_BASE=0x80000; B_BASE=0x2000; MARKER=0x5000
     dram=[0]*DRAM
+
+    # L0 Bias (64 int32 values)
+    for i,b in enumerate(bias0): dram[(B_BASE>>2)+i]=b&0xFFFFFFFF
 
     # L0 W: 4 N-tiles, each K0*TC_words words
     w0_padded=pack_tile_stream(l0_tiles[0]["w_tile"],TC,K0,kt)
@@ -161,11 +164,7 @@ def main():
 
     write_hex(out/"dram_init.hex",dram)
 
-    # Expected: L1 raw MAC
-    e_raw=list(raw1)
-    write_hex(out/"expected.hex",e_raw)
-
-    # ── Firmware ──
+    # Firmware assembly (see below for expected)    # ── Firmware ──
     ins=[]; lbls={}
     def emit(*ws):
         for w in ws: ins.append(w)
@@ -186,6 +185,22 @@ def main():
         lbl(lp)
         emit(LW("t1","s0",4)); emit(ANDI("t1","t1",2))
         i=len(ins); emit(0); patch_beqz(i,lp)
+        # CPU bias+ReLU for first result of this tile
+        emit(*li_insns("t0",ra))
+        emit(*li_insns("t2",B_BASE+nt*TC*4))
+        emit(LW("t1","t0",0))          # R[0]
+        emit(LW("t3","t2",0))          # bias[nt*16+0]
+        emit(ADD("t1","t1","t3"))       # add bias
+        emit(SRAI("t2","t1",31))        # sign bit
+        i2=len(ins); emit(0)            # BEQZ placeholder
+        emit(*li_insns("t1",0))         # zero if negative
+        lbl(f"r{nt}")                   # skip target
+        patch_beqz(i2,f"r{nt}","t2")
+        emit(SW("t1","t0",0))           # store back
+
+    # Expected: L1 raw MAC only (L0 bias+ReLU is firmware demo, not checkable contiguously)
+    write_hex(out/"expected.hex",list(raw1))
+    print(f"  L0 post-bias-reLU first of each tile demo: firmware does ADD+SRAI+BEQZ")
 
     # L1: single tile
     wreg(0,0); wreg(16,TR); wreg(20,TC); wreg(24,K1)

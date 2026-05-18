@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""RepOpt VGG Layer-0 SoC test: real weight Conv2D tile-mode + CPU bias/ReLU.
+"""RepOpt VGG N-layer SoC test generator (real weights, CPU post-process).
 
-Single 16×16 tile at IFM top-left, output channels 0..15.
-Proves: .pth → NPU tile GEMM → CPU postprocess ≡ PyTorch golden.
+Usage:
+  python gen_vgg_full_soc.py --out-dir sim/vgg_2layer --layers 2
+
+Each layer: NPU tile-mode GEMM (single 16×16 tile) → CPU bias/ReLU/requant.
+Layers use the same CIFAR IFM for input (full chain repack TBD).
 """
 import argparse, json, os, sys, warnings, torch
 from pathlib import Path
@@ -12,142 +15,175 @@ PROJECT_ROOT = THIS_DIR.parents[1]
 TB_DIR = PROJECT_ROOT / "tb"
 sys.path.insert(0, str(TB_DIR)); sys.path.insert(0, str(THIS_DIR))
 from assemble_soc_test import *
+from gen_repopt_tile_case import *
 
-# ── RV32I ──
-def SRAI(rd, rs1, sh):
-    return i_type((0x20<<5)|(sh&0x1F), reg(rs1), 0x5, reg(rd), 0x13)
-def SLLI(rd, rs1, sh):
-    return i_type(sh&0x1F, reg(rs1), 0x1, reg(rd), 0x13)
-def ORR(rd, rs1, rs2):
-    return r_type(0x00, reg(rs2), reg(rs1), 0x6, reg(rd), 0x33)
-def SUB(rd, rs1, rs2):
-    return r_type(0x20, reg(rs2), reg(rs1), 0x0, reg(rd), 0x33)
+SIMD=4; TR=16; TC=16; PPB=64; DRAM=256*1024
+NPU=0x02000000; PASS=0xAA
+REG_CTRL=0x00; REG_STATUS=0x04; REG_M_DIM=0x10; REG_N_DIM=0x14; REG_K_DIM=0x18
+REG_W_ADDR=0x20; REG_A_ADDR=0x24; REG_R_ADDR=0x28
+REG_ARR_CFG=0x30; REG_CFG_SHAPE=0x3C
+
+def SRAI(rd,rs1,sh): return i_type((0x20<<5)|(sh&0x1F),reg(rs1),0x5,reg(rd),0x13)
+def SLLI(rd,rs1,sh): return i_type(sh&0x1F,reg(rs1),0x1,reg(rd),0x13)
+def ORR(rd,rs1,rs2): return r_type(0x00,reg(rs2),reg(rs1),0x6,reg(rd),0x33)
+def ADD(rd,rs1,rs2): return r_type(0x00,reg(rs2),reg(rs1),0x0,reg(rd),0x33)
 def pack4(vals):
-    w = 0
-    for i, x in enumerate(vals):
-        w |= (int(x) & 0xFF) << (8 * i)
-    return w & 0xFFFFFFFF
-def write_hex(path, words):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    w=0
+    for i,v in enumerate(vals): w|=(int(v)&0xFF)<<(8*i)
+    return w&0xFFFFFFFF
+def write_hex(path,words):
+    Path(path).parent.mkdir(parents=True,exist_ok=True)
     with open(path,"w") as f:
         for w in words: f.write(f"{int(w)&0xFFFFFFFF:08x}\n")
 
-from gen_repopt_tile_case import *
-SIMD=4; TR=16; TC=16; PPB=64
-NPU=0x02000000; PASS=0xAA
-
-def pack_stream(mat, dim1, dim2, kt_elems):
-    """Pack mat[dim2][dim1] into padded K-first tile stream with SIMD padding."""
-    wpk=(dim1+SIMD-1)//SIMD; out=[]
-    kpos=0
-    while kpos<dim2:
-        k_len=min(dim2-kpos, kt_elems)
-        for k_rel in range(k_len):
-            k=kpos+k_rel
+def pack_stream(mat,dim1,dim2,kt_elems):
+    wpk=(dim1+SIMD-1)//SIMD; out=[]; kp=0
+    while kp<dim2:
+        kl=min(dim2-kp,kt_elems)
+        for kr in range(kl):
+            k=kp+kr
             for w in range(wpk):
                 vals=[mat[k][w*SIMD+r] if w*SIMD+r<dim1 else 0 for r in range(SIMD)]
                 out.append(pack4(vals))
-        # SIMD padding
-        pad_k=((k_len+SIMD-1)//SIMD)*SIMD
-        for p in range(k_len*wpk, pad_k*wpk):
-            out.append(0)
-        kpos+=k_len
+        pk=((kl+SIMD-1)//SIMD)*SIMD
+        for p in range(kl*wpk,pk*wpk): out.append(0)
+        kp+=kl
     return out
 
-def pad_size(k_dim, dim, kt):
-    wpk=(dim+SIMD-1)//SIMD; t=0; kp=0
-    while kp<k_dim:
-        kl=min(k_dim-kp,kt); t+=((kl+SIMD-1)//SIMD)*SIMD*wpk; kp+=kl
-    return t
+def build_layer(spec_layers,plan_layers,sd,x_q,li):
+    cl=plan_layers[li]
+    # Merge spec layer info (padding/stride/dilation) into plan dict
+    spec=spec_layers[li]
+    for k in ("stride","padding","dilation"):
+        if k in spec: cl[k]=spec[k]
+    r=cl.get("registers",{})
+    M=TR; N=TC; K=int(r["K_DIM"])
+    qw=sd[cl["weight_key"]]
+    a_tile,w_tile=build_tile_matrices(x_q,qw,cl,0,0,TR,TC)
+    raw=expected_tile(a_tile,w_tile,TR,TC)
+    # Bias
+    bk=cl.get("bias_key",""); bias=[0]*TC
+    if bk and bk in sd:
+        for i in range(min(TC,sd[bk].shape[0])): bias[i]=int(sd[bk][i].item())
+    # Post: bias+ReLU  
+    post=[]
+    for i,val in enumerate(raw):
+        acc=(int(val)if int(val)<0x80000000 else int(val)-0x100000000)+bias[i%TC]
+        post.append(max(0,acc)&0xFFFFFFFF)
+    kt=(PPB*4)//max(TR,TC)
+    return dict(name=cl["name"],M=TR,N=TC,K=K,kt_elems=kt,
+                a_tile=a_tile,w_tile=w_tile,raw_mac=raw,
+                post_bias_relu=post,bias=bias)
 
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--pth",default="RepOpt/06_RepOpt_VGG/runs/cifar10_repopt_vgglike_qat/qat_int8_quantized.pth")
     ap.add_argument("--plan",default="sim/pth_repopt_probe/model_plan.json")
     ap.add_argument("--data-root",default="RepOpt/06_RepOpt_VGG/data")
-    ap.add_argument("--out-dir",default="sim/vgg_full_soc")
-    ap.add_argument("--img-idx",type=int,default=0)
+    ap.add_argument("--out-dir",default="sim/vgg_2layer")
+    ap.add_argument("--layers",type=int,default=2)
+    ap.add_argument("--spec", default="tools/pth/examples/repopt_vgg_int8_spec.json")
     args=ap.parse_args()
 
     out=Path(args.out_dir); out.mkdir(parents=True,exist_ok=True)
     plan=load_json(args.plan)
+    spec=load_json(args.spec)
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore",message="TypedStorage is deprecated.*")
         ckpt=torch.load(args.pth,map_location="cpu",weights_only=False)
     sd=unwrap_state_dict(ckpt)
-    x_f,label=load_cifar_sample(args.data_root,args.img_idx)
+    x_f,label=load_cifar_sample(args.data_root,0)
     in_sc=float(tensor_scalar(sd[plan["input"]["scale_key"]]))
     in_zp=int(tensor_scalar(sd[plan["input"]["zero_point_key"]]))
     x_q=quantize_qint8(x_f,in_sc,in_zp)
 
-    cl=[l for l in plan["layers"] if l.get("op")=="conv2d"][0]
-    r=cl.get("registers",{})
-    M=TR; N=TC; K=int(r["K_DIM"])
-    qw=sd[cl["weight_key"]]
-    a_tile,w_tile=build_tile_matrices(x_q,qw,cl,0,0,TR,TC)
-    raw=expected_tile(a_tile,w_tile,TR,TC)
+    conv_plan=[l for l in plan["layers"] if l.get("op")=="conv2d"]
+    conv_spec=[l for l in spec["layers"] if l.get("op")=="conv2d"]
+    num_layers=min(args.layers, len(conv_plan))
 
-    # Bias
-    bias=[0]*TC
-    bk=cl.get("bias_key","")
-    if bk and bk in sd:
-        for i in range(min(TC,sd[bk].shape[0])):
-            bias[i]=int(sd[bk][i].item())
+    # Build layers (each uses the same CIFAR IFM, padded to correct Cin)
+    layers=[]
+    for i in range(num_layers):
+        cl=conv_plan[i]
+        ws=cl.get("weight_shape",[0,0,0,0])
+        cin=ws[1] if len(ws)>1 else 3
+        if cin==x_q.shape[1]:
+            ifm=x_q
+        else:
+            ifm=torch.zeros(1,cin,*x_q.shape[2:],dtype=x_q.dtype)
+            ifm[0,:x_q.shape[1]]=x_q[0]
+        layers.append(build_layer(conv_spec,conv_plan,sd,ifm,i))
 
-    # Post: bias + ReLU
-    post=[((int(raw[i])if int(raw[i])<0x80000000 else int(raw[i])-0x100000000)+bias[i%TC]) & 0xFFFFFFFF for i in range(len(raw))]
-    relu=[max(0,x if x<0x80000000 else x-0x100000000) for x in post]
+    print(f"Label={label}, layers={num_layers}")
+    for i,l in enumerate(layers):
+        r0=l["raw_mac"][0] if l["raw_mac"][0]<0x80000000 else l["raw_mac"][0]-0x100000000
+        print(f"  L{i} {l['name']}: raw[0]={r0} bias[0]={l['bias'][0]} post[0]={l['post_bias_relu'][0] if l['post_bias_relu'][0]<0x80000000 else l['post_bias_relu'][0]-0x100000000}")
 
-    kt=(PPB*4)//max(TR,TC)  # =16
-    print(f"Label={label} K={K} kt={kt}")
-    print(f"raw[0]={raw[0] if raw[0]<0x80000000 else raw[0]-0x100000000}")
-    print(f"post[0]={post[0] if post[0]<0x80000000 else post[0]-0x100000000}")
-    print(f"relu[0]={relu[0]}")
-
-    # DRAM
-    DRAM=128*1024
-    W_ADDR=0x1000; A_ADDR=0x10000; R_ADDR=0x12000; B_ADDR=0x2000; MARKER=0x5000
+    # ── DRAM layout (dynamic, based on actual tile sizes) ──
+    W_BASE=0x1000; A_BASE=0x40000; R_BASE=0x80000; B_BASE=0x2000; MARKER=0x5000
     dram=[0]*DRAM
-    wp=pack_stream(w_tile, TC, K, kt)
-    ap=pack_stream(a_tile, TR, K, kt)
-    for i,w in enumerate(wp): dram[(W_ADDR>>2)+i]=w
-    for i,w in enumerate(ap): dram[(A_ADDR>>2)+i]=w
-    for i,b in enumerate(bias): dram[(B_ADDR>>2)+i]=b&0xFFFFFFFF
-    write_hex(out/"dram_init.hex",dram)
-    write_hex(out/"expected.hex",raw)  # raw MAC (no bias/ReLU — firmware handles it)
 
-    # Firmware
+    # Compute per-layer byte sizes
+    layouts=[]
+    w_cursor=W_BASE; a_cursor=A_BASE; r_cursor=R_BASE; b_cursor=B_BASE
+    for li,l in enumerate(layers):
+        wp=pack_stream(l["w_tile"],TC,l["K"],l["kt_elems"])
+        ap=pack_stream(l["a_tile"],TR,l["K"],l["kt_elems"])
+        w_bytes=len(wp)*4; a_bytes=len(ap)*4; r_bytes=TR*TC*4; b_bytes=TC*4
+        wa=w_cursor; w_cursor+=w_bytes+0x100
+        aa=a_cursor; a_cursor+=a_bytes+0x100
+        ra=r_cursor; r_cursor+=r_bytes+0x100
+        ba=b_cursor; b_cursor+=b_bytes+0x100
+        for i,w in enumerate(wp): dram[(wa>>2)+i]=w
+        for i,w in enumerate(ap): dram[(aa>>2)+i]=w
+        for i,bv in enumerate(l["bias"]): dram[(ba>>2)+i]=bv&0xFFFFFFFF
+        layouts.append((wa,aa,ra,ba,w_bytes,a_bytes))
+        print(f"  L{li}: W={wa:#x}({len(wp)}w) A={aa:#x}({len(ap)}w) R={ra:#x} B={ba:#x}")
+
+    # Build expected
+    e_raw=[]
+    for li,l in enumerate(layers):
+        e_raw+=list(l["raw_mac"])
+
+    write_hex(out/"dram_init.hex",dram)
+    # Expected: raw MAC (firmware only processes R[0] as bias+ReLU demo)
+    write_hex(out/"expected.hex",e_raw)
+
+    # ── Firmware ──
     ins=[]; lbls={}
     def emit(*ws):
         for w in ws: ins.append(w)
     def lbl(n): lbls[n]=len(ins)
-    def patch_beqz(idx,tgt,rs="t1"):
-        ins[idx]=BEQZ(rs,(lbls[tgt]-idx)*4)
+    def patch_beqz(idx,tgt,rs="t1"): ins[idx]=BEQZ(rs,(lbls[tgt]-idx)*4)
     def wreg(off,val):
         emit(*li_insns("t1",int(val))); emit(SW("t1","s0",off))
 
     emit(*li_insns("s0",NPU))
-    wreg(0,0); wreg(16,TR); wreg(20,TC); wreg(24,K)
-    wreg(32,W_ADDR); wreg(36,A_ADDR); wreg(40,R_ADDR)
-    wreg(48,0x80); wreg(60,2); wreg(0,0x11)
-    lbl("poll")
-    emit(LW("t1","s0",4)); emit(ANDI("t1","t1",2))
-    i=len(ins); emit(0); patch_beqz(i,"poll")
 
-    # CPU bias + ReLU for first 4 results
-    emit(*li_insns("t0",R_ADDR))
-    emit(*li_insns("s1",B_ADDR))
-    # Read 4 R0 words, add bias, clamp negative→0, store back
-    emit(LW("t1","t0",0)); emit(LW("t2","s1",0))
-    emit(r_type(0x00,reg("t2"),reg("t1"),0x0,reg("t1"),0x33))  # ADD
-    emit(SRAI("t2","t1",31))  # sign bit
-    i=len(ins); emit(0)       # BEQZ placeholder
-    emit(*li_insns("t1",0))   # if negative: zero t1
-    lbl("relu_ok")            # BEQZ target: skip zeroing
-    patch_beqz(i,"relu_ok","t2")  # if t2==0 (positive), skip t1=0
-    emit(SW("t1","t0",0))     # store
+    for li,l in enumerate(layers):
+        wa,aa,ra,ba,_,_ = layouts[li]
+        # Launch NPU
+        wreg(0,0); wreg(16,TR); wreg(20,TC); wreg(24,l["K"])
+        wreg(32,wa); wreg(36,aa); wreg(40,ra)
+        wreg(48,0x80); wreg(60,2); wreg(0,0x11)
+        lp=f"p{li}"
+        lbl(lp)
+        emit(LW("t1","s0",4)); emit(ANDI("t1","t1",2))
+        i=len(ins); emit(0); patch_beqz(i,lp)
 
-    # PASS
+        # CPU bias + ReLU for first 4 results
+        emit(*li_insns("s2",ra))
+        emit(*li_insns("s3",ba))
+        emit(LW("t1","s2",0)); emit(LW("t2","s3",0))
+        emit(ADD("t1","t1","t2"))        # bias add
+        emit(SRAI("t2","t1",31))         # sign bit
+        i=len(ins); emit(0)              # BEQZ placeholder
+        emit(*li_insns("t1",0))          # zero if negative
+        lbl(f"relu{li}")
+        patch_beqz(i,f"relu{li}","t2")   # skip zeroing if positive
+        emit(SW("t1","s2",0))            # store back
+
+    # PASS marker
     emit(*li_insns("t0",MARKER)); emit(*li_insns("t1",PASS)); emit(SW("t1","t0",0))
     lbl("halt"); emit(0x0000006f)
 
@@ -161,10 +197,13 @@ def main():
         f.write(f'`define VGG_EXPECTED_HEX "{op}/expected.hex"\n')
         f.write(f'`define VGG_FW_WORDS {fw}\n')
         f.write(f'`define VGG_MARKER_ADDR 32\'h{MARKER:08x}\n')
-        f.write(f'`define VGG_R_ADDR 32\'h{R_ADDR:08x}\n')
-        f.write(f'`define VGG_RESULT_COUNT {TR*TC}\n')
+        f.write(f'`define VGG_R_ADDR 32\'h{R_BASE:08x}\n')
+        f.write(f'`define VGG_RESULT_COUNT {TR*TC*num_layers}\n')
         f.write(f'`define VGG_TIMEOUT_CYCLES 5000000\n')
         f.write(f'`define VGG_DRAM_WORDS {DRAM}\n')
-    print(f"Generated {out}: {fw} words firmware, {DRAM} DRAM words")
 
-if __name__=="__main__": main()
+    print(f"\nGenerated: {out}")
+    print(f"  firmware: {fw} words")
+
+if __name__=="__main__":
+    main()

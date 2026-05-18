@@ -417,8 +417,8 @@ def assemble_firmware(plan, expected):
 
 def write_params(out_dir, fw_words, expected):
     lines = [
-        f"`define PTH_MULTI_FW_HEX \"../sim/{out_dir.name}/soc_pth_multilayer.hex\"",
-        f"`define PTH_MULTI_DRAM_HEX \"../sim/{out_dir.name}/dram_init.hex\"",
+        f"`define PTH_MULTI_FW_HEX \"sim/{out_dir.name}/soc_pth_multilayer.hex\"",
+        f"`define PTH_MULTI_DRAM_HEX \"sim/{out_dir.name}/dram_init.hex\"",
         f"`define PTH_MULTI_FW_WORDS {fw_words}",
         f"`define PTH_MULTI_RESULT_BASE 32'h{R2_ADDR:08x}",
         f"`define PTH_MULTI_MARKER_ADDR 32'h{MARKER_ADDR:08x}",

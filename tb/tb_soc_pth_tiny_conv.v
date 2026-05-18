@@ -30,9 +30,9 @@ soc_top #(
     .DRAM_WORDS     (DRAM_WORDS),
     .NPU_ROWS       (4),
     .NPU_COLS       (4),
-    .NPU_DATA_W     (16),
+    .NPU_DATA_W     (32),
     .NPU_ACC_W      (32),
-    .NPU_PPB_DEPTH  (32),
+    .NPU_PPB_DEPTH  (64),
     .NPU_PPB_THRESH (16)
 ) u_soc (
     .clk   (clk),

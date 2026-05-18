@@ -16,14 +16,10 @@ module tb_soc_twolayer_tile;
     integer cycle_count, i;
 
     soc_top #(
-        .MEM_WORDS     (MEM_WORDS),
-        .DRAM_WORDS    (DRAM_WORDS),
-        .NPU_ROWS      (4),
-        .NPU_COLS      (4),
-        .NPU_DATA_W    (32),
-        .NPU_ACC_W     (32),
-        .NPU_PPB_DEPTH (64),
-        .NPU_PPB_THRESH(16)
+        .MEM_WORDS     (MEM_WORDS),    .DRAM_WORDS    (DRAM_WORDS),
+        .NPU_ROWS      (4),            .NPU_COLS      (4),
+        .NPU_DATA_W    (32),           .NPU_ACC_W     (32),
+        .NPU_PPB_DEPTH (64),           .NPU_PPB_THRESH(16)
     ) u_soc (.clk(clk), .rst_n(rst_n));
 
     initial clk = 0;
@@ -38,7 +34,7 @@ module tb_soc_twolayer_tile;
         $readmemh(`TWOLAYER_FW_HEX, u_soc.u_sram.mem, 0, FW_LAST_WORD);
     end
 
-    initial begin : init_dram
+    initial begin
         integer j;
         for (j = 0; j < DRAM_WORDS; j = j + 1)
             u_soc.u_dram.mem[j] = 32'h0;
@@ -58,6 +54,18 @@ module tb_soc_twolayer_tile;
         end
     end
 
+    function results_match;
+        integer k;
+        reg ok;
+        begin
+            ok = 1'b1;
+            for (k = 0; k < `TWOLAYER_RESULT_COUNT; k = k + 1)
+                if (u_soc.u_dram.mem[(`TWOLAYER_R1_ADDR >> 2) + k] !== expected[k])
+                    ok = 1'b0;
+            results_match = ok;
+        end
+    endfunction
+
     initial begin
         wait (rst_n);
         fork
@@ -65,24 +73,31 @@ module tb_soc_twolayer_tile;
                 #100;
                 forever begin
                     if (pass_seen) begin
-                        $display(""); $display("========================================");
-                        $display("  [PASS] 2-layer tile SoC closed-loop test PASSED!");
-                        $display("  Cycles: %0d", cycle_count);
-                        for (i = 0; i < `TWOLAYER_RESULT_COUNT; i = i + 1) begin
-                            if (u_soc.u_dram.mem[(`TWOLAYER_R1_ADDR >> 2) + i] !== expected[i]) begin
-                                $display("  [WARN] R1[%0d]=%0d exp=%0d", i,
-                                    $signed(u_soc.u_dram.mem[(`TWOLAYER_R1_ADDR >> 2) + i]),
-                                    $signed(expected[i]));
-                            end
+                        if (results_match())
+                            $display("[PASS] 2-layer tile SoC closed-loop test PASSED");
+                        else begin
+                            $display("[FAIL] PASS marker seen but result mismatched");
+                            $display("  R0 at 0x2300: %08x %08x %08x %08x",
+                                     u_soc.u_dram.mem[2240], u_soc.u_dram.mem[2241],
+                                     u_soc.u_dram.mem[2242], u_soc.u_dram.mem[2243]);
+                            $display("  A1 at 0x2500: %08x %08x %08x %08x",
+                                     u_soc.u_dram.mem[2368], u_soc.u_dram.mem[2369],
+                                     u_soc.u_dram.mem[2370], u_soc.u_dram.mem[2371]);
+                            $display("  R1 at 0x2800: %08x %08x %08x %08x",
+                                     u_soc.u_dram.mem[2560], u_soc.u_dram.mem[2561],
+                                     u_soc.u_dram.mem[2562], u_soc.u_dram.mem[2563]);
+                            for (i = 0; i < `TWOLAYER_RESULT_COUNT; i = i + 1)
+                                if (u_soc.u_dram.mem[(`TWOLAYER_R1_ADDR >> 2) + i] !== expected[i])
+                                    $display("  R1[%0d]=%0d exp=%0d", i,
+                                        $signed(u_soc.u_dram.mem[(`TWOLAYER_R1_ADDR >> 2) + i]),
+                                        $signed(expected[i]));
                         end
-                        $display("========================================");
+                        $display("  Cycles: %0d", cycle_count);
                         $finish;
                     end
                     if (fail_seen) begin
-                        $display(""); $display("========================================");
-                        $display("  [FAIL] 2-layer tile SoC firmware reported failure");
+                        $display("[FAIL] 2-layer tile SoC firmware reported failure");
                         $display("  Cycles: %0d", cycle_count);
-                        $display("========================================");
                         $finish;
                     end
                     #(CLK_PERIOD);
@@ -90,10 +105,7 @@ module tb_soc_twolayer_tile;
             end
             begin : wait_timeout
                 #(TIMEOUT_CYCLES * CLK_PERIOD);
-                $display(""); $display("========================================");
-                $display("  [TIMEOUT] 2-layer test exceeded %0d cycles", TIMEOUT_CYCLES);
-                $display("  pass_seen=%0b fail_seen=%0b", pass_seen, fail_seen);
-                $display("========================================");
+                $display("[TIMEOUT] 2-layer test exceeded %0d cycles", TIMEOUT_CYCLES);
                 $finish;
             end
         join

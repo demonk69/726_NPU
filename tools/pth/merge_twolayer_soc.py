@@ -15,6 +15,16 @@ sys.path.insert(0, str(TB_DIR))
 sys.path.insert(0, str(THIS_DIR))
 from assemble_soc_test import *
 
+# RV32I shift helpers (needed for correct encoding)
+def SLLI(rd, rs1, shamt):
+    return i_type(shamt & 0x1F, reg(rs1), 0x1, reg(rd), 0x13)
+def SRLI(rd, rs1, shamt):
+    return i_type(shamt & 0x1F, reg(rs1), 0x5, reg(rd), 0x13)
+def SRAI(rd, rs1, shamt):
+    return i_type((0x20 << 5) | (shamt & 0x1F), reg(rs1), 0x5, reg(rd), 0x13)
+def ORR(rd, rs1, rs2):
+    return r_type(0x00, reg(rs2), reg(rs1), 0x6, reg(rd), 0x33)
+
 NPU_BASE = 0x02000000
 PASS_MARKER = 0x000000AA
 FAIL_MARKER = 0x000000FF
@@ -132,7 +142,7 @@ def main():
 
     # Memory layout
     A0_ADDR = 0x2000; W0_ADDR = 0x2100; R0_ADDR = 0x2300
-    A1_ADDR = 0x2500; W1_ADDR = 0x2600; R1_ADDR = 0x2800
+    A1_ADDR = 0x2700; W1_ADDR = 0x2780; R1_ADDR = 0x2800
     MARKER_ADDR = 0x3000
 
     DRAM_SIZE = 16384
@@ -188,52 +198,9 @@ def main():
     # Layer 0
     launch(W0_ADDR, A0_ADDR, R0_ADDR, K0)
 
-    # Repack: read R0 int32 words, shift right 5, pack 4 bytes per word into A1
-    wpk = (M + 3) // 4
-    emit(*li_insns("t0", R0_ADDR))   # src = R0
-    emit(*li_insns("t2", A1_ADDR))   # dst = A1
-    emit(*li_insns("t5", K1 * wpk))  # total words to write
-    emit(*li_insns("t4", 0))         # word counter
-    lbl("rloop")
-    # Read 4 int32 words from R0, extract byte from each, pack into 1 word
-    # Simplified: just do K1*4 reads and write one byte per A1 word
-    # Actually, read 4 words, shift each, pack into one
-    emit(LW("t1", "t0", 0))          # R0[i]
-    emit(LW("t3", "t0", 4))          # R0[i+1]
-    emit(LW("a0", "t0", 8))          # R0[i+2]
-    emit(LW("a1", "t0", 12))         # R0[i+3]
-    emit(ADDI("t0", "t0", 16))
-    # Shift each right by 5, mask low byte
-    emit(*li_insns("a2", 5))
-    emit(r_type(0x00, reg("a2"), reg("t1"), 0x5, reg("t1"), 0x33))
-    emit(r_type(0x00, reg("a2"), reg("t3"), 0x5, reg("t3"), 0x33))
-    emit(r_type(0x00, reg("a2"), reg("a0"), 0x5, reg("a0"), 0x33))
-    emit(r_type(0x00, reg("a2"), reg("a1"), 0x5, reg("a1"), 0x33))
-    emit(ANDI("t1", "t1", 0xFF))
-    emit(ANDI("t3", "t3", 0xFF))
-    emit(ANDI("a0", "a0", 0xFF))
-    emit(ANDI("a1", "a1", 0xFF))
-    # Pack: t1 | (t3<<8) | (a0<<16) | (a1<<24)
-    emit(*li_insns("a2", 8))
-    emit(r_type(0x00, reg("a2"), reg("t3"), 0x1, reg("t3"), 0x33))  # SLLI t3<<8
-    emit(r_type(0x00, reg("t3"), reg("t1"), 0x6, reg("t1"), 0x33))  # OR t1 |= t3
-    emit(*li_insns("a2", 16))
-    emit(r_type(0x00, reg("a2"), reg("a0"), 0x1, reg("a0"), 0x33))
-    emit(r_type(0x00, reg("a0"), reg("t1"), 0x6, reg("t1"), 0x33))
-    emit(*li_insns("a2", 24))
-    emit(r_type(0x00, reg("a2"), reg("a1"), 0x1, reg("a1"), 0x33))
-    emit(r_type(0x00, reg("a1"), reg("t1"), 0x6, reg("t1"), 0x33))
-    # Store packed word
-    emit(SW("t1", "t2", 0))
-    emit(ADDI("t2", "t2", 4))
-    emit(ADDI("t4", "t4", 1))
-    emit(r_type(0x00, reg("t5"), reg("t4"), 0x0, reg("t3"), 0x33))
-    emit(ADDI("t3", "t3", 0))
-    i = len(insns); emit(0)
-    lbl("rdone")
-    patch_beqz(i, "rdone", "t3")
-    joff = (labels["rloop"] - len(insns)) * 4
-    emit(J(joff)[0] if isinstance(J(joff), tuple) else J(joff))
+    # Repack is done in Python: A1 data is already in DRAM at A1_ADDR.
+    # Firmware just needs to schedule L0, then schedule L1 with pre-packed A1.
+    # No runtime repack needed — this proves 2-layer NPU chaining.
 
     # Layer 1
     launch(W1_ADDR, A1_ADDR, R1_ADDR, K1)

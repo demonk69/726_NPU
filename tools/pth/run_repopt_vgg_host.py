@@ -110,7 +110,7 @@ def load_image_input(image_path, image_size):
     with Image.open(image_path) as img:
         img = img.convert("RGB")
         if img.size != (image_size, image_size):
-            img = img.resize((image_size, image_size), Image.Resampling.BILINEAR)
+            img = img.resize((image_size, image_size), Image.BILINEAR)
         pixels = torch.tensor(list(img.getdata()), dtype=torch.float64).view(image_size, image_size, 3)
     raw_chw = pixels.permute(2, 0, 1).contiguous() / 255.0
     return normalize_cifar10_image_tensor(raw_chw)

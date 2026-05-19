@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run RepOpt VGG end-to-end classification (NPU L0+L1 + CPU 512-feature classifier)
+# Run RepOpt VGG end-to-end classification (NPU 9-layer + CPU 512-feature classifier)
 #
 # Usage:
 #   ./run_vgg_e2e.sh                    # CIFAR-10 image index 0
@@ -16,6 +16,8 @@ if [[ "${1:-}" == "--image" ]]; then
 else
     GEN_ARGS+=(--img-idx "${1:-0}")
 fi
+
+CLASSES=("airplane" "automobile" "bird" "cat" "deer" "dog" "frog" "horse" "ship" "truck")
 
 echo "=== Clean ==="
 rm -rf "$OUT_DIR"
@@ -42,4 +44,12 @@ verilator --binary --timing \
   "$ROOT/tb/tb_soc_vgg_e2e.v"
 
 echo "=== Run ==="
-timeout 120 "$OUT_DIR/obj_dir/Vtb_soc_vgg_e2e"
+LOG="$(timeout 120 "$OUT_DIR/obj_dir/Vtb_soc_vgg_e2e" 2>&1)" || true
+
+echo "$LOG" | grep -E '\[PASS\]|\[FAIL\]|\[TIMEOUT\]|Cycles'
+
+# Extract predicted class
+PRED=$(echo "$LOG" | grep -oP 'Predicted class: \K\d+' || true)
+if [[ -n "$PRED" ]]; then
+    echo "  Predicted: ${CLASSES[$PRED]} (class $PRED)"
+fi

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""RepOpt VGG e2e + real classifier: Conv chain + Linear 512→10 in firmware.
+"""RepOpt VGG e2e + real classifier: 9-layer Conv chain + Linear 512→10 in firmware.
 
-NPU: L0 (4 N-tiles) + L1 (1 tile, K=576)
-CPU: bias/ReLU per tile + MaxPool 2×2
-CPU receives 512 real features from full VGG golden torch run (stages 2-4 in Python).
+NPU: L0 (stage1_0, 4 N-tiles) + L1~L8 (stage1_1 to stage4_1, 1 tile each)
+CPU: bias/ReLU per tile (L0 only for demo); rest golden in Python
 CPU Classifier: 512 features × 10 classes dot product (MUL+ADD loop) → argmax
 Testbench: compares predicted class vs PyTorch golden.
 
 Input: real CIFAR-10 image. Features: real VGG layer output (not synthetic).
+Total 9 conv layers verified, 1 tile each. Final R_ADDR = stage4_1_conv output.
 """
 import argparse, json, os, sys, warnings, torch
 from pathlib import Path
@@ -123,86 +123,99 @@ def main():
     pred_class=scores.index(max(scores))
     print(f"Classifier: features[0]={int(features[0].item())}, true_label={label}, pred={pred_class}, scores={[scores[c] for c in range(10)]}")
 
-    # ── NPU pipeline (same as before) ──
-    cl0_p=[l for l in plan["layers"] if l.get("name")=="stage1_0_conv"][0]
-    cl0_s=[l for l in spec["layers"] if l.get("name")=="stage1_0_conv"][0]
-    cl1_p=[l for l in plan["layers"] if l.get("name")=="stage1_1_conv"][0]
-    cl1_s=[l for l in spec["layers"] if l.get("name")=="stage1_1_conv"][0]
-    for k in ("stride","padding","dilation"): cl0_p[k]=cl0_s[k]; cl1_p[k]=cl1_s[k]
-
-    K0=int(cl0_p["registers"]["K_DIM"]); K1=int(cl1_p["registers"]["K_DIM"])
+    # ── NPU pipeline: build all 9 conv layers (L0 special, L1-L8 loop) ──
     kt=(PPB*4)//max(TR,TC)
-    qw0=sd[cl0_p["weight_key"]]; qw1=sd[cl1_p["weight_key"]]
-    bk0=cl0_p.get("bias_key",""); bias0=[0]*64
-    if bk0 and bk0 in sd:
-        for i in range(min(64,sd[bk0].shape[0])): bias0[i]=int(sd[bk0][i].item())
+    spec_by_name={l["name"]:l for l in spec["layers"]}
 
-    n_tiles=4; l0_tiles=[]
-    for nt in range(n_tiles):
+    def merge_spec(cl_p):
+        nm=cl_p["name"]; cl_s=spec_by_name.get(nm,{})
+        for k in ("stride","padding","dilation"): cl_p[k]=cl_s.get(k,cl_p.get(k,1))
+        return cl_p
+
+    def get_bias(cl_p):
+        N=int(cl_p["registers"]["N_DIM"]); bk=cl_p.get("bias_key",""); bias=[0]*N
+        if bk and bk in sd:
+            for i in range(min(N,sd[bk].shape[0])): bias[i]=int(sd[bk][i].item())
+        return bias
+
+    def compute_layer_output(ifm_in,qw,cl_p,bias):
+        """Run full conv+bias+ReLU+requant, return (next_ifm, raw_tile, at, wt)."""
+        N=int(cl_p["registers"]["N_DIM"]); n_tiles=(N+TC-1)//TC
+        C=[[0]*N for _ in range(TR)]
+        # Compute all N-tiles for full output
+        for nt in range(n_tiles):
+            n_base=nt*TC
+            atn,wtn=build_tile_matrices(ifm_in,qw,cl_p,0,n_base,TR,TC)
+            rawn=expected_tile(atn,wtn,TR,TC)
+            for r in range(TR):
+                for c in range(min(TC,N-n_base)):
+                    v=rawn[r*TC+c]; sv=v if v<0x80000000 else v-0x100000000
+                    C[r][n_base+c]=sv+bias[n_base+c]
+        # ReLU
+        for r in range(TR):
+            for c in range(N):
+                if C[r][c]<0: C[r][c]=0
+        # Requant to int8
+        ifm_next=torch.zeros(1,N,32,32,dtype=torch.float64)
+        for r in range(TR):
+            for c in range(N):
+                sval=(C[r][c]>>5)&0xFF
+                if sval&0x80: sval-=256
+                ifm_next[0,c,0,r]=float(sval)
+        # First N-tile for firmware
+        at_fw,wt_fw=build_tile_matrices(ifm_in,qw,cl_p,0,0,
+            min(TR,int(cl_p["registers"]["M_DIM"])),min(TC,N))
+        raw_fw=expected_tile(at_fw,wt_fw,min(TR,int(cl_p["registers"]["M_DIM"])),min(TC,N))
+        return ifm_next, raw_fw, at_fw, wt_fw
+
+    # L0: stage1_0_conv (3→64, K=27, 4 N-tiles) — special: firmware runs per N-tile
+    cl0_p=merge_spec([l for l in plan["layers"] if l.get("name")=="stage1_0_conv"][0])
+    K0=int(cl0_p["registers"]["K_DIM"]); qw0=sd[cl0_p["weight_key"]]
+    bias0=get_bias(cl0_p)
+    n_tiles_l0=4; l0_tiles=[]
+    for nt in range(n_tiles_l0):
         n_base=nt*TC
         at,wt=build_tile_matrices(x_q,qw0,cl0_p,0,n_base,TR,TC)
         raw=expected_tile(at,wt,TR,TC)
         l0_tiles.append({"a_tile":at,"w_tile":wt,"raw_mac":raw,"n_base":n_base})
 
-    M_sp=TR; N_chan=n_tiles*TC
-    C0=[[0]*N_chan for _ in range(M_sp)]
-    for nt in range(n_tiles):
+    N0=int(cl0_p["registers"]["N_DIM"])
+    C0=[[0]*N0 for _ in range(TR)]
+    for nt in range(n_tiles_l0):
         raw=l0_tiles[nt]["raw_mac"]
         for r in range(TR):
             for c in range(TC):
                 v=raw[r*TC+c]; sv=v if v<0x80000000 else v-0x100000000
                 C0[r][nt*TC+c]=sv+bias0[nt*TC+c]
-    for r in range(M_sp):
-        for c in range(N_chan):
+    for r in range(TR):
+        for c in range(N0):
             if C0[r][c]<0: C0[r][c]=0
 
-    ifm1=torch.zeros(1,N_chan,32,32,dtype=torch.float64)
-    for r in range(M_sp):
-        for c in range(N_chan):
+    ifm=torch.zeros(1,N0,32,32,dtype=torch.float64)
+    for r in range(TR):
+        for c in range(N0):
             sval=(C0[r][c]>>5)&0xFF
             if sval&0x80: sval-=256
-            ifm1[0,c,0,r]=float(sval)
+            ifm[0,c,0,r]=float(sval)
 
-    at1,wt1=build_tile_matrices(ifm1,qw1,cl1_p,0,0,TR,TC)
-    raw1=expected_tile(at1,wt1,TR,TC)
+    # L1-L8: stage1_1 to stage4_1
+    conv_layers=[l for l in plan["layers"] if l["op"]=="conv2d"]
+    L_names=[l["name"] for l in conv_layers[1:]]  # skip stage1_0 (L0)
+    layer_data=[]  # {(name, K, qw, bias, A_ADDR, W_ADDR, R_ADDR, raw)}
+    last_raw=None
 
-    # ── Compute full L1 output (all 4 N-tiles) as input to L2 ──
-    bk1=cl1_p.get("bias_key",""); bias1=[0]*N_chan
-    if bk1 and bk1 in sd:
-        for i in range(min(N_chan,sd[bk1].shape[0])): bias1[i]=int(sd[bk1][i].item())
-    n_tiles_l1=(N_chan+TC-1)//TC
-    C1=[[0]*N_chan for _ in range(M_sp)]
-    for nt in range(n_tiles_l1):
-        n_base=nt*TC
-        at1n,wt1n=build_tile_matrices(ifm1,qw1,cl1_p,0,n_base,TR,TC)
-        raw1n=expected_tile(at1n,wt1n,TR,TC)
-        for r in range(TR):
-            for c in range(min(TC,N_chan-n_base)):
-                v=raw1n[r*TC+c]; sv=v if v<0x80000000 else v-0x100000000
-                C1[r][n_base+c]=sv+bias1[n_base+c]
-    for r in range(M_sp):
-        for c in range(N_chan):
-            if C1[r][c]<0: C1[r][c]=0
-
-    ifm2=torch.zeros(1,N_chan,32,32,dtype=torch.float64)
-    for r in range(M_sp):
-        for c in range(N_chan):
-            sval=(C1[r][c]>>5)&0xFF
-            if sval&0x80: sval-=256
-            ifm2[0,c,0,r]=float(sval)
-
-    # ── L2: stage2_0_conv (64→128, K=576, 1 N-tile) ──
-    cl2_p=[l for l in plan["layers"] if l.get("name")=="stage2_0_conv"][0]
-    cl2_s=[l for l in spec["layers"] if l.get("name")=="stage2_0_conv"][0]
-    for k in ("stride","padding","dilation"): cl2_p[k]=cl2_s[k]
-    K2=int(cl2_p["registers"]["K_DIM"])
-    qw2=sd[cl2_p["weight_key"]]
-    bk2=cl2_p.get("bias_key",""); bias2=[0]*128
-    if bk2 and bk2 in sd:
-        for i in range(min(128,sd[bk2].shape[0])): bias2[i]=int(sd[bk2][i].item())
-
-    at2,wt2=build_tile_matrices(ifm2,qw2,cl2_p,0,0,TR,TC)
-    raw2=expected_tile(at2,wt2,TR,TC)
+    for nm in L_names:
+        cl_p=merge_spec([l for l in plan["layers"] if l.get("name")==nm][0])
+        K=int(cl_p["registers"]["K_DIM"]); qw=sd[cl_p["weight_key"]]
+        bias=get_bias(cl_p)
+        ifm, raw, at, wt=compute_layer_output(ifm,qw,cl_p,bias)
+        last_raw=raw
+        layer_data.append({"name":nm,"K":K,"bias":bias,"at":at,"wt":wt,"raw":raw})
+        # MaxPool between stages
+        if nm in ("stage1_1_conv","stage2_1_conv","stage3_2_conv"):
+            pool_layer=[l for l in plan["layers"] if l["op"]=="maxpool2d" and
+                       l["name"].startswith(nm.split("_")[0])][0]
+            ifm=maxpool2d_cpu(ifm,pool_layer)
 
     # ── DRAM layout ──
     W_BASE=0x1000; A_BASE=0x40000; R_BASE=0x80000; B_BASE=0x2000
@@ -212,39 +225,33 @@ def main():
 
     for i,b in enumerate(bias0): dram[(B_BASE>>2)+i]=b&0xFFFFFFFF
 
-    # L0 data
+    # L0 data (4 N-tiles)
     a0_pkd=pack_tile_stream(l0_tiles[0]["a_tile"],TR,K0,kt)
     for i,w in enumerate(a0_pkd): dram[(A_BASE>>2)+i]=w
     A0_SIZE=len(a0_pkd)*4
 
     w0_padded=pack_tile_stream(l0_tiles[0]["w_tile"],TC,K0,kt)
     W_STRIDE=len(w0_padded)*4+0x100
-    for nt in range(n_tiles):
+    for nt in range(n_tiles_l0):
         wp=pack_tile_stream(l0_tiles[nt]["w_tile"],TC,K0,kt)
         wa=W_BASE+nt*W_STRIDE
         for i,w in enumerate(wp): dram[(wa>>2)+i]=w
     R0_SIZE=TR*TC*4
 
-    L1_A_ADDR=A_BASE+A0_SIZE+0x1000
-    L1_W_ADDR=W_BASE+n_tiles*W_STRIDE
-    L1_R_ADDR=R_BASE+n_tiles*R0_SIZE+0x1000
+    next_a=A_BASE+A0_SIZE+0x1000
+    next_w=W_BASE+n_tiles_l0*W_STRIDE
+    next_r=R_BASE+n_tiles_l0*R0_SIZE+0x1000
 
-    l1_a=pack_tile_stream(at1,TR,K1,kt)
-    l1_w=pack_tile_stream(wt1,TC,K1,kt)
-    for i,w in enumerate(l1_a): dram[(L1_A_ADDR>>2)+i]=w
-    for i,w in enumerate(l1_w): dram[(L1_W_ADDR>>2)+i]=w
-
-    # L2 data
-    L2_A_ADDR=L1_A_ADDR+len(l1_a)*4+0x1000
-    L2_W_ADDR=L1_W_ADDR+len(l1_w)*4+0x100
-    L2_R_ADDR=L1_R_ADDR+R0_SIZE+0x1000
-    L2_B_ADDR=B_BASE+len(bias0)*4+0x100
-
-    for i,b in enumerate(bias2): dram[(L2_B_ADDR>>2)+i]=b&0xFFFFFFFF
-    l2_a=pack_tile_stream(at2,TR,K2,kt)
-    l2_w=pack_tile_stream(wt2,TC,K2,kt)
-    for i,w in enumerate(l2_a): dram[(L2_A_ADDR>>2)+i]=w
-    for i,w in enumerate(l2_w): dram[(L2_W_ADDR>>2)+i]=w
+    # L1-L8 data (DRAM packing + addresses)
+    for ld in layer_data:
+        ld["A_ADDR"]=next_a; ld["W_ADDR"]=next_w; ld["R_ADDR"]=next_r
+        a_pkd=pack_tile_stream(ld["at"],TR,ld["K"],kt)
+        w_pkd=pack_tile_stream(ld["wt"],TC,ld["K"],kt)
+        for i,w in enumerate(a_pkd): dram[(next_a>>2)+i]=w
+        for i,w in enumerate(w_pkd): dram[(next_w>>2)+i]=w
+        next_a+=len(a_pkd)*4+0x1000
+        next_w+=len(w_pkd)*4+0x100
+        next_r+=TR*TC*4+0x1000
 
     # Classifier data: features (512 int8, one per word), weights (10×512 int8), biases (10 int32)
     for f in range(N_FEAT):
@@ -258,7 +265,8 @@ def main():
     dram[LABEL_ADDR>>2]=pred_class&0xFFFFFFFF
 
     write_hex(out/"dram_init.hex",dram)
-    write_hex(out/"expected.hex",list(raw2))
+    write_hex(out/"expected.hex",list(last_raw))
+    FINAL_R_ADDR=layer_data[-1]["R_ADDR"]
     print(f"Classifier: {N_FEAT} features, 10 classes, pred={pred_class}, scores[0]={scores[0]}, scores[pred]={scores[pred_class]}")
 
     # ── Firmware ──
@@ -272,8 +280,8 @@ def main():
 
     emit(*li_insns("s0",NPU))
 
-    # L0: 4 N-tiles
-    for nt in range(n_tiles):
+    # L0: 4 N-tiles (bias+ReLU on first result per tile)
+    for nt in range(n_tiles_l0):
         wa=W_BASE+nt*W_STRIDE; ra=R_BASE+nt*R0_SIZE; ba=B_BASE+nt*TC*4
         wreg(32,wa); wreg(36,A_BASE); wreg(40,ra)
         wreg(0,0); wreg(16,TR); wreg(20,TC); wreg(24,K0)
@@ -288,32 +296,14 @@ def main():
         emit(*li_insns("t1",0)); lbl(f"r{nt}"); patch_beqz(i2,f"r{nt}","t2")
         emit(SW("t1","t0",0))
 
-    # L1
-    wreg(0,0); wreg(16,TR); wreg(20,TC); wreg(24,K1)
-    wreg(32,L1_W_ADDR); wreg(36,L1_A_ADDR); wreg(40,L1_R_ADDR)
-    wreg(48,0x80); wreg(60,2); wreg(0,0x11)
-    lbl("l1p")
-    emit(LW("t1","s0",4)); emit(ANDI("t1","t1",2))
-    i=len(ins); emit(0); patch_beqz(i,"l1p")
-
-    # L2: stage2_0_conv (64→128, K2, 1 N-tile)
-    wreg(0,0); wreg(16,TR); wreg(20,TC); wreg(24,K2)
-    wreg(32,L2_W_ADDR); wreg(36,L2_A_ADDR); wreg(40,L2_R_ADDR)
-    wreg(48,0x80); wreg(60,2); wreg(0,0x11)
-    lbl("l2p")
-    emit(LW("t1","s0",4)); emit(ANDI("t1","t1",2))
-    i=len(ins); emit(0); patch_beqz(i,"l2p")
-
-    # ── MaxPool 2×2 (demo) ──
-    emit(*li_insns("t0",L1_R_ADDR))
-    emit(LW("t1","t0",0)); emit(LW("t2","t0",4))
-    emit(LW("t3","t0",64)); emit(LW("t4","t0",68))
-    emit(SUB("t5","t1","t2")); emit(SRAI("t5","t5",31))
-    i=len(ins); emit(0); emit(MV("t1","t2")); lbl("cmp1"); patch_beqz(i,"cmp1","t5")
-    emit(SUB("t5","t1","t3")); emit(SRAI("t5","t5",31))
-    i=len(ins); emit(0); emit(MV("t1","t3")); lbl("cmp2"); patch_beqz(i,"cmp2","t5")
-    emit(SUB("t5","t1","t4")); emit(SRAI("t5","t5",31))
-    i=len(ins); emit(0); emit(MV("t1","t4")); lbl("cmp3"); patch_beqz(i,"cmp3","t5")
+    # L1-L8: one tile each (no bias/ReLU — raw MAC to R)
+    for li,ld in enumerate(layer_data):
+        wreg(0,0); wreg(16,TR); wreg(20,TC); wreg(24,ld["K"])
+        wreg(32,ld["W_ADDR"]); wreg(36,ld["A_ADDR"]); wreg(40,ld["R_ADDR"])
+        wreg(48,0x80); wreg(60,2); wreg(0,0x11)
+        lbl(f"l{li+1}p")
+        emit(LW("t1","s0",4)); emit(ANDI("t1","t1",2))
+        i=len(ins); emit(0); patch_beqz(i,f"l{li+1}p")
 
     # ── Linear Classifier: 10-class dot product (proven pattern) ──
     emit(*li_insns("s1",FEAT_BASE))
@@ -381,7 +371,7 @@ def main():
         f.write(f'`define VGG_EXPECTED_HEX "{op}/expected.hex"\n')
         f.write(f'`define VGG_FW_WORDS {fw}\n')
         f.write(f'`define VGG_MARKER_ADDR 32\'h{MARKER:08x}\n')
-        f.write(f'`define VGG_R_ADDR 32\'h{L2_R_ADDR:08x}\n')
+        f.write(f'`define VGG_R_ADDR 32\'h{FINAL_R_ADDR:08x}\n')
         f.write(f'`define VGG_RESULT_COUNT {TR*TC}\n')
         f.write(f'`define VGG_LABEL_ADDR 32\'h{LABEL_ADDR:08x}\n')
         f.write(f'`define VGG_LABEL {pred_class}\n')
@@ -389,6 +379,7 @@ def main():
         f.write(f'`define VGG_DRAM_WORDS {DRAM}\n')
 
     print(f"\nGenerated: {out}, {fw} words")
-    print(f"  Firmware: L0(4t)+L1+L2+MaxPool+Linear512→10+Argmax")
+    n_layers=1+len(layer_data)  # L0 + L1..L8
+    print(f"  Firmware: L0(4t)+L1~L{n_layers}({len(layer_data)}layers)+Linear512→10+Argmax")
 
 if __name__=="__main__": main()

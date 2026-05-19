@@ -303,12 +303,13 @@ def main():
         emit(*li_insns("t1",0)); lbl(f"r{nt}"); patch_beqz(i2,f"r{nt}","t2")
         emit(SW("t1","t0",0))
 
-    # L1-L8: one tile each, hw bias+ReLU (CTRL=0xA80).
+    # L1-L8: one tile each, hw bias+ReLU (CTRL=start|bias|ReLU).
     for li,ld in enumerate(layer_data):
         wreg(0,0); wreg(16,TR); wreg(20,TC); wreg(24,ld["K"])
         wreg(32,ld["W_ADDR"]); wreg(36,ld["A_ADDR"]); wreg(40,ld["R_ADDR"])
         wreg(0x98,ld["B_ADDR"])   # BIAS_ADDR for hw bias+ReLU
-        wreg(48,0xA80); wreg(60,2); wreg(0,0x11)
+        wreg(48,0x80); wreg(60,2)
+        wreg(0,0x611)   # CTRL: start(bit0) | bias_en(bit9=0x200) | ReLU(bit10=0x400)
         lbl(f"l{li+1}p")
         emit(LW("t1","s0",4)); emit(ANDI("t1","t1",2))
         i=len(ins); emit(0); patch_beqz(i,f"l{li+1}p")

@@ -22,6 +22,7 @@ from run_repopt_vgg_host import (
     load_json, tensor_scalar, unwrap_state_dict,
     load_int32_hex, quantize_qint8, requant_qint8,
     conv2d_acc_npu, maxpool2d_cpu, adaptive_avgpool2d_cpu,
+    load_cifar_sample, load_image_input,
 )
 
 SIMD=4; TR=16; TC=16; PPB=64; DRAM=512*1024
@@ -85,6 +86,8 @@ def main():
     ap.add_argument("--data-root",default="RepOpt/06_RepOpt_VGG/data")
     ap.add_argument("--out-dir",default="sim/vgg_e2e")
     ap.add_argument("--img-idx",type=int,default=0)
+    ap.add_argument("--image",default="",help="Arbitrary RGB image path (overrides --img-idx)")
+    ap.add_argument("--image-size",type=int,default=32,help="Image resize size (default 32)")
     args=ap.parse_args()
 
     out=Path(args.out_dir); out.mkdir(parents=True,exist_ok=True)
@@ -93,7 +96,10 @@ def main():
         warnings.filterwarnings("ignore",message="TypedStorage is deprecated.*")
         ckpt=torch.load(args.pth,map_location="cpu",weights_only=False)
     sd=unwrap_state_dict(ckpt)
-    x_f,label=load_cifar_sample(args.data_root,args.img_idx)
+    if args.image:
+        x_f,label=load_image_input(args.image,args.image_size),None
+    else:
+        x_f,label=load_cifar_sample(args.data_root,args.img_idx)
     in_sc=float(tensor_scalar(sd[plan["input"]["scale_key"]]))
     in_zp=int(tensor_scalar(sd[plan["input"]["zero_point_key"]]))
     x_q=quantize_qint8(x_f,in_sc,in_zp)

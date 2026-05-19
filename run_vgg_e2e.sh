@@ -1,18 +1,27 @@
 #!/usr/bin/env bash
 # Run RepOpt VGG end-to-end classification (NPU L0+L1 + CPU 512-feature classifier)
-# Usage: ./run_vgg_e2e.sh [image_index]
-#   image_index: 0-9999 CIFAR-10 test sample (default: 0)
+#
+# Usage:
+#   ./run_vgg_e2e.sh                    # CIFAR-10 image index 0
+#   ./run_vgg_e2e.sh 7                  # CIFAR-10 image index 7
+#   ./run_vgg_e2e.sh --image cat.jpg    # arbitrary image (resized to 32x32)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-IMG_IDX="${1:-0}"
 OUT_DIR="$ROOT/sim/vgg_e2e"
+
+GEN_ARGS=()
+if [[ "${1:-}" == "--image" ]]; then
+    GEN_ARGS+=(--image "${2:?missing image path}")
+else
+    GEN_ARGS+=(--img-idx "${1:-0}")
+fi
 
 echo "=== Clean ==="
 rm -rf "$OUT_DIR"
 
-echo "=== Generate (img_idx=$IMG_IDX) ==="
-python3 -B "$ROOT/tools/pth/gen_vgg_e2e.py" --out-dir "$OUT_DIR" --img-idx "$IMG_IDX"
+echo "=== Generate ==="
+python3 -B "$ROOT/tools/pth/gen_vgg_e2e.py" --out-dir "$OUT_DIR" "${GEN_ARGS[@]}"
 
 echo "=== Compile ==="
 verilator --binary --timing \

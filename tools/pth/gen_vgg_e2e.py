@@ -303,14 +303,12 @@ def main():
         emit(*li_insns("t1",0)); lbl(f"r{nt}"); patch_beqz(i2,f"r{nt}","t2")
         emit(SW("t1","t0",0))
 
-    # L1-L8: one tile each. Last layer uses hw bias+ReLU (CTRL=0xA80).
+    # L1-L8: one tile each, hw bias+ReLU (CTRL=0xA80).
     for li,ld in enumerate(layer_data):
-        is_last=(li==len(layer_data)-1)
-        ctrl_val=0xA80 if is_last else 0x80
         wreg(0,0); wreg(16,TR); wreg(20,TC); wreg(24,ld["K"])
         wreg(32,ld["W_ADDR"]); wreg(36,ld["A_ADDR"]); wreg(40,ld["R_ADDR"])
-        if is_last: wreg(0x98,ld["B_ADDR"])   # BIAS_ADDR for hw bias+ReLU
-        wreg(48,ctrl_val); wreg(60,2); wreg(0,0x11)
+        wreg(0x98,ld["B_ADDR"])   # BIAS_ADDR for hw bias+ReLU
+        wreg(48,0xA80); wreg(60,2); wreg(0,0x11)
         lbl(f"l{li+1}p")
         emit(LW("t1","s0",4)); emit(ANDI("t1","t1",2))
         i=len(ins); emit(0); patch_beqz(i,f"l{li+1}p")
@@ -390,6 +388,6 @@ def main():
 
     print(f"\nGenerated: {out}, {fw} words")
     n_layers=1+len(layer_data)  # L0 + L1..L8
-    print(f"  Firmware: L0(4t)+L1~L{n_layers}({len(layer_data)}layers,last=bias+ReLU)+Linear512→10+Argmax")
+    print(f"  Firmware: L0(4t,CPU)+L1~L{n_layers}({len(layer_data)}layers,NPU bias+ReLU)+Linear512→10+Argmax")
 
 if __name__=="__main__": main()

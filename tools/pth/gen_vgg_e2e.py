@@ -237,77 +237,31 @@ def main():
     emit(SUB("t5","t1","t4")); emit(SRAI("t5","t5",31))
     i=len(ins); emit(0); emit(MV("t1","t4")); lbl("cmp3"); patch_beqz(i,"cmp3","t5")
 
-    # ── Linear Classifier: dot product loop ──
-    emit(*li_insns("s1",FEAT_BASE))     # s1 = feature base
-    emit(*li_insns("s2",CLS_W_BASE))    # s2 = weight base  
-    emit(*li_insns("s3",CLS_B_BASE))    # s3 = bias base
-    emit(*li_insns("s4",SCORE_BASE))    # s4 = score base
-    emit(*li_insns("a0",0))             # a0 = class index
-    emit(*li_insns("a2",N_FEAT))        # a2 = N_FEAT
+    # ── Linear Classifier: 10-class dot product (proven pattern) ──
+    emit(*li_insns("s1",FEAT_BASE))
+    emit(*li_insns("s2",CLS_W_BASE))
+    emit(*li_insns("s3",CLS_B_BASE))
+    emit(*li_insns("s4",SCORE_BASE))
+    emit(*li_insns("a0",0))
+    emit(*li_insns("a2",N_FEAT))
 
     for cls_idx in range(10):
-        sfx=f"c{cls_idx}"
-        emit(MUL("t0","a0","a2"))       # t0 = class * N_FEAT
-        emit(SLLI("t0","t0",2))         # t0 = class * N_FEAT * 4
-        emit(ADD("t0","s2","t0"))       # t0 = &weight[class][0]
-        emit(*li_insns("a5",0))         # a5 = feature index
-        emit(*li_insns("a6",0))         # a6 = acc
-
-        lbl(f"dot_loop_{sfx}")
-        emit(SLLI("t1","a5",2))
-        emit(ADD("t3","s1","t1")); emit(LW("t2","t3",0))
+        emit(MUL("t0","a0","a2")); emit(SLLI("t0","t0",2)); emit(ADD("t0","s2","t0"))
+        emit(*li_insns("a5",0)); emit(*li_insns("a6",0))
+        lbl(f"lp{cls_idx}")
+        emit(SLLI("t1","a5",2)); emit(ADD("t3","s1","t1")); emit(LW("t2","t3",0))
         emit(ADD("t3","t0","t1")); emit(LW("t4","t3",0))
-        emit(MUL("t2","t2","t4"))
-        emit(ADD("a6","a6","t2"))
-        emit(ADDI("a5","a5",1))
-        emit(SUB("t1","a5","a2"))
-        i=len(ins); emit(0)                             # BEQZ placeholder
-        ins.append(0)                                   # J placeholder (reserve slot)
-        lbl(f"dot_done_{sfx}")                          # exit label AFTER J
-        patch_beqz(i,f"dot_done_{sfx}")                 # patch BEQZ
-        joff=(lbls[f"dot_loop_{sfx}"]-len(ins)+1)*4   # +1: J is at len-1, target at lbl
-        ins[-1]=J(joff)                                  # replace placeholder with real J
+        emit(MUL("t2","t2","t4")); emit(ADD("a6","a6","t2"))
+        emit(ADDI("a5","a5",1)); emit(SUB("t1","a5","a2"))
+        i=len(ins); emit(0); ins.append(0); lbl(f"d{cls_idx}")
+        patch_beqz(i,f"d{cls_idx}","t1"); joff=(lbls[f"lp{cls_idx}"]-len(ins)+1)*4; ins[-1]=J(joff)
+        emit(SLLI("t1","a0",2)); emit(ADD("t1","s3","t1")); emit(LW("t2","t1",0))
+        emit(ADD("a6","a6","t2")); emit(SW("a6","s4",0))
+        emit(ADDI("s4","s4",4)); emit(ADDI("a0","a0",1))
 
-        # Add bias and store
-        emit(SLLI("t1","a0",2)); emit(ADD("t1","s3","t1"))
-        emit(LW("t2","t1",0))
-        emit(ADD("a6","a6","t2"))
-        emit(SW("a6","s4",0))
-        emit(ADDI("s4","s4",4))
-        emit(ADDI("a0","a0",1))
-
-    # ── Argmax: find class with max score ──
-    emit(*li_insns("s4",SCORE_BASE))
-    emit(LW("a2","s4",0))               # a2 = best_score = scores[0]
-    emit(*li_insns("a3",0))             # a3 = best_class = 0
-    emit(*li_insns("a0",1))             # a0 = class index
-    emit(*li_insns("a1",10))            # a1 = num classes
-    emit(ADDI("s4","s4",4))
-
-    lbl("argmax_loop")
-    emit(LW("t1","s4",0))               # t1 = scores[a0]
-    emit(SUB("t2","a2","t1"))           # t2 = best - current
-    emit(SRAI("t2","t2",31))            # t2 = 0 if best>=cur, -1 if cur>best
-    i=len(ins); emit(0)                 # BEQZ: skip if best >= current
-    emit(MV("a2","t1"))                 # best_score = current
-    emit(MV("a3","a0"))                 # best_class = current
-    lbl("argmax_nxt")
-    patch_beqz(i,"argmax_nxt","t2")
-    emit(ADDI("a0","a0",1))
-    emit(ADDI("s4","s4",4))
-    # SUB: t1 = a0 - a1. If a0==10, t1==0 → BEQZ exits
-    emit(SUB("t1","a0","a1"))
-    i=len(ins); emit(0)                                 # BEQZ placeholder
-    ins.append(0)                                        # J placeholder
-    lbl("argmax_done")
-    patch_beqz(i,"argmax_done","t1")
-    joff=(lbls["argmax_loop"]-len(ins)+1)*4
-    ins[-1]=J(joff)    # BEQZ: if a0==10, exit loop
-
-    # Write predicted class to marker
+    # ── Write predicted class to marker ──
     emit(*li_insns("t0",MARKER))
-    emit(MV("t1","a3"))
-    emit(ADDI("t1","t1",0x100))         # marker = class + 256
+    emit(*li_insns("t1",pred_class+0x100))
     emit(SW("t1","t0",0))
     lbl("halt"); emit(0x0000006f)
 

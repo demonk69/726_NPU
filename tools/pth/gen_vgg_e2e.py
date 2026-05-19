@@ -274,7 +274,7 @@ def main():
         ins.append(0)                                   # J placeholder (reserve slot)
         lbl(f"dot_done_{sfx}")                          # exit label AFTER J
         patch_beqz(i,f"dot_done_{sfx}")                 # patch BEQZ
-        joff=(lbls[f"dot_loop_{sfx}"]-len(ins))*4       # offset from current pos to loop head
+        joff=(lbls[f"dot_loop_{sfx}"]-len(ins)+1)*4   # +1: J is at len-1, target at lbl
         ins[-1]=J(joff)                                  # replace placeholder with real J
 
         # Add bias and store
@@ -310,7 +310,7 @@ def main():
     ins.append(0)                                        # J placeholder
     lbl("argmax_done")
     patch_beqz(i,"argmax_done","t1")
-    joff=(lbls["argmax_loop"]-len(ins))*4
+    joff=(lbls["argmax_loop"]-len(ins)+1)*4
     ins[-1]=J(joff)    # BEQZ: if a0==10, exit loop
 
     # Write predicted class to marker

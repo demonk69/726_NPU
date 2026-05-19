@@ -166,6 +166,44 @@ def main():
     at1,wt1=build_tile_matrices(ifm1,qw1,cl1_p,0,0,TR,TC)
     raw1=expected_tile(at1,wt1,TR,TC)
 
+    # ── Compute full L1 output (all 4 N-tiles) as input to L2 ──
+    bk1=cl1_p.get("bias_key",""); bias1=[0]*N_chan
+    if bk1 and bk1 in sd:
+        for i in range(min(N_chan,sd[bk1].shape[0])): bias1[i]=int(sd[bk1][i].item())
+    n_tiles_l1=(N_chan+TC-1)//TC
+    C1=[[0]*N_chan for _ in range(M_sp)]
+    for nt in range(n_tiles_l1):
+        n_base=nt*TC
+        at1n,wt1n=build_tile_matrices(ifm1,qw1,cl1_p,0,n_base,TR,TC)
+        raw1n=expected_tile(at1n,wt1n,TR,TC)
+        for r in range(TR):
+            for c in range(min(TC,N_chan-n_base)):
+                v=raw1n[r*TC+c]; sv=v if v<0x80000000 else v-0x100000000
+                C1[r][n_base+c]=sv+bias1[n_base+c]
+    for r in range(M_sp):
+        for c in range(N_chan):
+            if C1[r][c]<0: C1[r][c]=0
+
+    ifm2=torch.zeros(1,N_chan,32,32,dtype=torch.float64)
+    for r in range(M_sp):
+        for c in range(N_chan):
+            sval=(C1[r][c]>>5)&0xFF
+            if sval&0x80: sval-=256
+            ifm2[0,c,0,r]=float(sval)
+
+    # ── L2: stage2_0_conv (64→128, K=576, 1 N-tile) ──
+    cl2_p=[l for l in plan["layers"] if l.get("name")=="stage2_0_conv"][0]
+    cl2_s=[l for l in spec["layers"] if l.get("name")=="stage2_0_conv"][0]
+    for k in ("stride","padding","dilation"): cl2_p[k]=cl2_s[k]
+    K2=int(cl2_p["registers"]["K_DIM"])
+    qw2=sd[cl2_p["weight_key"]]
+    bk2=cl2_p.get("bias_key",""); bias2=[0]*128
+    if bk2 and bk2 in sd:
+        for i in range(min(128,sd[bk2].shape[0])): bias2[i]=int(sd[bk2][i].item())
+
+    at2,wt2=build_tile_matrices(ifm2,qw2,cl2_p,0,0,TR,TC)
+    raw2=expected_tile(at2,wt2,TR,TC)
+
     # ── DRAM layout ──
     W_BASE=0x1000; A_BASE=0x40000; R_BASE=0x80000; B_BASE=0x2000
     FEAT_BASE=0x6000; CLS_W_BASE=0x7000; CLS_B_BASE=0xC000
@@ -196,6 +234,18 @@ def main():
     for i,w in enumerate(l1_a): dram[(L1_A_ADDR>>2)+i]=w
     for i,w in enumerate(l1_w): dram[(L1_W_ADDR>>2)+i]=w
 
+    # L2 data
+    L2_A_ADDR=L1_A_ADDR+len(l1_a)*4+0x1000
+    L2_W_ADDR=L1_W_ADDR+len(l1_w)*4+0x100
+    L2_R_ADDR=L1_R_ADDR+R0_SIZE+0x1000
+    L2_B_ADDR=B_BASE+len(bias0)*4+0x100
+
+    for i,b in enumerate(bias2): dram[(L2_B_ADDR>>2)+i]=b&0xFFFFFFFF
+    l2_a=pack_tile_stream(at2,TR,K2,kt)
+    l2_w=pack_tile_stream(wt2,TC,K2,kt)
+    for i,w in enumerate(l2_a): dram[(L2_A_ADDR>>2)+i]=w
+    for i,w in enumerate(l2_w): dram[(L2_W_ADDR>>2)+i]=w
+
     # Classifier data: features (512 int8, one per word), weights (10×512 int8), biases (10 int32)
     for f in range(N_FEAT):
         dram[(FEAT_BASE>>2)+f]=int(features[f].item())&0xFFFFFFFF
@@ -208,7 +258,7 @@ def main():
     dram[LABEL_ADDR>>2]=pred_class&0xFFFFFFFF
 
     write_hex(out/"dram_init.hex",dram)
-    write_hex(out/"expected.hex",list(raw1))
+    write_hex(out/"expected.hex",list(raw2))
     print(f"Classifier: {N_FEAT} features, 10 classes, pred={pred_class}, scores[0]={scores[0]}, scores[pred]={scores[pred_class]}")
 
     # ── Firmware ──
@@ -245,6 +295,14 @@ def main():
     lbl("l1p")
     emit(LW("t1","s0",4)); emit(ANDI("t1","t1",2))
     i=len(ins); emit(0); patch_beqz(i,"l1p")
+
+    # L2: stage2_0_conv (64→128, K2, 1 N-tile)
+    wreg(0,0); wreg(16,TR); wreg(20,TC); wreg(24,K2)
+    wreg(32,L2_W_ADDR); wreg(36,L2_A_ADDR); wreg(40,L2_R_ADDR)
+    wreg(48,0x80); wreg(60,2); wreg(0,0x11)
+    lbl("l2p")
+    emit(LW("t1","s0",4)); emit(ANDI("t1","t1",2))
+    i=len(ins); emit(0); patch_beqz(i,"l2p")
 
     # ── MaxPool 2×2 (demo) ──
     emit(*li_insns("t0",L1_R_ADDR))
@@ -323,7 +381,7 @@ def main():
         f.write(f'`define VGG_EXPECTED_HEX "{op}/expected.hex"\n')
         f.write(f'`define VGG_FW_WORDS {fw}\n')
         f.write(f'`define VGG_MARKER_ADDR 32\'h{MARKER:08x}\n')
-        f.write(f'`define VGG_R_ADDR 32\'h{L1_R_ADDR:08x}\n')
+        f.write(f'`define VGG_R_ADDR 32\'h{L2_R_ADDR:08x}\n')
         f.write(f'`define VGG_RESULT_COUNT {TR*TC}\n')
         f.write(f'`define VGG_LABEL_ADDR 32\'h{LABEL_ADDR:08x}\n')
         f.write(f'`define VGG_LABEL {pred_class}\n')
@@ -331,6 +389,6 @@ def main():
         f.write(f'`define VGG_DRAM_WORDS {DRAM}\n')
 
     print(f"\nGenerated: {out}, {fw} words")
-    print(f"  Firmware: L0(4t)+L1+MaxPool+Linear512→10+Argmax")
+    print(f"  Firmware: L0(4t)+L1+L2+MaxPool+Linear512→10+Argmax")
 
 if __name__=="__main__": main()

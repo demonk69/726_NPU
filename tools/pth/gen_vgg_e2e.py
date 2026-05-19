@@ -139,8 +139,9 @@ def main():
         return bias
 
     def compute_layer_output(ifm_in,qw,cl_p,bias):
-        """Run full conv+bias+ReLU+requant, return (next_ifm, raw_tile, at, wt)."""
-        N=int(cl_p["registers"]["N_DIM"]); n_tiles=(N+TC-1)//TC
+        """Run full conv+bias+ReLU+requant, return (next_ifm, raw_tile, at, wt, biasrelu_tile)."""
+        N=int(cl_p["registers"]["N_DIM"]); M=int(cl_p["registers"]["M_DIM"])
+        n_tiles=(N+TC-1)//TC
         C=[[0]*N for _ in range(TR)]
         # Compute all N-tiles for full output
         for nt in range(n_tiles):
@@ -155,6 +156,9 @@ def main():
         for r in range(TR):
             for c in range(N):
                 if C[r][c]<0: C[r][c]=0
+        # First N-tile of bias+ReLU output (for NPU hw bias+ReLU expected.hex)
+        tc=min(TC,N); tr=min(TR,M)
+        biasrelu_tile=[C[r][c]&0xFFFFFFFF for r in range(tr) for c in range(tc)]
         # Requant to int8
         ifm_next=torch.zeros(1,N,32,32,dtype=torch.float64)
         for r in range(TR):
@@ -162,11 +166,10 @@ def main():
                 sval=(C[r][c]>>5)&0xFF
                 if sval&0x80: sval-=256
                 ifm_next[0,c,0,r]=float(sval)
-        # First N-tile for firmware
-        at_fw,wt_fw=build_tile_matrices(ifm_in,qw,cl_p,0,0,
-            min(TR,int(cl_p["registers"]["M_DIM"])),min(TC,N))
-        raw_fw=expected_tile(at_fw,wt_fw,min(TR,int(cl_p["registers"]["M_DIM"])),min(TC,N))
-        return ifm_next, raw_fw, at_fw, wt_fw
+        # First N-tile raw MAC for firmware reference
+        at_fw,wt_fw=build_tile_matrices(ifm_in,qw,cl_p,0,0,tr,tc)
+        raw_fw=expected_tile(at_fw,wt_fw,tr,tc)
+        return ifm_next, raw_fw, at_fw, wt_fw, biasrelu_tile
 
     # L0: stage1_0_conv (3→64, K=27, 4 N-tiles) — special: firmware runs per N-tile
     cl0_p=merge_spec([l for l in plan["layers"] if l.get("name")=="stage1_0_conv"][0])
@@ -208,9 +211,9 @@ def main():
         cl_p=merge_spec([l for l in plan["layers"] if l.get("name")==nm][0])
         K=int(cl_p["registers"]["K_DIM"]); qw=sd[cl_p["weight_key"]]
         bias=get_bias(cl_p)
-        ifm, raw, at, wt=compute_layer_output(ifm,qw,cl_p,bias)
-        last_raw=raw
-        layer_data.append({"name":nm,"K":K,"bias":bias,"at":at,"wt":wt,"raw":raw})
+        ifm, raw, at, wt, biasrelu_tile=compute_layer_output(ifm,qw,cl_p,bias)
+        last_raw=raw; last_biasrelu=biasrelu_tile
+        layer_data.append({"name":nm,"K":K,"bias":bias,"at":at,"wt":wt,"raw":raw,"biasrelu":biasrelu_tile})
         # MaxPool between stages
         if nm in ("stage1_1_conv","stage2_1_conv","stage3_2_conv"):
             pool_layer=[l for l in plan["layers"] if l["op"]=="maxpool2d" and
@@ -241,17 +244,21 @@ def main():
     next_a=A_BASE+A0_SIZE+0x1000
     next_w=W_BASE+n_tiles_l0*W_STRIDE
     next_r=R_BASE+n_tiles_l0*R0_SIZE+0x1000
+    next_b=B_BASE+len(bias0)*4+0x100
 
     # L1-L8 data (DRAM packing + addresses)
     for ld in layer_data:
         ld["A_ADDR"]=next_a; ld["W_ADDR"]=next_w; ld["R_ADDR"]=next_r
+        ld["B_ADDR"]=next_b
         a_pkd=pack_tile_stream(ld["at"],TR,ld["K"],kt)
         w_pkd=pack_tile_stream(ld["wt"],TC,ld["K"],kt)
         for i,w in enumerate(a_pkd): dram[(next_a>>2)+i]=w
         for i,w in enumerate(w_pkd): dram[(next_w>>2)+i]=w
+        for i,b in enumerate(ld["bias"]): dram[(next_b>>2)+i]=b&0xFFFFFFFF
         next_a+=len(a_pkd)*4+0x1000
         next_w+=len(w_pkd)*4+0x100
         next_r+=TR*TC*4+0x1000
+        next_b+=len(ld["bias"])*4+0x100
 
     # Classifier data: features (512 int8, one per word), weights (10×512 int8), biases (10 int32)
     for f in range(N_FEAT):
@@ -265,7 +272,7 @@ def main():
     dram[LABEL_ADDR>>2]=pred_class&0xFFFFFFFF
 
     write_hex(out/"dram_init.hex",dram)
-    write_hex(out/"expected.hex",list(last_raw))
+    write_hex(out/"expected.hex",last_biasrelu)  # bias+ReLU output of last layer
     FINAL_R_ADDR=layer_data[-1]["R_ADDR"]
     print(f"Classifier: {N_FEAT} features, 10 classes, pred={pred_class}, scores[0]={scores[0]}, scores[pred]={scores[pred_class]}")
 
@@ -296,11 +303,14 @@ def main():
         emit(*li_insns("t1",0)); lbl(f"r{nt}"); patch_beqz(i2,f"r{nt}","t2")
         emit(SW("t1","t0",0))
 
-    # L1-L8: one tile each (no bias/ReLU — raw MAC to R)
+    # L1-L8: one tile each. Last layer uses hw bias+ReLU (CTRL=0xA80).
     for li,ld in enumerate(layer_data):
+        is_last=(li==len(layer_data)-1)
+        ctrl_val=0xA80 if is_last else 0x80
         wreg(0,0); wreg(16,TR); wreg(20,TC); wreg(24,ld["K"])
         wreg(32,ld["W_ADDR"]); wreg(36,ld["A_ADDR"]); wreg(40,ld["R_ADDR"])
-        wreg(48,0x80); wreg(60,2); wreg(0,0x11)
+        if is_last: wreg(0x98,ld["B_ADDR"])   # BIAS_ADDR for hw bias+ReLU
+        wreg(48,ctrl_val); wreg(60,2); wreg(0,0x11)
         lbl(f"l{li+1}p")
         emit(LW("t1","s0",4)); emit(ANDI("t1","t1",2))
         i=len(ins); emit(0); patch_beqz(i,f"l{li+1}p")
@@ -380,6 +390,6 @@ def main():
 
     print(f"\nGenerated: {out}, {fw} words")
     n_layers=1+len(layer_data)  # L0 + L1..L8
-    print(f"  Firmware: L0(4t)+L1~L{n_layers}({len(layer_data)}layers)+Linear512→10+Argmax")
+    print(f"  Firmware: L0(4t)+L1~L{n_layers}({len(layer_data)}layers,last=bias+ReLU)+Linear512→10+Argmax")
 
 if __name__=="__main__": main()

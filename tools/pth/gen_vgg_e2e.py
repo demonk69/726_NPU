@@ -3,11 +3,11 @@
 
 NPU: L0 (4 N-tiles) + L1 (1 tile, K=576)
 CPU: bias/ReLU per tile + MaxPool 2×2
+CPU receives 512 real features from full VGG golden torch run (stages 2-4 in Python).
 CPU Classifier: 512 features × 10 classes dot product (MUL+ADD loop) → argmax
-Testbench: compares predicted class vs PyTorch golden
+Testbench: compares predicted class vs PyTorch golden.
 
-Features after L0+L1+Pool are pre-computed from full VGG golden in Python.
-Classifier weights from .pth (10×512 int8 + 10×float32 bias).
+Input: real CIFAR-10 image. Features: real VGG layer output (not synthetic).
 """
 import argparse, json, os, sys, warnings, torch
 from pathlib import Path
@@ -18,6 +18,11 @@ TB_DIR = PROJECT_ROOT / "tb"
 sys.path.insert(0, str(TB_DIR)); sys.path.insert(0, str(THIS_DIR))
 from assemble_soc_test import *
 from gen_repopt_tile_case import *
+from run_repopt_vgg_host import (
+    load_json, tensor_scalar, unwrap_state_dict,
+    load_int32_hex, quantize_qint8, requant_qint8,
+    conv2d_acc_npu, maxpool2d_cpu, adaptive_avgpool2d_cpu,
+)
 
 SIMD=4; TR=16; TC=16; PPB=64; DRAM=512*1024
 NPU=0x02000000; PASS_MARKER=0xAA
@@ -50,17 +55,27 @@ def pack_tile_stream(mat,dim1,dim2,kt_elems):
         kp+=kl
     return out
 
-def compute_full_features(plan,sd,x_q,in_sc,in_zp,label,N_FEAT):
-    """Generate deterministic features that give the correct classification."""
-    cp=sd['model.classifier._packed_params._packed_params']
-    cls_w=cp[0].int_repr()  # [10, 512] qint8
-    feats=[0]*512
-    for c in range(10):
-        for f in range(N_FEAT):
-            w=int(cls_w[c,f].item())
-            if c==label: feats[f]=max(-128,min(127,w))
-            else: feats[f]=max(-128,min(127,-w)) if w!=0 else 0
-    return torch.tensor([feats[f] for f in range(512)],dtype=torch.float64)
+def extract_real_features(plan,sd,x_q,out_dir):
+    """Run full VGG forward pass (all conv+pool layers) and extract 512 features after avgpool+flatten."""
+    current=x_q
+    assets_dir = Path(out_dir)
+    for layer in plan["layers"]:
+        if layer["op"]=="conv2d":
+            bias_acc=load_int32_hex(assets_dir/layer["assets"]["bias_int32_hex"])
+            qweight=sd[layer["weight_key"]]
+            acc=conv2d_acc_npu(current,qweight,bias_acc,layer)
+            req=layer["cpu_requant_after_npu"]
+            current=requant_qint8(acc,req["multipliers"],req["output_zero_point"])
+        elif layer["op"]=="maxpool2d":
+            current=maxpool2d_cpu(current,layer)
+        elif layer["op"]=="adaptive_avgpool2d":
+            current=adaptive_avgpool2d_cpu(current,layer)
+        elif layer["op"]=="flatten":
+            current=current.reshape(current.shape[0],-1)
+            break
+        elif layer["op"]=="linear":
+            break
+    return current.reshape(-1).to(torch.float64)
 
 def main():
     ap=argparse.ArgumentParser()
@@ -89,10 +104,10 @@ def main():
     cls_b=cp[1]  # [10] float32 bias
     cls_bias=[int(cls_b[i].item()) for i in range(10)]
 
-    N_FEAT=4  # number of features for classifier (128=fast, 512=full)
-    # In full implementation, run the complete model forward.
-    # For demo: use deterministic features that give the correct class.
-    features=compute_full_features(plan,sd,x_q,in_sc,in_zp,label,N_FEAT)
+    N_FEAT=512  # full 512 features from real VGG forward pass
+    plan_dir=Path(args.plan).resolve().parent
+    features=extract_real_features(plan,sd,x_q,plan_dir)
+    features=torch.clamp(features,-128,127)
 
     # ── Compute expected scores and class ──
     scores=[cls_bias[c] for c in range(10)]
@@ -147,8 +162,8 @@ def main():
 
     # ── DRAM layout ──
     W_BASE=0x1000; A_BASE=0x40000; R_BASE=0x80000; B_BASE=0x2000
-    FEAT_BASE=0x6000; CLS_W_BASE=0x7000; CLS_B_BASE=0x8000
-    SCORE_BASE=0x8100; MARKER=0x8200; LABEL_ADDR=0x8300
+    FEAT_BASE=0x6000; CLS_W_BASE=0x7000; CLS_B_BASE=0xC000
+    SCORE_BASE=0xC100; MARKER=0xC200; LABEL_ADDR=0xC300
     dram=[0]*DRAM
 
     for i,b in enumerate(bias0): dram[(B_BASE>>2)+i]=b&0xFFFFFFFF
@@ -176,12 +191,11 @@ def main():
     for i,w in enumerate(l1_w): dram[(L1_W_ADDR>>2)+i]=w
 
     # Classifier data: features (512 int8, one per word), weights (10×512 int8), biases (10 int32)
-    N_FEAT=4  # number of features for classifier (128=fast, 512=full)
     for f in range(N_FEAT):
-        dram[(FEAT_BASE>>2)+f]=(int(features[f].item())&0xFF)&0xFFFFFFFF
+        dram[(FEAT_BASE>>2)+f]=int(features[f].item())&0xFFFFFFFF
     for c in range(10):
         for f in range(N_FEAT):
-            dram[(CLS_W_BASE>>2)+c*N_FEAT+f]=(int(cls_w[c,f].item())&0xFF)&0xFFFFFFFF
+            dram[(CLS_W_BASE>>2)+c*N_FEAT+f]=int(cls_w[c,f].item())&0xFFFFFFFF
     for c in range(10):
         dram[(CLS_B_BASE>>2)+c]=cls_bias[c]&0xFFFFFFFF
 
@@ -259,9 +273,37 @@ def main():
         emit(ADD("a6","a6","t2")); emit(SW("a6","s4",0))
         emit(ADDI("s4","s4",4)); emit(ADDI("a0","a0",1))
 
+    # ── Argmax: find class with max score ──
+    emit(*li_insns("s4",SCORE_BASE))
+    emit(LW("a2","s4",0))               # a2 = best_score = scores[0]
+    emit(*li_insns("a3",0))             # a3 = best_class = 0
+    emit(*li_insns("a0",1))             # a0 = class index
+    emit(*li_insns("a1",10))            # a1 = num classes
+    emit(ADDI("s4","s4",4))
+
+    lbl("argmax_loop")
+    emit(LW("t1","s4",0))               # t1 = scores[a0]
+    emit(SUB("t2","a2","t1"))           # t2 = best - current
+    emit(SRAI("t2","t2",31))            # t2 = 0 if best>=cur, -1 if cur>best
+    i=len(ins); emit(0)                 # BEQZ: skip if best >= current
+    emit(MV("a2","t1"))                 # best_score = current
+    emit(MV("a3","a0"))                 # best_class = current
+    lbl("argmax_nxt")
+    patch_beqz(i,"argmax_nxt","t2")
+    emit(ADDI("a0","a0",1))
+    emit(ADDI("s4","s4",4))
+    emit(SUB("t1","a0","a1"))           # t1 = a0 - 10
+    i=len(ins); emit(0)                 # BEQZ placeholder
+    ins.append(0)                       # J placeholder
+    lbl("argmax_done")
+    patch_beqz(i,"argmax_done","t1")
+    joff=(lbls["argmax_loop"]-len(ins)+1)*4
+    ins[-1]=J(joff)
+
     # ── Write predicted class to marker ──
     emit(*li_insns("t0",MARKER))
-    emit(*li_insns("t1",pred_class+0x100))
+    emit(MV("t1","a3"))
+    emit(ADDI("t1","t1",0x100))         # marker = class + 256
     emit(SW("t1","t0",0))
     lbl("halt"); emit(0x0000006f)
 

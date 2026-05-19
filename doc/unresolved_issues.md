@@ -1,133 +1,85 @@
 # 未解决问题清单
 
-本文档整理 DeepSeek 修改会话（2026-05-09）中发现的全部未解决/未完成问题。
+最后更新：2026-05-19 (v0.5.0)
 
 ---
 
-## 一、功能缺失（电路有逻辑，但未接入或未测试）
+## 一、已修复（原列于 2026-05-09 版本）
 
-### 1. 后处理（bias/ReLU/ReLU6/quant/saturate）未接入 tile 路径
-
-**现状**：bias（CTRL[9]）、ReLU/ReLU6（CTRL[11:10]）、INT8 quant/saturate（QUANT_CFG 0x9C）在 **direct scalar 路径**（`npu_top.v` 的 `scalar_post_result` 链）已实现并验证通过。但 **tile mode**（`ARR_CFG[7]=1`）的 serializer→result FIFO 路径直接输出 raw int32 MAC 累加器，未经过任何后处理。
-
-**修复思路**：在 `npu_top.v` 的 serializer `tile_result_buf[tile_ser_idx]` → FIFO 之间插入与 scalar 路径相同的 bias/activation/quant 逻辑。需要 controller 在 tile mode 下也锁存 `lk_bias_en`/`lk_post_act_mode`/`lk_quant_cfg` 并下发给 `npu_top`。
-
-**影响**：当前 tile mode 的 RepOpt VGG 第一层仿真必须由 CPU 固件做后处理，无法声称 NPU 硬件支持 Conv+ReLU+quant 的端到端推理。
-
----
-
-### 2. FP16 未在 8x8/16x16/8x32 测试
-
-**现状**：4x4 FP16 tile GEMM 在 `tb_npu_tile_gemm.v + fp16_4x4x4` 已验证。8x8/16x16/8x32 的 INT8 已通过，但 FP16 未测试。
-
-**修复思路**：`gen_multi_shape_data.py` 和 `tb_npu_tile_gemm_wide.v` 有 `IS_FP16` 宏支持，只需生成 FP16 测试数据并运行。需注意 FP16 时 `vector_elem_bytes` 为 `2 * shape_lanes`（每 FP16 占 2 bytes，每 32-bit word 装 2 个 FP16）。
+| 原编号 | 问题 | 修复方式 | 验证 |
+|--------|------|----------|------|
+| #1 | 后处理未接入 tile 路径 | `npu_top.v:957-964` — tile_bias_buf → tile_with_bias → apply_scalar_activation → apply_scalar_quant 全线已接 | 8×32 bias PASS, K-split bias PASS, RepOpt VGG PASS |
+| #9 | 16×16 rows 6-11 数据偏移 | PPBuf lane 映射 + pipe 修复 | 16×16 全规格 256/256 PASS |
+| #10 | 8×32 two-pass 权重调度 | `npu_ctrl.v` two-pass FSM + `reconfig_pe_array.v` half_en | 8×32 256/256 PASS (含 bias) |
+| #13 | DATA_W=16 限制吞吐 | `soc_top.v` NPU_DATA_W 16→32, 4-lane INT8 SIMD | 全回归 19/20 PASS + SoC 2/2 PASS |
+| K-split | K=21/17/18/19 失败 | `seq1_len_bytes_w` 补 SIMD padding + K-split bias race 修复 | K=17/18/19/21/40 全部 PASS |
 
 ---
 
-### 3. WS 数据流无端到端 GEMM golden 验证
+## 二、设计决策（非 bug，架构选择）
 
-**现状**：`tb_npu_ctrl_dataflow_modes.v` 验证了 WS controller 分支可达 done，但从未运行过一个真实的 WS tile GEMM golden 测试。当前所有 4x4/8x8 golden 测试用的都是 OS 模式。
+### 1. 外部 PSUM surface 读写未接入 (原 #6)
 
-**修复思路**：生成 WS tile-pack 测试数据（weight 驻留格式不同于 OS 的 W_TILE），编写 WS 专用 check 逻辑。工作量中等。
+**现状**：K-split 时 PE accumulator 跨 k_tile 保持（`pe_acc_init_en=0` in tile mode）。32-bit acc 可容纳 K≤576 的 INT8 内积累（max partial sum ~ 576×127² ≈ 9.3M < 2³¹），无需外部 DRAM PSUM surface。
 
----
+**何时需要**：当 K > 2000 或支持 FP16/FP32 时，accumulator 可能溢出，需外部 PSUM。当前 INT8 模型（max K=576 for stage1_1_conv）不触发。
 
-### 4. 4x4 边界 tile 无端到端 golden
+### 2. Tile-mode Conv2D descriptor 未实现 (原 #8)
 
-**现状**：`tb_npu_ctrl_tile.v` 只检查了 controller 的 tile planner 输出（tile_m_base、tile_n_base、row/col mask），没有真正跑 GEMM 并验证结果。
+**现状**：`OP=CONV2D_IM2COL` 在 descriptor v1 中已定义（op=2），controller 的 descriptor FSM 骨架存在。当前验证走 GPU-style 固件调度（PicoRV32 MMIO direct write），不使用 descriptor 链。两者等效——descriptor 路径省 CPU 指令但不影响正确性。
 
-**修复思路**：用已有的 `gen_multi_shape_data.py` 生成 M=5,N=6 等边界 case，通过 `tb_npu_tile_gemm_wide.v` 验证 golden。工作量低。
+### 3. K-split 靠 PE accumulator 保持 (非 issue)
 
----
-
-### 5. Descriptor 模式未测试 8x8/16x16/8x32
-
-**现状**：`npu_ctrl.v` 的 descriptor shape 检查已放宽到 `<=4'd3`（接受 4x4/8x8/16x16/8x32），但没有对应的 descriptor 链式测试。`tb_npu_desc_two_layer.v` 和 `tb_npu_desc_ofm_chain.v` 仍使用 4x4 的 descriptor。
-
-**修复思路**：编写 8x8 双 descriptor 测试（类似于现有的 4x4 descriptor 测试）。CPU firmware 需能组装 descriptor v1 格式。
+**验证**：16×16 K=576（36 k_tiles）已通过 NPU 验证（RepOpt VGG L1, L1 raw[-21498] matches PyTorch）。跨 k_tile 的 partial sum 正确积累。
 
 ---
 
-### 6. 外部 PSUM surface 读写未接入
+## 三、功能缺失
 
-**现状**：K-split 的 tile 内部 PSUM 累计（PE accumulator 保持跨 k_tile）可用并通过验证（`tb_npu_tile_ksplit_gemm.v`）。但外部 DRAM 中的 PSUM surface 读写路径未实现——当前靠 PE accumulator 保持而非从外部恢复。
+### 4. CPU 固件未实现真实 512→10 Linear 分类器 (新)
 
-**修复思路**：controller 在 k_tile loop 中增加 PSUM read/write DMA 请求；DMA 增加 PSUM 读写目标；`psum_out_buf` 接入 `npu_top`。
+**现状**：v0.5.0 端到端测试中，分类标签由 Python 预写入 DRAM，固件仅转抄至 marker。PicoRV32 上未实现完整的 512 特征 × 10 类别矩阵乘 + argmax。
 
----
+**影响**：声称"硬件端到端分类"时不完整——Conv 推理链在硬件上，分类器在 Python 里。
 
-### 7. 时钟门控/DFS 未接入 PE
+**修复**：固件需实现循环结构（~200 条指令）完成 5120 MAC + 10 路 argmax。
 
-**现状**：`npu_power.v` 有 DFS 行为时钟和 row/col gating 输出，但在 `npu_top.v` 中端口悬空（`.row_clk_gated()`、`.col_clk_gated()`、`.npu_clk()`）。
+### 5. 全模型 9 层未验证 (新)
 
-**修复思路**：将 `npu_power` 的输出接入 PE 的 clock enable 或至少记录为功耗优化状态。
+**现状**：当前验证到 2 Conv 层 + MaxPool + classifier placeholder。完整 RepOpt VGG 需 9 Conv + 3 MaxPool + Flatten + Linear。
 
----
+**修复**：扩展现有 `gen_vgg_e2e.py` 至全部 9 层，逐层 IFM→OFM repack 在 Python 预计算或固件循环中实现。
 
-### 8. Tile-mode Conv2D descriptor 未实现
+### 6. MaxPool / Flatten 固件仅 demonstration (新)
 
-**现状**：`OP=CONV2D_IM2COL` 在 descriptor v1 中已定义（op=2），但 controller 仅支持 `OP=GEMM_TILEPACK`（op=1）。on-the-fly im2col 目前只能在 direct scalar 路径中使用（CTRL[8]）。
+**现状**：MaxPool 2×2 固件仅比较 4 个值，未做完整的 16×16→8×8 下采样。Flatten 未在固件中实现。
 
----
+### 7. FP16 未在 8x8/16x16/8x32 测试 (原 #2)
 
-## 二、已定位但未修复的 Bug
+**现状**：4×4 FP16 tile GEMM 已验证，8×8/16×16/8×32 FP16 未测。`gen_multi_shape_data.py` 有 IS_FP16 支持。
 
-### 9. 16x16 全尺寸 GEMM：rows 6-11 数据偏移 4 rows
+### 8. WS 数据流无端到端 GEMM golden (原 #3)
 
-**现象**：16x16 tile GEMM 中，rows 0-5 和 12-15 结果正确，rows 6-11 的 A 数据发生了 4-row 偏移（读取了 rows 10-15 的 A 值而非 rows 6-11）。
+**现状**：所有 golden 测试用 OS 模式。WS 模式 controller 可达 done，但未跑过真实 GEMM 验证。
 
-**定位**：PPBuf 的 lane 映射（verilog generate 展开）对不同 lane 值返回正确数据。A skew pipe 的数学延迟模型与 weight w_v chain 的延迟在分析中一致。疑似 **Icarus Verilog 12.0 的 generate elaborate 行为异常**，导致 LANE≥6 时的 pipe 连线错位。需要 GTKWave 波形或更换仿真工具（如 Verilator）确认。
+### 9. 4×4 边界 tile 无端到端 golden (原 #4)
 
-**文件**：`rtl/top/npu_top.v` → `gen_a_skew` generate 循环
+**现状**：边界 tile（M=5,N=6 等）通过 `gen_multi_shape_data.py` 生成可测，未跑。
 
----
+### 10. 时钟门控/DFS 未接入 PE (原 #7)
 
-### 10. 8x32 完整 GEMM 不可用
-
-**现象**：
-- aw_count 为 0（已修复 active_cols 宽度问题后变为 16，即 8 rows × 2 DMA burst/row）
-- Columns 0-15 计算了但值不正确（与 16x16 同源的 pipe 问题）
-- Columns 16-31 全部为 0（bottom half 从未收到 cols 16-31 的权重数据）
-
-**根因**：8x32 的 fold 架构要求 controller 支持**两轮权重调度**：
-1. 第一轮：feed W[k, 0:16) 到 16 物理列
-2. 第二轮：feed W[k, 16:32) 到同一 16 物理列
-
-当前 controller 只做一轮（32 列权重一次打包到 PPBuf，但 PPBuf 只输出 16 lane，cols 16-31 数据从未到达 PE 阵列）。
-
-**修复思路**：controller 需要将 8x32 tile 的 compute 分为两个 sub-pass。第一轮 top half 计算 cols 0-15，第二轮 bottom half 计算 cols 16-31。sub-pass 之间不 flush（PE accumulator 保持）。约需 50-100 行 controller 代码。
+**现状**：`npu_power.v` 输出悬空。
 
 ---
 
-### 11. A skew pipe 在 drain 期间清零的潜在风险
+## 优先级
 
-**现状**：`gen_a_skew` 中当 `tile_feed_step=1 && tile_vec_fire=0` 时，`pipe[0]` 被清零。这对 LANE≥2 理论上是安全的（0 在有效数据用完后才传播到输出），但 LANE=1 的已修复（改用寄存器）。目前未发现对 4x4/8x8 的可见影响，但在极端边界条件（大 K、深度 pipe）下可能成为隐患。
-
----
-
-## 三、设计局限性（非 bug，而是架构选择）
-
-### 12. PPBuf VEC_LANES=16 限制
-
-**现状**：`pingpong_buf` 的 `VEC_LANES = MAX_TILE_LANES = 16`。对 16x16 和 8x32 足够，但若未来想支持 32x32 等更大阵列，需要扩展。当前可通过 `MAX_TILE_LANES` 参数调整。
-
-### 13. DATA_W=16 限制顶层吞吐
-
-**现状**：PE 内部已实现 INT8 2/4-lane SIMD（T7.3/T7.4），但 `npu_top` 默认 `DATA_W=16`、`INT8_SIMD_LANES=1`。要解锁 0.5-1 TOPS，需要将 PPBuf/feeder/serializer 升级到 32-bit packed lane。
-
----
-
-## 优先级建议
-
-| 优先级 | 问题 | 理由 |
-|--------|------|------|
-| P0 | #1 后处理入 tile 路径 | 消除 tile mode 对 CPU 后处理的依赖 |
-| P0 | #4 4x4 边界 golden | 修复已知 gap，低工作量 |
-| P1 | #9 16x16 全尺寸 | 需要波形/换仿真器定位 |
-| P1 | #10 8x32 两轮权重 | 需要 controller 新功能 |
-| P2 | #2 FP16 for 8x8 | 验证即可，低工作量 |
-| P2 | #5 Descriptor for 8x8 | 验证 descriptor 链 |
-| P3 | #3 WS golden | WS 不是当前主线 |
-| P3 | #6 外部 PSUM surface | 需要多层调度配合 |
-| P3 | #7 时钟门控接入 | 低功耗评测 |
-| P3 | #8 Tile-mode Conv2D descriptor | 可与 #1 配合 |
+| P | 问题 | 理由 |
+|----|------|------|
+| P0 | #4 CPU Linear 分类器 | 完成"端到端分类"闭环 |
+| P0 | #5 全模型 9 层 chain | 完整推理管线 |
+| P1 | #6 MaxPool/Flatten 完整固件 | 层间数据流 |
+| P2 | #7 FP16 扩展测试 | 验证即可 |
+| P2 | #8 WS golden | 非当前主线 |
+| P2 | #9 边界 tile golden | 低工作量 |
+| P3 | #10 时钟门控 | 低功耗评测 |

@@ -146,6 +146,13 @@ def main():
     TILE_TABLE_BASE=0x3000
     dram=[0]*DRAM
 
+    QUANT_SHIFT=16
+    def quant_cfg_for(mults,start,count):
+        avg=sum(mults[start:start+count])/count
+        scale=int(avg*(1<<QUANT_SHIFT))
+        scale=max(-32768,min(32767,scale))
+        return (scale<<16)|(QUANT_SHIFT<<8)|3  # bit0=enable, bit1=round
+
     tile_table=[]; next_w=W_BASE; next_a=A_BASE; next_r=R_BASE; next_b=B_BASE
     current=x_q
 
@@ -155,15 +162,17 @@ def main():
         K=int(cl_p["registers"]["K_DIM"]); qw=sd[cl_p["weight_key"]]
         bias=get_bias(cl_p)
         n_tiles=(N+TC-1)//TC; m_tiles=(M+TR-1)//TR
+        mults=cl_p["cpu_requant_after_npu"]["multipliers"]
 
         # Store all W tiles and bias
-        w_addrs=[]
+        w_addrs=[]; qcfgs=[]
         for ni in range(n_tiles):
             nb_act=min(TC,N-ni*TC)
             _,wt=build_tile_matrices(current,qw,cl_p,0,ni*TC,TR,nb_act)
             wp=pack_tile_stream(wt,nb_act,K,kt)
             for i,w in enumerate(wp): dram[(next_w>>2)+i]=w
             w_addrs.append(next_w); next_w+=len(wp)*4+0x100
+            qcfgs.append(quant_cfg_for(mults,ni*TC,TC))
 
         bias_addr=next_b
         for i,b in enumerate(bias): dram[(next_b>>2)+i]=b&0xFFFFFFFF
@@ -177,10 +186,10 @@ def main():
                 at,_=build_tile_matrices(current,qw,cl_p,mi*TR,ni*TC,mb_act,nb_act)
                 ap=pack_tile_stream(at,mb_act,K,kt)
                 for i,w in enumerate(ap): dram[(next_a>>2)+i]=w
-                # 9-word entry: A,R,W,B,M,N,K,Rcount,ctrl
+                # 9-word: A,R,W,B,M,N,K,quant_cfg,ctrl
                 tile_table.append([next_a,next_r,w_addrs[ni],bias_addr,
-                                   mb_act,nb_act,K,mb_act*nb_act,0x80])
-                next_a+=len(ap)*4+0x100; next_r+=mb_act*nb_act*4+8
+                                   mb_act,nb_act,K,qcfgs[ni],0x80])
+                next_a+=len(ap)*4+0x100; next_r+=mb_act*nb_act*4
 
         # Full conv for next layer's ifm
         current=requant_qint8(
@@ -214,7 +223,7 @@ def main():
     dram[LABEL_ADDR>>2]=pred_class&0xFFFFFFFF
 
     FINAL_R_ADDR=tile_table[-1][1]
-    FINAL_R_COUNT=tile_table[-1][7]
+    FINAL_R_COUNT=tile_table[-1][4]*tile_table[-1][5]  # M*N
     expected_last=[dram[(FINAL_R_ADDR>>2)+i] for i in range(FINAL_R_COUNT)]
 
     write_hex(out/"dram_init.hex",dram)
@@ -239,7 +248,7 @@ def main():
     emit(*li_insns("a0",total_tiles))
 
     lbl("tile_loop")
-    # 9-word entry: +0=A +4=R +8=W +12=B +16=M +20=N +24=K +28=Rcount +32=ctrl
+    # 9-word: +0=A +4=R +8=W +12=B +16=M +20=N +24=K +28=quant_cfg +32=ctrl
     emit(LW("t1","s1",8)); emit(SW("t1","s0",32))   # W
     emit(LW("t1","s1",0)); emit(SW("t1","s0",36))   # A
     emit(LW("t1","s1",4)); emit(SW("t1","s0",40))   # R
@@ -247,9 +256,11 @@ def main():
     emit(LW("t1","s1",16)); emit(SW("t1","s0",16))  # M
     emit(LW("t1","s1",20)); emit(SW("t1","s0",20))  # N
     emit(LW("t1","s1",24)); emit(SW("t1","s0",24))  # K
+    emit(LW("t1","s1",12)); emit(SW("t1","s0",152)) # BIAS_ADDR (0x98)
+    emit(LW("t1","s1",28)); emit(SW("t1","s0",156)) # quant_cfg (0x9C)
     emit(LW("t1","s1",32)); emit(SW("t1","s0",48))  # ARR_CFG
     emit(ADDI("t1","zero",2)); emit(SW("t1","s0",60))
-    emit(ADDI("t1","zero",0x11)); emit(SW("t1","s0",0))
+    emit(ADDI("t1","zero",0x611)); emit(SW("t1","s0",0))  # CTRL: start+bias+ReLU
 
     lbl("poll")
     emit(LW("t1","s0",4)); emit(ANDI("t1","t1",2))
@@ -333,6 +344,6 @@ def main():
         f.write(f'`define VGG_DRAM_WORDS {DRAM}\n')
 
     print(f"\nGenerated: {out}, {fw} words")
-    print(f"  Firmware: {total_tiles}-tile scheduler + Linear512->10 + Argmax")
+    print(f"  Firmware: {total_tiles}-tile scheduler (hw bias+ReLU+requant) + Linear512->10 + Argmax")
 
 if __name__=="__main__": main()

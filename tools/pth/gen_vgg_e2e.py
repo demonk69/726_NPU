@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""RepOpt VGG e2e: 9-layer full-tile NPU chain + CPU classifier.
+"""RepOpt VGG e2e: 9-layer full-tile NPU chain + CPU avgpool + classifier.
 
-NPU: 1024 tiles (all M-tiles × N-tiles × 9 layers), table-driven scheduler.
-CPU Classifier: 512 features × 10 classes dot product + argmax in firmware.
-Testbench: compares predicted class vs PyTorch golden.
-Features from Python golden full forward pass (extract_real_features).
-Layer transitions (bias+ReLU+requant+MaxPool) handled by Python golden.
-Input: real CIFAR-10 image or arbitrary PNG/JPG.
+NPU: 1024 tiles (all M-tiles × N-tiles × 9 layers), hw bias+ReLU+requant.
+CPU: avgpool (stage4_1→512 features) + classifier (512×10 dot product) + argmax.
+Features flow: NPU R results → avgpool → FEAT_BASE → classifier → prediction.
+All layer transitions (bias+ReLU+requant+MaxPool) handled by NPU hw + Python golden.
 """
 import argparse, json, os, sys, warnings, torch
 from pathlib import Path
@@ -211,6 +209,14 @@ def main():
         for j,v in enumerate(e):
             dram[(TILE_TABLE_BASE>>2)+i*9+j]=v&0xFFFFFFFF
 
+    # Store stage4_1 config for avgpool firmware (after tile table)
+    S4_NT=32  # stage4_1 has 32 N-tiles × 1 M-tile
+    S4_INFO_ADDR=TILE_TABLE_BASE+total_tiles*9*4
+    S4_R_BASE=tile_table[total_tiles-S4_NT][1]
+    dram[S4_INFO_ADDR>>2]=S4_R_BASE&0xFFFFFFFF
+    dram[(S4_INFO_ADDR+4)>>2]=S4_NT
+    dram[(S4_INFO_ADDR+8)>>2]=FEAT_BASE&0xFFFFFFFF
+
     # Classifier data
     for f in range(N_FEAT):
         dram[(FEAT_BASE>>2)+f]=int(features[f].item())&0xFFFFFFFF
@@ -272,6 +278,58 @@ def main():
     i=len(ins); emit(0); ins.append(0); lbl("tile_done")
     patch_beqz(i,"tile_done","t1")
     joff=(lbls["tile_loop"]-len(ins)+1)*4; ins[-1]=J(joff)
+
+    # ── avgpool: stage4_1 R results → 512 features → FEAT_BASE ──
+    # Zero 512 accumulator words at FEAT_BASE
+    emit(*li_insns("s2",FEAT_BASE)); emit(*li_insns("a6",512))
+    lbl("Z")
+    emit(SW("zero","s2",0)); emit(ADDI("s2","s2",4)); emit(ADDI("a6","a6",-1))
+    emit(SUB("t1","a6","zero"))
+    i=len(ins); emit(0); ins.append(0); lbl("ZD")
+    patch_beqz(i,"ZD","t1")
+    joff=(lbls["Z"]-len(ins)+1)*4; ins[-1]=J(joff)
+
+    # Load stage4_1 config
+    emit(*li_insns("s7",S4_INFO_ADDR))
+    emit(LW("s3","s7",0))   # s3 = R base of first stage4_1 tile
+    emit(LW("s4","s7",4))   # s4 = N-tile count (32)
+    emit(*li_insns("s6",FEAT_BASE))  # s6 = feature accumulator base
+
+    lbl("AN")  # N-tile loop
+    emit(*li_insns("a5",256))  # 256 values per tile
+
+    lbl("AI")  # Index loop
+    emit(ADDI("t1","a5",-1)); emit(SLLI("t1","t1",2))
+    emit(ADD("t1","s3","t1")); emit(LW("t2","t1",0))  # t2 = R value
+    emit(LW("t3","s7",4)); emit(SUB("t3","t3","s4"))   # t3 = processed N-tiles
+    emit(SLLI("t3","t3",4))  # t3 = global_c_base
+    emit(ADDI("t4","a5",-1)); emit(ANDI("t4","t4",15))  # c_local = idx % 16
+    emit(ADD("t3","t3","t4")); emit(SLLI("t3","t3",2))
+    emit(ADD("t3","s6","t3")); emit(LW("t4","t3",0))  # t4 = current accumulator
+    emit(ADD("t4","t4","t2")); emit(SW("t4","t3",0))  # store back
+    emit(ADDI("a5","a5",-1))
+    emit(SUB("t1","a5","zero"))
+    i=len(ins); emit(0); ins.append(0); lbl("AID")
+    patch_beqz(i,"AID","t1")
+    joff=(lbls["AI"]-len(ins)+1)*4; ins[-1]=J(joff)
+
+    # Advance to next N-tile
+    emit(ADDI("s3","s3",1024))  # 256*4 bytes
+    emit(ADDI("s4","s4",-1))
+    emit(SUB("t1","s4","zero"))
+    i=len(ins); emit(0); ins.append(0); lbl("AND")
+    patch_beqz(i,"AND","t1")
+    joff=(lbls["AN"]-len(ins)+1)*4; ins[-1]=J(joff)
+
+    # Divide by 16 (spatial avg)
+    emit(*li_insns("s6",FEAT_BASE)); emit(*li_insns("a5",512))
+    lbl("DIV")
+    emit(LW("t1","s6",0)); emit(SRAI("t1","t1",4))
+    emit(SW("t1","s6",0)); emit(ADDI("s6","s6",4)); emit(ADDI("a5","a5",-1))
+    emit(SUB("t1","a5","zero"))
+    i=len(ins); emit(0); ins.append(0); lbl("DIVD")
+    patch_beqz(i,"DIVD","t1")
+    joff=(lbls["DIV"]-len(ins)+1)*4; ins[-1]=J(joff)
 
     # ── Linear Classifier: 10-class dot product (proven pattern) ──
     emit(*li_insns("s1",FEAT_BASE))

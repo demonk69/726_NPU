@@ -25,7 +25,7 @@ from run_repopt_vgg_host import (
     load_cifar_sample, load_image_input,
 )
 
-SIMD=4; TR=16; TC=16; PPB=64; DRAM=512*1024
+SIMD=4; TR=16; TC=16; PPB=64; DRAM=2*1024*1024
 NPU=0x02000000; PASS_MARKER=0xAA
 
 def SRAI(rd,rs1,sh): return i_type((0x20<<5)|(sh&0x1F),reg(rs1),0x5,reg(rd),0x13)

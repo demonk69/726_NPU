@@ -409,7 +409,7 @@ always @(posedge clk) begin
         lk_shape  <= cfg_shape_in;
         lk_arr_cfg <= arr_cfg;
         lk_a_from_prev_ofm <= 1'b0;
-        lk_conv_im2col <= cfg_conv_im2col;
+        lk_conv_im2col <= cfg_conv_im2col && !arr_cfg[7];
         lk_bias_en <= cfg_bias_en;
         lk_post_act_mode <= cfg_post_act_mode;
         lk_quant_cfg <= (cfg_mode == 2'b00) ? quant_cfg
@@ -880,7 +880,7 @@ always @(posedge clk) begin
                     dma_a_addr  <= a_addr;
                     dma_a_len   <= cfg_start_tile_len_a;
                     dma_a_ofm_mode <= 1'b0;
-                    dma_a_im2col_mode <= cfg_conv_im2col;
+                    dma_a_im2col_mode <= cfg_conv_im2col && !arr_cfg[7];
                     dma_a_ofm_stride <= 32'd0;
                     dma_a_ofm_m_base <= 32'd0;
                     dma_a_ofm_k_base <= 32'd0;
@@ -964,7 +964,7 @@ always @(posedge clk) begin
                 dma_a_addr   <= lk_a_addr;
                 dma_a_len    <= tile_len_a;
                 dma_a_ofm_mode <= lk_a_from_prev_ofm && tile_mode;
-                dma_a_im2col_mode <= lk_conv_im2col;
+                dma_a_im2col_mode <= 1'b0;
                 dma_a_ofm_stride <= lk_k_dim;
                 dma_a_ofm_m_base <= tile_m_base;
                 dma_a_ofm_k_base <= tile_k_base;
@@ -1036,11 +1036,11 @@ always @(posedge clk) begin
                     dma_w_addr  <= pfetch_w_addr;
                     dma_w_len   <= seq1_len_bytes_w;
                     dma_a_addr  <= (lk_a_from_prev_ofm && tile_mode) ? lk_a_addr :
-                                   (lk_conv_im2col) ? lk_a_addr :
+                                   (lk_conv_im2col && !tile_mode) ? lk_a_addr :
                                    pfetch_a_addr;
                     dma_a_len   <= seq1_len_bytes_a;
                     dma_a_ofm_mode <= lk_a_from_prev_ofm && tile_mode;
-                                dma_a_im2col_mode <= lk_conv_im2col && !lk_a_from_prev_ofm;
+                    dma_a_im2col_mode <= lk_conv_im2col && !tile_mode && !lk_a_from_prev_ofm;
                     dma_a_ofm_stride <= lk_k_dim;
                     dma_a_ofm_m_base <= seq1_m_base;
                     dma_a_ofm_k_base <= seq1_k_base;
@@ -1133,11 +1133,11 @@ always @(posedge clk) begin
                                 dma_w_addr  <= pfetch_w_addr;
                                 dma_w_len   <= seq1_len_bytes_w;
                                 dma_a_addr  <= (lk_a_from_prev_ofm && tile_mode) ? lk_a_addr :
-                                               (lk_conv_im2col) ? lk_a_addr :
+                                               (lk_conv_im2col && !tile_mode) ? lk_a_addr :
                                                pfetch_a_addr;
                                 dma_a_len   <= seq1_len_bytes_a;
                                 dma_a_ofm_mode <= lk_a_from_prev_ofm && tile_mode;
-                    dma_a_im2col_mode <= lk_conv_im2col && !lk_a_from_prev_ofm;
+                                dma_a_im2col_mode <= lk_conv_im2col && !tile_mode && !lk_a_from_prev_ofm;
                                 dma_a_ofm_stride <= lk_k_dim;
                                 dma_a_ofm_m_base <= seq1_m_base;
                                 dma_a_ofm_k_base <= seq1_k_base;

@@ -15,7 +15,7 @@ module tb_soc_vgg_e2e;
     soc_top #(
         .MEM_WORDS(1024), .DRAM_WORDS(DRAM_W),
         .NPU_ROWS(4), .NPU_COLS(4), .NPU_DATA_W(32), .NPU_ACC_W(32),
-        .NPU_PPB_DEPTH(64), .NPU_PPB_THRESH(16)
+        .NPU_PPB_DEPTH(256), .NPU_PPB_THRESH(16)
     ) u_soc (.clk(clk), .rst_n(rst_n));
 
     initial clk=0; always #(CLK_T/2) clk=~clk;

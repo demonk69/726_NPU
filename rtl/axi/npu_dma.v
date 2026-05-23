@@ -784,7 +784,7 @@ always @(posedge clk) begin
                     load_state <= L_A_IM2COL_DONE;
                 end else if (im2col_is_padding || !im2col_in_bounds) begin
                     if (!im2col_lane_last || !a_ppb_full) begin
-                        if (im2col_k_pos < 16'd5) $display("[DMA_IM2COL] pad k=%0d", im2col_k_pos);
+                        if (im2col_k_pos < 16'd20) $display("[DMA_IM2COL] pad k=%0d", im2col_k_pos);
                         if (im2col_lane_last) begin
                             a_im2col_wr_en <= 1'b1;
                             a_im2col_wr_data <= pack_im2col_elem(im2col_pack_word,
@@ -805,7 +805,7 @@ always @(posedge clk) begin
                             load_state <= L_A_IM2COL_DONE;
                     end
                 end else if (!m_axi_arvalid && !load_r_active && (!im2col_lane_last || !a_ppb_full)) begin
-                    if (im2col_k_pos < 16'd5) $display("[DMA_IM2COL] read k=%0d addr=0x%08h", im2col_k_pos, im2col_aligned_addr);
+                    if (im2col_k_pos < 16'd20) $display("[DMA_IM2COL] read k=%0d addr=0x%08h", im2col_k_pos, im2col_aligned_addr);
                     load_addr_cnt <= im2col_aligned_addr;
                     load_arlen    <= 8'd0;
                     m_axi_arvalid <= 1'b1;
@@ -815,9 +815,14 @@ always @(posedge clk) begin
                     m_axi_rready  <= 1'b1;
                 end else if (load_r_active) begin
                     m_axi_rready <= 1'b1;
+                    if (im2col_k_pos == 16'd4) begin
+                        if (!m_axi_rvalid) $display("[DMA_IM2COL] WAIT RVALID k=4 cycle=%0t", $time);
+                        else if (a_ppb_full) $display("[DMA_IM2COL] PPB FULL k=4 cycle=%0t", $time);
+                    end
                     if (m_axi_rvalid && m_axi_rready && (!im2col_lane_last || !a_ppb_full)) begin
                         load_r_active <= 1'b0;
                         m_axi_rready  <= 1'b0;
+                        if (im2col_k_pos < 16'd20) $display("[DMA_IM2COL] rcv k=%0d", im2col_k_pos);
                         if (im2col_lane_last) begin
                             a_im2col_wr_en <= 1'b1;
                             a_im2col_wr_data <= pack_im2col_elem(im2col_pack_word,

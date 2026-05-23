@@ -777,10 +777,14 @@ always @(posedge clk) begin
             // Cin/KH/KW, reads IFM[b,cin,ih,iw] when in bounds, emits zero for
             // padding, and packs the generated A row into 32-bit PPBuf words.
             L_A_IM2COL: begin
+                if (im2col_k_pos == 16'd0) $display("[DMA_IM2COL] START k_len=%0d total=%0d ppb_full=%0d",
+                    im2col_k_len_latch, im2col_total_lanes, a_ppb_full);
                 if (im2col_k_pos >= im2col_total_lanes) begin
+                    $display("[DMA_IM2COL] DONE at cycle %0t, k_pos=%0d", $time, im2col_k_pos);
                     load_state <= L_A_IM2COL_DONE;
                 end else if (im2col_is_padding || !im2col_in_bounds) begin
                     if (!im2col_lane_last || !a_ppb_full) begin
+                        if (im2col_k_pos < 16'd5) $display("[DMA_IM2COL] pad k=%0d", im2col_k_pos);
                         if (im2col_lane_last) begin
                             a_im2col_wr_en <= 1'b1;
                             a_im2col_wr_data <= pack_im2col_elem(im2col_pack_word,
@@ -801,6 +805,7 @@ always @(posedge clk) begin
                             load_state <= L_A_IM2COL_DONE;
                     end
                 end else if (!m_axi_arvalid && !load_r_active && (!im2col_lane_last || !a_ppb_full)) begin
+                    if (im2col_k_pos < 16'd5) $display("[DMA_IM2COL] read k=%0d addr=0x%08h", im2col_k_pos, im2col_aligned_addr);
                     load_addr_cnt <= im2col_aligned_addr;
                     load_arlen    <= 8'd0;
                     m_axi_arvalid <= 1'b1;

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Run all VGG NPU tests
-# Usage: ./run_all.sh [test_name]
-#   no args: run standard e2e test
-#   im2col27: im2col K=27 test
-#   im2col576: im2col K=576 test
-#   regress: full pipeline regression
-#   all: run all tests
+# Usage:
+#   ./run_all.sh standard [img_idx]     # CIFAR-10 image index (default 0)
+#   ./run_all.sh image <file.jpg>       # arbitrary image
+#   ./run_all.sh im2col27               # im2col K=27 test
+#   ./run_all.sh im2col576              # im2col K=576 test
+#   ./run_all.sh regress                # full pipeline regression
+#   ./run_all.sh all                    # run all tests
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -15,7 +16,12 @@ WARN_FLAGS="-Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-UNUSED -Wno-UNDRIVEN -Wno-UNOP
 
 test_standard() {
     echo "=== Standard E2E (1024 tiles, full pipeline) ==="
-    "$ROOT/run_vgg_e2e.sh" "${1:-0}"
+    "$ROOT/run_vgg_e2e.sh" "$@"
+}
+
+test_image() {
+    echo "=== Classify: ${1:?missing image path} ==="
+    "$ROOT/run_vgg_e2e.sh" --image "$1"
 }
 
 test_im2col27() {
@@ -37,7 +43,8 @@ test_regress() {
 }
 
 case "${1:-standard}" in
-    standard) test_standard "$2" ;;
+    standard) shift; test_standard "$@" ;;
+    image)    shift; test_image "$@" ;;
     im2col27) test_im2col27 ;;
     im2col576) test_im2col576 ;;
     regress) test_regress ;;
@@ -48,7 +55,7 @@ case "${1:-standard}" in
         test_regress
         ;;
     *)
-        echo "Usage: $0 [standard|im2col27|im2col576|regress|all]"
+        echo "Usage: $0 [standard [idx] | image <file> | im2col27 | im2col576 | regress | all]"
         exit 1
         ;;
 esac

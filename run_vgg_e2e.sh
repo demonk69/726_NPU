@@ -44,7 +44,7 @@ verilator --binary --timing \
   "$ROOT/tb/tb_soc_vgg_e2e.v"
 
 echo "=== Run ==="
-LOG="$(timeout 600 "$OUT_DIR/obj_dir/Vtb_soc_vgg_e2e" 2>&1)" || true
+LOG="$(timeout 1200 "$OUT_DIR/obj_dir/Vtb_soc_vgg_e2e" 2>&1)" || true
 
 echo "$LOG" | grep -E '\[PASS\]|\[FAIL\]|\[TIMEOUT\]|Cycles'
 

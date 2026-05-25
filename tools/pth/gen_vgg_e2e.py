@@ -22,6 +22,8 @@ from run_repopt_vgg_host import (
 )
 
 SIMD=4; TR=16; TC=16; PPB=64; DRAM=2*1024*1024; NPU=0x02000000
+TILE_ENTRY_WORDS = 10
+TILE_CTRL = 0x611  # start | INT8 | OS | bias | ReLU
 QUANT_SHIFT=16
 kt=(PPB*4)//max(TR,TC)
 
@@ -132,8 +134,9 @@ def main():
                 at, _ = build_tile_matrices(current, qw, cl_p, mi * TR, ni * TC, mb_act, nb_act)
                 ap = pack_tile_stream(at, mb_act, K, kt)
                 for i, w in enumerate(ap): dram[(next_a >> 2) + i] = w
-                tile_table.append([next_a, next_r, w_addrs[ni], bias_addr,
-                                   mb_act, nb_act, K, qcfgs[ni], 0x80])
+                tile_bias_addr = bias_addr + ni * TC * 4
+                tile_table.append([next_a, next_r, w_addrs[ni], tile_bias_addr,
+                                   mb_act, nb_act, K, qcfgs[ni], 0x80, TILE_CTRL])
                 next_a += len(ap) * 4 + 0x100; next_r += mb_act * nb_act * 4
 
         current = requant_qint8(
@@ -150,11 +153,11 @@ def main():
     total_tiles = len(tile_table)
     for i, e in enumerate(tile_table):
         for j, v in enumerate(e):
-            dram[(TILE_TABLE_BASE >> 2) + i * 9 + j] = v & 0xFFFFFFFF
+            dram[(TILE_TABLE_BASE >> 2) + i * TILE_ENTRY_WORDS + j] = v & 0xFFFFFFFF
 
     # Stage4_1 config for avgpool firmware
     S4_NT = 32
-    S4_INFO_ADDR = TILE_TABLE_BASE + total_tiles * 9 * 4
+    S4_INFO_ADDR = TILE_TABLE_BASE + total_tiles * TILE_ENTRY_WORDS * 4
     S4_R_BASE = tile_table[total_tiles - S4_NT][1]
     dram[S4_INFO_ADDR >> 2] = S4_R_BASE & 0xFFFFFFFF
     dram[(S4_INFO_ADDR + 4) >> 2] = S4_NT

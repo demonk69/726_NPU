@@ -8,6 +8,8 @@ module tb_soc_vgg_e2e;
     localparam DRAM_W = `VGG_DRAM_WORDS;
     localparam FW_LAST = `VGG_FW_WORDS - 1;
     localparam MARKER_OK = `VGG_LABEL + 32'h100;
+    localparam MARKER_CLASS_MIN = 32'h100;
+    localparam MARKER_CLASS_MAX = 32'h109;
 
     reg clk, rst_n, pass_seen, fail_seen;
     integer cyc, i;
@@ -33,6 +35,9 @@ module tb_soc_vgg_e2e;
             cyc<=cyc+1;
             if (u_soc.u_dram.mem[`VGG_MARKER_ADDR>>2] == MARKER_OK) pass_seen<=1;
             if (u_soc.u_dram.mem[`VGG_MARKER_ADDR>>2] == 32'h000000FF) fail_seen<=1;
+            if (u_soc.u_dram.mem[`VGG_MARKER_ADDR>>2] >= MARKER_CLASS_MIN &&
+                u_soc.u_dram.mem[`VGG_MARKER_ADDR>>2] <= MARKER_CLASS_MAX &&
+                u_soc.u_dram.mem[`VGG_MARKER_ADDR>>2] != MARKER_OK) fail_seen<=1;
         end
     end
 
@@ -52,7 +57,18 @@ module tb_soc_vgg_e2e;
                                 $display("  L1 R[%0d]=%0d", i, $signed(u_soc.u_dram.mem[(`VGG_R_ADDR>>2)+i]));
                         $finish;
                     end
-                    if (fail_seen) begin $display("[FAIL] Firmware failure"); $finish; end
+                    if (fail_seen) begin
+                        if (u_soc.u_dram.mem[`VGG_MARKER_ADDR>>2] == 32'h000000FF) begin
+                            $display("[FAIL] Firmware failure");
+                        end else begin
+                            $display("[FAIL] Classification mismatch");
+                            $display("  Predicted class: %0d (expected: %0d)",
+                                     u_soc.u_dram.mem[`VGG_MARKER_ADDR>>2] - 32'h100,
+                                     `VGG_LABEL);
+                        end
+                        $display("  Cycles: %0d", cyc);
+                        $finish;
+                    end
                     #(CLK_T);
                 end
             end

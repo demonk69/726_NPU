@@ -28,4 +28,9 @@ __pycache__/
 
 # Local model/checkpoint inputs and generated conversion probes
 /.06_RepOpt_VGG/
+/RepOpt/
 /sim/pth_*/
+/sim/vgg_e2e/
+
+# Generated CIFAR-10 sample images
+/pic/test_cifar10_*.jpg

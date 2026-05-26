@@ -79,8 +79,9 @@ module tb_soc_vgg_closed_loop;
                 forever begin
                     if (pass_seen) begin
                         $display("[PASS] Runtime closed-loop VGG classification PASSED");
-                        $display("  Predicted class: %0d (expected: %0d, exact-python: %0d)",
-                                 `VGG_CLOSED_LABEL, `VGG_CLOSED_LABEL, `VGG_CLOSED_EXACT_LABEL);
+                        $display("  Predicted class: %0d (expected exact-python: %0d, fixed-runtime: %0d)",
+                                 u_soc.u_dram.mem[`VGG_CLOSED_MARKER_ADDR >> 2] - 32'h100,
+                                 `VGG_CLOSED_EXACT_LABEL, `VGG_CLOSED_FIXED_LABEL);
                         $display("  Cycles: %0d", cyc);
                         $fflush();
                         $finish;
@@ -90,9 +91,9 @@ module tb_soc_vgg_closed_loop;
                             $display("[FAIL] Runtime closed-loop firmware failure");
                         end else begin
                             $display("[FAIL] Runtime closed-loop classification mismatch");
-                            $display("  Predicted class: %0d (expected: %0d, exact-python: %0d)",
+                            $display("  Predicted class: %0d (expected exact-python: %0d, fixed-runtime: %0d)",
                                      u_soc.u_dram.mem[`VGG_CLOSED_MARKER_ADDR >> 2] - 32'h100,
-                                     `VGG_CLOSED_LABEL, `VGG_CLOSED_EXACT_LABEL);
+                                     `VGG_CLOSED_EXACT_LABEL, `VGG_CLOSED_FIXED_LABEL);
                         end
                         $display("  Cycles: %0d", cyc);
                         $fflush();

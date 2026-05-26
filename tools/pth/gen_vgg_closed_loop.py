@@ -54,11 +54,10 @@ REG_CFG_SHAPE = 0x3C
 REG_BIAS_ADDR = 0x98
 REG_QUANT_CFG = 0x9C
 
-CTRL_QUANT_TILE = 0x611  # start | INT8 | OS | bias | ReLU + quant
+CTRL_BIAS_TILE = 0x211  # start | INT8 | OS | bias, raw INT32 result
 ARR_TILE = 0x080
 CFG_SHAPE_16X16 = 0x2
 QUANT_DISABLED = 0x00010000
-QUANT_SHIFT = 16
 
 ACT_A = 0x00010000
 ACT_B = 0x00030000
@@ -90,13 +89,6 @@ def pack4(values):
     for lane, value in enumerate(values):
         word |= (int(value) & 0xFF) << (lane * 8)
     return word & 0xFFFFFFFF
-
-
-def quant_cfg_for(multipliers, start, count):
-    avg = sum(multipliers[start:start + count]) / count
-    scale = int(round(float(avg) * (1 << QUANT_SHIFT)))
-    scale = max(-32768, min(32767, scale))
-    return ((scale & 0xFFFF) << 16) | (QUANT_SHIFT << 8) | 3
 
 
 def write_hex(path, words):
@@ -167,7 +159,7 @@ def fixed_requant(acc, multipliers):
         dtype=torch.int64,
         device=acc.device,
     ).view(1, -1, 1, 1)
-    prod = acc.to(torch.int64) * qmult
+    prod = torch.clamp(acc.to(torch.int64), min=0) * qmult
     q = (prod + REQUANT_ROUND) >> REQUANT_SHIFT
     return torch.clamp(q, 0, 127).to(torch.float64)
 
@@ -403,7 +395,7 @@ def emit_run_conv_layer(a):
     a.emit(LW("s3", "s1", 4))     # ofm base
     a.emit(LW("s4", "s1", 8))     # w base
     a.emit(LW("s5", "s1", 12))    # bias base
-    a.emit(LW("s6", "s1", 16))    # quant config base
+    a.emit(LW("s6", "s1", 16))    # per-channel requant multiplier base
     a.emit(LW("s7", "s1", 20))    # M
     a.emit(LW("s8", "s1", 24))    # N
     a.emit(LW("s9", "s1", 28))    # K
@@ -469,14 +461,10 @@ def emit_run_conv_layer(a):
     a.emit(SLLI("t1", "s11", 2))
     a.emit(ADD("t1", "s5", "t1"))
     emit_write_reg_reg(a, REG_BIAS_ADDR, "t1")
-    a.emit(SRLI("t1", "s11", 4))
-    a.emit(SLLI("t1", "t1", 2))
-    a.emit(ADD("t1", "s6", "t1"))
-    a.emit(LW("t1", "t1", 0))
-    emit_write_reg_reg(a, REG_QUANT_CFG, "t1")
+    emit_write_reg_imm(a, REG_QUANT_CFG, QUANT_DISABLED)
     emit_write_reg_imm(a, REG_ARR_CFG, ARR_TILE)
     emit_write_reg_imm(a, REG_CFG_SHAPE, CFG_SHAPE_16X16)
-    emit_write_reg_imm(a, REG_CTRL, CTRL_QUANT_TILE)
+    emit_write_reg_imm(a, REG_CTRL, CTRL_BIAS_TILE)
 
     a.label("poll_npu")
     a.emit(LW("t1", "s0", REG_STATUS))
@@ -495,6 +483,10 @@ def emit_run_conv_layer(a):
     a.li("a3", R_WORK)
     a.emit(SLLI("t1", "a2", 2))
     a.emit(ADD("a3", "a3", "t1"))
+    a.emit(ADD("t1", "s11", "a2"))
+    a.emit(SLLI("t1", "t1", 2))
+    a.emit(ADD("t1", "s6", "t1"))
+    a.emit(LW("a7", "t1", 0))      # Q24 multiplier for this output channel
     a.emit(LW("t3", "s1", 56))      # ow mask
     a.emit(ADD("a4", "s11", "a2"))
     a.emit(MUL("a4", "a4", "gp"))
@@ -516,7 +508,8 @@ def emit_run_conv_layer(a):
     a.emit(ADD("t0", "t3", "zero")) # remaining values before padded row gap
     a.li("a5", TR)
     a.label("post_row_loop")
-    a.emit(LBU("t1", "a3", 0))
+    a.emit(LW("t1", "a3", 0))
+    emit_requant_nonnegative(a)
     a.emit(SB("t1", "a4", 0))
     a.emit(ADDI("a3", "a3", TC * 4))
     a.emit(ADDI("a4", "a4", 1))
@@ -820,10 +813,10 @@ def generate(args):
 
         qcfg_base = align(next_static, 0x100)
         multipliers = layer["cpu_requant_after_npu"]["multipliers"]
-        for nt in range(n_tiles):
-            qcfg = quant_cfg_for(multipliers, nt * TC, TC)
-            store_word(dram, qcfg_base + nt * 4, qcfg)
-        next_static = qcfg_base + n_tiles * 4
+        for i, multiplier in enumerate(multipliers):
+            qmult = int(round(float(multiplier) * (1 << REQUANT_SHIFT)))
+            store_word(dram, qcfg_base + i * 4, qmult)
+        next_static = qcfg_base + n_dim * 4
 
         conv_layers.append({
             "layer": merged,
@@ -892,7 +885,7 @@ def generate(args):
             store_word(dram, desc_ptr + i * 4, value)
         desc_ptr += align(len(fields) * 4, 0x40)
 
-    fw = emit_firmware(conv_desc_addrs, pool_desc_addrs, cls_w_base, cls_b_base, fixed_pred)
+    fw = emit_firmware(conv_desc_addrs, pool_desc_addrs, cls_w_base, cls_b_base, exact_pred)
     if len(fw) > MEM_WORDS:
         raise RuntimeError(f"firmware too large: {len(fw)} words > MEM_WORDS={MEM_WORDS}")
 
@@ -916,8 +909,9 @@ def generate(args):
         f.write(f'`define VGG_CLOSED_TIMEOUT_CYCLES {args.timeout_cycles}\n')
         f.write(f"`define VGG_CLOSED_MARKER_ADDR 32'h{MARKER_ADDR:08x}\n")
         f.write(f"`define VGG_CLOSED_FEAT_BASE 32'h{FEAT_BASE:08x}\n")
-        f.write(f'`define VGG_CLOSED_LABEL {fixed_pred}\n')
+        f.write(f'`define VGG_CLOSED_LABEL {exact_pred}\n')
         f.write(f'`define VGG_CLOSED_EXACT_LABEL {exact_pred}\n')
+        f.write(f'`define VGG_CLOSED_FIXED_LABEL {fixed_pred}\n')
 
     meta = {
         "schema": "vgg_closed_loop_v1",
@@ -930,7 +924,7 @@ def generate(args):
         "firmware_words": len(fw),
         "max_addr": f"0x{max_addr:08x}",
         "dram_words": used_dram_words,
-        "note": "Python does not pre-generate Conv A tiles; firmware packs A_WORK at runtime from dense activation buffers.",
+        "note": "Python does not pre-generate Conv A tiles; firmware packs A_WORK at runtime from dense activation buffers. fixed_runtime_pred models the CPU Q24 per-channel requant path used by firmware; exact_python_pred is the validation target.",
     }
     with open(out / "metadata.json", "w", encoding="utf-8", newline="\n") as f:
         json.dump(meta, f, indent=2)

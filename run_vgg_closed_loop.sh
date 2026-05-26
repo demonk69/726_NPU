@@ -54,6 +54,12 @@ set -e
 
 grep -E '\[PASS\]|\[FAIL\]|\[TIMEOUT\]|Cycles' "$LOG_FILE" || true
 
+if grep -qE '\[FAIL\]|\[TIMEOUT\]' "$LOG_FILE"; then
+    RUN_RC=1
+elif ! grep -q '\[PASS\]' "$LOG_FILE"; then
+    RUN_RC=1
+fi
+
 PRED=$(grep -oP 'Predicted class: \K\d+' "$LOG_FILE" || true)
 if [[ -n "$PRED" ]]; then
     echo "  Predicted: ${CLASSES[$PRED]} (class $PRED)"

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Run all VGG NPU tests
+# Run VGG NPU tests
 # Usage:
 #   ./run_all.sh standard [img_idx]     # CIFAR-10 image index (default 0)
 #   ./run_all.sh image <file.jpg>       # arbitrary image
+#   ./run_all.sh closed_loop [args...]  # runtime closed-loop path; forwards args
 #   ./run_all.sh im2col27               # im2col K=27 test
 #   ./run_all.sh im2col576              # im2col K=576 test
 #   ./run_all.sh regress                # full pipeline regression
-#   ./run_all.sh all                    # run all tests
+#   ./run_all.sh all                    # run fast regression set
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -22,6 +23,11 @@ test_standard() {
 test_image() {
     echo "=== Classify: ${1:?missing image path} ==="
     "$ROOT/run_vgg_e2e.sh" --image "$1"
+}
+
+test_closed_loop() {
+    echo "=== Runtime Closed Loop VGG ==="
+    "$ROOT/run_vgg_closed_loop.sh" "$@"
 }
 
 test_im2col27() {
@@ -45,6 +51,7 @@ test_regress() {
 case "${1:-standard}" in
     standard) shift; test_standard "$@" ;;
     image)    shift; test_image "$@" ;;
+    closed_loop|closed-loop|full) shift; test_closed_loop "$@" ;;
     im2col27) test_im2col27 ;;
     im2col576) test_im2col576 ;;
     regress) test_regress ;;
@@ -55,7 +62,7 @@ case "${1:-standard}" in
         test_regress
         ;;
     *)
-        echo "Usage: $0 [standard [idx] | image <file> | im2col27 | im2col576 | regress | all]"
+        echo "Usage: $0 [standard [idx] | image <file> | closed_loop [args...] | im2col27 | im2col576 | regress | all]"
         exit 1
         ;;
 esac

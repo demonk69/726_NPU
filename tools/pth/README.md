@@ -1,138 +1,94 @@
-# PTH Conversion Tools
+# PyTorch/VGG Tooling
 
-Host-side utilities for turning constrained PyTorch checkpoints into NPU-facing assets and CPU-scheduled inference plans.
+Updated: 2026-05-26
 
-## Dependency
+This directory contains host-side tooling for RepOpt VGG-like CIFAR-10 inference tests.
 
-The converter runs on the host PC, not on the reference CPU. It needs PyTorch only to read `.pth` files:
+Current maintained flows are Linux + Verilator. Older PowerShell/Icarus examples in archived documents are not current guidance.
 
-```powershell
-python -m pip install torch==2.5.1+cpu --index-url https://download.pytorch.org/whl/cpu
+## Maintained Generators
+
+| File | Purpose |
+|---|---|
+| `gen_vgg_e2e.py` | Fast VGG e2e generator. Pre-generates all Conv A tile streams for the 9-Conv model. |
+| `gen_vgg_closed_loop.py` | Runtime closed-loop generator. Generates static model assets and firmware that packs A tiles at runtime. |
+| `run_repopt_vgg_host.py` | Host reference implementation shared by both VGG generators. |
+
+## Fast E2E Flow
+
+Entry points:
+
+```bash
+./run_vgg_e2e.sh
+./run_all.sh standard 0
+./run_all.sh image ./pic/test_cifar10_2.jpg
 ```
 
-PyTorch `2.11.0+cpu` failed to import in the current Windows Anaconda environment with a `c10.dll` initialization error; `2.5.1+cpu` imported successfully.
+Generator behavior:
 
-## RepOpt VGG INT8 Probe
+- Loads the checkpoint and model plan.
+- Computes all intermediate Conv A tiles in Python.
+- Emits a DRAM init image containing all pre-packed tile streams.
+- Emits firmware and Verilog parameter headers.
 
-```powershell
-python tools\pth\pth_to_npu_assets.py `
-  --pth .06_RepOpt_VGG\06_RepOpt_VGG\runs\cifar10_repopt_vgglike_qat\qat_int8_quantized.pth `
-  --spec tools\pth\examples\repopt_vgg_int8_spec.json `
-  --out-dir sim\pth_repopt_probe `
-  --mode OS
+Use this flow for quick baseline regression.
+
+## Runtime Closed-Loop Flow
+
+Entry points:
+
+```bash
+./run_vgg_closed_loop.sh --image ./pic/test_cifar10_2.jpg
+./run_all.sh closed_loop --image ./pic/test_cifar10_2.jpg
 ```
 
-The converter emits:
+Generator behavior:
 
-```text
-model_plan.json              # CPU/NPU layer plan
-checkpoint_inventory.json    # checkpoint key/type/shape inventory
-summary.txt                  # concise conversion summary
-assets/*_w_col.hex           # NPU W_col INT8 weights
-assets/*_bias_int32.hex      # NPU accumulator-unit bias
-assets/*_linear_w_int8.hex   # CPU Linear INT8 weights, when present
-assets/*_linear_bias_int32.hex # CPU Linear accumulator-unit bias, when present
-```
+- Loads the checkpoint and model plan.
+- Emits static model assets: weights, bias, per-channel Q24 multipliers, classifier params, descriptors.
+- Emits the selected input image into the initial DRAM image.
+- Emits firmware that performs runtime A-tile packing, NPU scheduling, per-channel requant/scatter, maxpool, avgpool, classifier, and argmax.
 
-Current result for `qat_int8_quantized.pth`:
+Use this flow for deployment-oriented validation.
 
-```text
-layers      : 15
-conv layers : 9
-warnings    : 11
-```
+## Host Reference
 
-All 9 Conv layers are convertible to NPU direct Conv2D assets, but their exact PyTorch INT8 requantization is per output channel. The current NPU `QUANT_CFG` is one scale/shift per layer, so V1 must run:
+`run_repopt_vgg_host.py` interprets the model split used by the generators:
 
-```text
-NPU: Conv2D + bias + ReLU
-CPU: per-channel requant + NCHW repack + pooling + classifier
-```
+- NPU role: Conv2D int8*int8 accumulation with bias.
+- CPU role: per-channel requant, activation packing/scatter, maxpool, avgpool, flatten, linear classifier.
 
-## CPU Runtime Descriptor Generation
+The reference intentionally avoids relying on PyTorch quantized Conv kernels for the core check. It is used to create exact and fixed-runtime expected labels.
 
-After `model_plan.json` exists:
+## Inputs
 
-```powershell
-python tools\pth\gen_cpu_runtime.py `
-  --plan sim\pth_repopt_probe\model_plan.json `
-  --out-dir sim\pth_repopt_probe\cpu_runtime
-```
+Default model/data paths:
 
-Generated files:
+| Input | Default path |
+|---|---|
+| Checkpoint | `RepOpt/06_RepOpt_VGG/runs/cifar10_repopt_vgglike_qat/qat_int8_quantized.pth` |
+| Model plan | `sim/pth_repopt_probe/model_plan.json` |
+| Layer spec | `tools/pth/examples/repopt_vgg_int8_spec.json` |
+| CIFAR-10 data root | `RepOpt/06_RepOpt_VGG/data` |
 
-```text
-model_plan_generated.h       # layer table and fixed-point requant constants
-npu_pth_runtime.h            # header-only CPU/NPU helper runtime
-runtime_smoke.c              # include smoke file
-runtime_summary.json         # memory-fit report
-```
+When `--image <path>` is used, Pillow loads the image, resizes it to 32x32, normalizes with CIFAR-10 constants, and quantizes it using the model input scale/zero-point.
 
-For the current RepOpt VGG probe, generation succeeds but the full model is not
-SoC-runnable with the default testbench memory:
+## Output Directories
 
-```text
-asset bytes       : 5,287,424
-current DRAM bytes: 61,440
-assets fit DRAM   : false
-```
+| Flow | Output directory |
+|---|---|
+| e2e | `sim/vgg_e2e/` |
+| closed-loop | `sim/vgg_closed_loop/` |
 
-So this branch now has the conversion/runtime path, but the given RepOpt model
-still requires either a much larger DRAM configuration and loader, or a smaller
-checkpoint for the present `tb_soc.v` memory size.
+These are generated artifacts and should not be committed.
 
-## Tiny SoC Smoke
+## FPGA Host Direction
 
-The default SoC DRAM can run a deliberately small `.pth` case:
+For board deployment, runtime host preprocessing should be split from PyTorch checkpoint loading:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_pth_tiny_conv_soc.ps1
-```
+- Extract input quant constants once from the checkpoint.
+- Use a small Pillow + numpy script to convert images to 3072 INT8 bytes.
+- Send those bytes over UART.
+- Receive one class byte from FPGA.
 
-This script:
-
-1. Generates `sim\pth_tiny_conv\tiny_conv_int8.pth`.
-2. Converts it through `pth_to_npu_assets.py`.
-3. Emits a DRAM image and RV32I firmware hex.
-4. Runs `tb\tb_soc_pth_tiny_conv.v`.
-
-Current passing result:
-
-```text
-[PASS] PTH tiny Conv SoC test PASSED!
-R = [10, 2, 8, 2, 9, 0, 13, 0]
-```
-
-This proves the small end-to-end path:
-
-```text
-.pth -> host converter -> DRAM assets + CPU firmware -> CPU MMIO schedule -> NPU Conv2D/ReLU -> CPU-visible result
-```
-
-## 3-Layer Small Model Smoke
-
-For a slightly more realistic CPU/NPU split, run:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_pth_multilayer_soc.ps1
-```
-
-This generates and runs:
-
-```text
-Conv3x3(1->1) + ReLU
-CPU repack: row-major int32 OFM -> NCHW int8 IFM
-Conv1x1(1->2) + ReLU
-CPU repack: row-major int32 OFM -> NCHW int8 IFM
-Conv1x1(2->1) + ReLU
-```
-
-Current passing result:
-
-```text
-[PASS] PTH multilayer Conv SoC test PASSED!
-R = [28, 22, 25, 37]
-```
-
-This smoke covers multi-layer CPU scheduling and the required layer-to-layer
-CPU repack step, while staying inside the default SoC DRAM.
+See `doc/uart_spi_fpga_plan.md`.

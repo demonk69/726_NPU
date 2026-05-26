@@ -31,6 +31,7 @@ __pycache__/
 /RepOpt/
 /sim/pth_*/
 /sim/vgg_e2e/
+/sim/vgg_closed_loop/
 
 # Generated CIFAR-10 sample images
 /pic/test_cifar10_*.jpg

@@ -5,18 +5,57 @@
 #   ./run_vgg_closed_loop.sh
 #   ./run_vgg_closed_loop.sh 7
 #   ./run_vgg_closed_loop.sh --image cat.jpg
+#   ./run_vgg_closed_loop.sh --shape 8x8 --image cat.jpg
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 OUT_DIR="$ROOT/sim/vgg_closed_loop"
 TIMEOUT_CYCLES="${VGG_CLOSED_TIMEOUT_CYCLES:-150000000}"
 
+IMG_IDX="0"
+IMAGE=""
+SHAPE="16x16"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --image)
+            IMAGE="${2:?missing image path}"
+            shift 2
+            ;;
+        --shape)
+            SHAPE="${2:?missing shape}"
+            shift 2
+            ;;
+        --help|-h)
+            echo "Usage: $0 [img_idx] [--image <file>] [--shape 4x4|8x8|16x16|8x32]"
+            exit 0
+            ;;
+        --*)
+            echo "Unknown option: $1" >&2
+            exit 2
+            ;;
+        *)
+            IMG_IDX="$1"
+            shift
+            ;;
+    esac
+done
+
+case "$SHAPE" in
+    4x4|8x8|16x16|8x32) ;;
+    *)
+        echo "Invalid shape: $SHAPE (expected 4x4, 8x8, 16x16, or 8x32)" >&2
+        exit 2
+        ;;
+esac
+
 GEN_ARGS=()
 GEN_ARGS+=(--timeout-cycles "$TIMEOUT_CYCLES")
-if [[ "${1:-}" == "--image" ]]; then
-    GEN_ARGS+=(--image "${2:?missing image path}")
+GEN_ARGS+=(--shape "$SHAPE")
+if [[ -n "$IMAGE" ]]; then
+    GEN_ARGS+=(--image "$IMAGE")
 else
-    GEN_ARGS+=(--img-idx "${1:-0}")
+    GEN_ARGS+=(--img-idx "$IMG_IDX")
 fi
 
 CLASSES=("airplane" "automobile" "bird" "cat" "deer" "dog" "frog" "horse" "ship" "truck")

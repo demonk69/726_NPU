@@ -3,7 +3,7 @@
 # Usage:
 #   ./run_all.sh standard [img_idx]     # CIFAR-10 image index (default 0)
 #   ./run_all.sh image <file.jpg>       # arbitrary image
-#   ./run_all.sh closed_loop [args...]  # runtime closed-loop path; forwards args
+#   ./run_all.sh closed_loop [args...]  # runtime closed-loop path; forwards args, e.g. --shape 8x8
 #   ./run_all.sh im2col27               # im2col K=27 test
 #   ./run_all.sh im2col576              # im2col K=576 test
 #   ./run_all.sh regress                # full pipeline regression

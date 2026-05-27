@@ -36,6 +36,7 @@ Run the unified entry point:
 ./run_all.sh standard 0
 ./run_all.sh image ./pic/test_cifar10_2.jpg
 ./run_all.sh closed_loop --image ./pic/test_cifar10_2.jpg
+./run_all.sh closed_loop --shape 8x8 --image ./pic/test_cifar10_2.jpg
 ```
 
 Run the full fast regression set:
@@ -66,6 +67,8 @@ Use this for quick regression and baseline confidence.
 - run maxpool, avgpool, classifier, and argmax
 
 This flow avoids the old per-16-channel hardware `QUANT_CFG` approximation and validates against the exact Python model target.
+
+The default closed-loop shape is `16x16`. The run script and generator also support `4x4`, `8x8`, and `8x32` shape selection; new tile/packed-SIMD work should keep those modes shape-aware.
 
 ## FPGA Deployment Direction
 

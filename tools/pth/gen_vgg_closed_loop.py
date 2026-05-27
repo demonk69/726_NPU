@@ -32,11 +32,27 @@ from run_repopt_vgg_host import (  # noqa: E402
 )
 
 
-SIMD = 4
-TR = 16
-TC = 16
 PPB_DEPTH = 8192
-KT_ELEMS = (PPB_DEPTH * 4) // max(TR, TC)
+SIMD = 4
+SHAPE_CONFIGS = {
+    "4x4": {"cfg_shape": 0x0, "tile_rows": 4, "tile_cols": 4},
+    "8x8": {"cfg_shape": 0x1, "tile_rows": 8, "tile_cols": 8},
+    "16x16": {"cfg_shape": 0x2, "tile_rows": 16, "tile_cols": 16},
+    "8x32": {"cfg_shape": 0x3, "tile_rows": 8, "tile_cols": 32},
+}
+DEFAULT_SHAPE = "16x16"
+
+
+def shape_kt_elems(tile_rows, tile_cols):
+    # 8x32 consumes the 32 logical columns as two 16-column physical passes.
+    w_lanes = 16 if (tile_rows, tile_cols) == (8, 32) else tile_cols
+    return (PPB_DEPTH * 4) // max(tile_rows, w_lanes)
+
+
+TR = SHAPE_CONFIGS[DEFAULT_SHAPE]["tile_rows"]
+TC = SHAPE_CONFIGS[DEFAULT_SHAPE]["tile_cols"]
+CFG_SHAPE = SHAPE_CONFIGS[DEFAULT_SHAPE]["cfg_shape"]
+KT_ELEMS = shape_kt_elems(TR, TC)
 DRAM_WORDS_MAX = 2 * 1024 * 1024
 MEM_WORDS = 8192
 
@@ -56,7 +72,6 @@ REG_QUANT_CFG = 0x9C
 
 CTRL_BIAS_TILE = 0x211  # start | INT8 | OS | bias, raw INT32 result
 ARR_TILE = 0x080
-CFG_SHAPE_16X16 = 0x2
 QUANT_DISABLED = 0x00010000
 
 ACT_A = 0x00010000
@@ -123,7 +138,43 @@ def store_byte(dram, addr, value):
     dram[idx] = (dram[idx] & ~mask) | ((int(value) & 0xFF) << shift)
 
 
+def pack_weight_tile_8x32(qweight, n_base, n_count, k_dim):
+    w_int = qweight.int_repr().cpu()
+    cout, _cin, kh, kw = [int(x) for x in w_int.shape]
+    out = []
+    half_cols = 16
+    words_per_k = half_cols // SIMD
+    for pass_base in (0, half_cols):
+        kpos = 0
+        while kpos < k_dim:
+            k_len = min(k_dim - kpos, KT_ELEMS)
+            for k_rel in range(k_len):
+                k_index = kpos + k_rel
+                chan = k_index // (kh * kw)
+                rem = k_index % (kh * kw)
+                ker_h = rem // kw
+                ker_w = rem % kw
+                for group in range(words_per_k):
+                    vals = []
+                    for lane in range(SIMD):
+                        local_col = pass_base + group * SIMD + lane
+                        out_c = n_base + local_col
+                        if local_col < n_count and out_c < cout:
+                            vals.append(int(w_int[out_c, chan, ker_h, ker_w].item()))
+                        else:
+                            vals.append(0)
+                    out.append(pack4(vals))
+            padded_k = ((k_len + SIMD - 1) // SIMD) * SIMD
+            for _ in range((padded_k - k_len) * words_per_k):
+                out.append(0)
+            kpos += k_len
+    return out
+
+
 def pack_weight_tile(qweight, n_base, n_count, k_dim):
+    if (TR, TC) == (8, 32):
+        return pack_weight_tile_8x32(qweight, n_base, n_count, k_dim)
+
     w_int = qweight.int_repr().cpu()
     _cout, _cin, kh, kw = [int(x) for x in w_int.shape]
     out = []
@@ -434,7 +485,7 @@ def emit_run_conv_layer(a):
     a.emit(SW("t0", "gp", 0))
     a.emit(ADDI("gp", "gp", 4))
     a.emit(ADDI("a5", "a5", 1))
-    a.li("t1", 4)
+    a.li("t1", TR // SIMD)
     a.branch("bne", "a5", "t1", "pack_group_loop")
     a.emit(ADDI("t6", "t6", 1))
     a.li("t1", 3)
@@ -463,7 +514,7 @@ def emit_run_conv_layer(a):
     emit_write_reg_reg(a, REG_BIAS_ADDR, "t1")
     emit_write_reg_imm(a, REG_QUANT_CFG, QUANT_DISABLED)
     emit_write_reg_imm(a, REG_ARR_CFG, ARR_TILE)
-    emit_write_reg_imm(a, REG_CFG_SHAPE, CFG_SHAPE_16X16)
+    emit_write_reg_imm(a, REG_CFG_SHAPE, CFG_SHAPE)
     emit_write_reg_imm(a, REG_CTRL, CTRL_BIAS_TILE)
 
     a.label("poll_npu")
@@ -715,6 +766,14 @@ def emit_firmware(conv_descs, pool_descs, cls_w_base, cls_b_base, expected_label
 
 
 def generate(args):
+    global TR, TC, CFG_SHAPE, KT_ELEMS
+
+    shape = SHAPE_CONFIGS[args.shape]
+    TR = shape["tile_rows"]
+    TC = shape["tile_cols"]
+    CFG_SHAPE = shape["cfg_shape"]
+    KT_ELEMS = shape_kt_elems(TR, TC)
+
     out = Path(args.out_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
     plan_path = Path(args.plan).resolve()
@@ -790,7 +849,12 @@ def generate(args):
             merged[key] = spec_layer.get(key, merged.get(key, [1, 1]))
         qweight = state_dict[layer["weight_key"]]
         n_dim = int(layer["registers"]["N_DIM"])
+        m_dim = int(layer["registers"]["M_DIM"])
         k_dim = int(layer["registers"]["K_DIM"])
+        if n_dim % TC != 0:
+            raise RuntimeError(f"{layer['name']} N_DIM={n_dim} is not divisible by tile cols {TC}")
+        if m_dim % TR != 0:
+            raise RuntimeError(f"{layer['name']} M_DIM={m_dim} is not divisible by tile rows {TR}")
         n_tiles = n_dim // TC
         w_base = align(next_static, 0x100)
         first_tile_words = None
@@ -912,6 +976,7 @@ def generate(args):
         f.write(f'`define VGG_CLOSED_LABEL {exact_pred}\n')
         f.write(f'`define VGG_CLOSED_EXACT_LABEL {exact_pred}\n')
         f.write(f'`define VGG_CLOSED_FIXED_LABEL {fixed_pred}\n')
+        f.write(f'`define VGG_CLOSED_SHAPE "{args.shape}"\n')
 
     meta = {
         "schema": "vgg_closed_loop_v1",
@@ -921,6 +986,10 @@ def generate(args):
         "exact_python_pred": exact_pred,
         "fixed_scores": fixed_scores,
         "exact_scores": exact_scores,
+        "shape": args.shape,
+        "tile_rows": TR,
+        "tile_cols": TC,
+        "kt_elems": KT_ELEMS,
         "firmware_words": len(fw),
         "max_addr": f"0x{max_addr:08x}",
         "dram_words": used_dram_words,
@@ -930,6 +999,7 @@ def generate(args):
         json.dump(meta, f, indent=2)
 
     print(f"Generated closed-loop VGG case: {out}")
+    print(f"  shape: {args.shape} (TR={TR}, TC={TC}, KT_ELEMS={KT_ELEMS})")
     print(f"  firmware words: {len(fw)} / {MEM_WORDS}")
     print(f"  static end: 0x{next_static:08x}, desc end: 0x{desc_ptr:08x}, max: 0x{max_addr:08x}")
     print(f"  sparse dram words: {used_dram_words}")
@@ -946,6 +1016,8 @@ def main():
     parser.add_argument("--img-idx", type=int, default=0)
     parser.add_argument("--image", default="")
     parser.add_argument("--image-size", type=int, default=32)
+    parser.add_argument("--shape", choices=sorted(SHAPE_CONFIGS), default=DEFAULT_SHAPE,
+                        help="NPU tile shape: 4x4, 8x8, 16x16, or 8x32")
     parser.add_argument("--timeout-cycles", type=int, default=500000000)
     generate(parser.parse_args())
 

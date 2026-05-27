@@ -16,6 +16,7 @@ This is the maintained deployment-oriented flow.
 ./run_vgg_closed_loop.sh
 ./run_vgg_closed_loop.sh 7
 ./run_vgg_closed_loop.sh --image ./pic/test_cifar10_2.jpg
+./run_vgg_closed_loop.sh --shape 8x8 --image ./pic/test_cifar10_2.jpg
 ./run_all.sh closed_loop --image ./pic/test_cifar10_2.jpg
 ```
 
@@ -39,14 +40,27 @@ The firmware is image-independent. The input image bytes and expected labels cha
 
 For each Conv layer, firmware performs:
 
-1. Pack a 16-row A tile at runtime from dense activation memory.
+1. Pack an A tile at runtime from dense activation memory.
 2. Configure the NPU with W tile, packed A tile, result buffer, and bias base address.
-3. Run tile GEMM in 16x16 shape mode.
+3. Run tile GEMM in the selected shape mode.
 4. Read raw INT32+bias tile results from `R_WORK`.
 5. Apply ReLU and per-output-channel Q24 requant on the CPU.
 6. Scatter resulting INT8 bytes into the dense output activation buffer.
 
 Firmware also performs maxpool, avgpool, classifier, and argmax on the CPU.
+
+## Shape Modes
+
+The default closed-loop shape is the verified `16x16` path. The generator and run script also accept:
+
+| `--shape` | `CFG_SHAPE` | Tile rows | Tile cols |
+|---|---:|---:|---:|
+| `4x4` | `0` | 4 | 4 |
+| `8x8` | `1` | 8 | 8 |
+| `16x16` | `2` | 16 | 16 |
+| `8x32` | `3` | 8 | 32 |
+
+The `8x32` mode uses the RTL two-pass folded array format, so W is generated as contiguous cols 0-15 then cols 16-31 pass streams. New work on packed-SIMD dataflow must preserve all four shape modes, not only the default 16x16 path.
 
 ## Quantization Policy
 
@@ -81,6 +95,8 @@ Current closed-loop policy:
 |---|---|---|---:|
 | `./run_all.sh closed_loop --image ./pic/test_cifar10_2.jpg` | PASS | frog/class 6 | 114,014,769 |
 | `./run_all.sh closed_loop --image ./pic/test_cifar10_4.jpg` | PASS | dog/class 5 | 114,013,544 |
+
+These runtime results are for the default `--shape 16x16` mode unless the command states otherwise.
 
 ## Correct Use
 

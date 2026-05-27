@@ -11,7 +11,7 @@ This document is the current verification record. Older status files and worklog
 | `./run_vgg_e2e.sh` | Fast RepOpt VGG baseline | PASS |
 | `./run_all.sh standard [idx]` | Unified wrapper for fast baseline | PASS |
 | `./run_all.sh image <file>` | Fast baseline with arbitrary image input | Supported |
-| `./run_vgg_closed_loop.sh [idx|--image <file>]` | Runtime closed-loop VGG | PASS on tested images |
+| `./run_vgg_closed_loop.sh [idx|--image <file>] [--shape <shape>]` | Runtime closed-loop VGG | PASS on tested default shape images |
 | `./run_all.sh closed_loop [args...]` | Unified wrapper for runtime closed-loop | PASS on tested images |
 
 `./run_all.sh all` is a fast regression set and intentionally does not include the long runtime closed-loop test.
@@ -53,6 +53,8 @@ The closed-loop flow verifies that firmware can perform the runtime steps needed
 - run maxpool, avgpool, classifier, and argmax
 
 The current closed-loop validation target is exact Python model output. The older per-16-channel hardware `QUANT_CFG` approximation is no longer used as the PASS criterion.
+
+The default runtime closed-loop shape is `16x16`. The generator and script accept `4x4`, `8x8`, `16x16`, and `8x32`; only the default `16x16` commands above are currently recorded as full long-run RTL PASS results.
 
 ## Deployment Status
 

@@ -61,6 +61,7 @@ module reconfig_pe_array #(
     input  wire                          flush,
     input  wire                          load_w,
     input  wire                          swap_w,
+    input  wire                          ws_direct,   // packed tile WS: load all active rows directly
     input  wire                          acc_init_en,
     input  wire                          half_en,     // 8x32: 0=top half active, 1=bottom half active
     // data inputs
@@ -206,7 +207,7 @@ reg [3:0] ws_load_row;
 always @(posedge clk) begin
     if (!rst_n) begin
         ws_load_row <= 4'd0;
-    end else if (load_w && !stat_mode) begin
+    end else if (load_w && !stat_mode && !ws_direct) begin
         // WS mode: advance row counter on each load_w pulse
         // Wrap around at active_rows (controller ensures correct count)
         if (ws_load_row >= active_rows - 1)
@@ -269,9 +270,11 @@ generate
             wire fold_load_row_match = (r < 8) ? (r == ws_load_row)
                                                : ((r - 8) == ws_load_row);
             wire pe_load_w = stat_mode ? load_w
-                                       : (load_w &&
-                                          (fold_enable ? fold_load_row_match
-                                                       : (r == ws_load_row)));
+                                       : (ws_direct
+                                          ? load_w
+                                          : (load_w &&
+                                             (fold_enable ? fold_load_row_match
+                                                          : (r == ws_load_row))));
 
             // ── Activation input selection ──
             // OS mode: use act_in[r] directly (row skew is provided by act_h
@@ -283,15 +286,15 @@ generate
                 // The fold delay (16-cycle horizontal shift) is incompatible
                 // with the single-fire packed SIMD architecture — bottom half
                 // would see activation 16 cycles after weight injection.
-                assign pe_a_in = (fold_enable && stat_mode)
+                assign pe_a_in = (fold_enable && (stat_mode || ws_direct))
                                ? act_in[(r-8)*DATA_W +: DATA_W]
                                : (fold_enable
                                   ? act_row_skewed[r-8]
-                                  : (stat_mode ? act_in[r*DATA_W +: DATA_W]
-                                               : act_row_skewed[r]));
+                                  : ((stat_mode || ws_direct) ? act_in[r*DATA_W +: DATA_W]
+                                                              : act_row_skewed[r]));
             end else begin : normal_a_in
-                assign pe_a_in = stat_mode ? act_in[r*DATA_W +: DATA_W]
-                                           : act_row_skewed[r];
+                assign pe_a_in = (stat_mode || ws_direct) ? act_in[r*DATA_W +: DATA_W]
+                                                          : act_row_skewed[r];
             end
 
             // ── Partial sum input: 8x32 splits the vertical chain at row8 ──

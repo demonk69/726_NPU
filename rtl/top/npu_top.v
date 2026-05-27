@@ -254,6 +254,7 @@ wire [31:0] ctrl_post_quant_cfg;
 wire       ctrl_bias_en;
 wire ctrl_tile_mode, ctrl_vec_consume;
 wire ppb_packed_int8 = ctrl_tile_mode && !pe_mode && (INT8_SIMD_LANES > 1);
+wire tile_ws_direct = ppb_packed_int8 && !pe_stat;
 wire [31:0] ctrl_tile_m_base, ctrl_tile_n_base; // global C tile origin: m0/n0
 wire [15:0] ctrl_tile_row_valid, ctrl_tile_col_valid; // valid r/c lanes for edge tiles
 wire [4:0]  ctrl_tile_active_rows;
@@ -669,6 +670,9 @@ wire [PHY_ROWS*PHY_COLS-1:0] pe_active_dbg;
 wire [DATA_W-1:0] pe_w_data = w_ppb_rd_data;
 wire [DATA_W-1:0] pe_a_data = a_ppb_rd_data;
 wire [MAX_TILE_LANES*DATA_W-1:0] a_skew_vec;
+wire [MAX_TILE_LANES*DATA_W-1:0] tile_a_feed_vec = tile_ws_direct
+    ? (tile_vec_fire ? a_ppb_rd_vec : {MAX_TILE_LANES*DATA_W{1'b0}})
+    : a_skew_vec;
 
 // OS row-skew feeder. Row r receives A lane r after r compute cycles, so the
 // A wavefront stays aligned with the W stream as it shifts down the array.
@@ -772,7 +776,7 @@ generate
             assign pe_a_in[feed_row*DATA_W +: DATA_W] =
                 ctrl_tile_mode
                     ? ((ROW_IDX < tile_lane_count)
-                        ? a_skew_vec[feed_row*DATA_W +: DATA_W]
+                        ? tile_a_feed_vec[feed_row*DATA_W +: DATA_W]
                         : {DATA_W{1'b0}})
                     : ((feed_row == 0) ? pe_a_data : {DATA_W{1'b0}});
         end else begin : gen_zero_a_lane
@@ -984,6 +988,7 @@ reconfig_pe_array #(
     .flush          (pe_flush),
     .load_w         (pe_load_w),
     .swap_w         (pe_swap_w),
+    .ws_direct      (tile_ws_direct),
     .acc_init_en    (1'b0),
     .half_en        (pe_half_en),
     .w_in           (pe_w_in),
@@ -1050,7 +1055,6 @@ wire       tile_ser_last_col = (tile_ser_col + 6'd1 >= tile_ser_active_cols);
 wire       tile_ser_last_row = (tile_ser_row + 5'd1 >= tile_ser_active_rows);
 wire       tile_ser_last     = tile_ser_last_col && tile_ser_last_row;
 wire tile_result_capture_pending = ctrl_tile_mode &&
-                              pe_stat &&
                               pe_array_valid[0] &&
                               !tile_ser_busy;
 

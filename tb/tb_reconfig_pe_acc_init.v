@@ -52,6 +52,7 @@ module tb_reconfig_pe_acc_init;
         .flush          (flush),
         .load_w         (load_w),
         .swap_w         (swap_w),
+        .ws_direct      (1'b0),
         .acc_init_en    (acc_init_en),
         .w_in           (w_in),
         .act_in         (act_in),

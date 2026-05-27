@@ -53,6 +53,7 @@ TR = SHAPE_CONFIGS[DEFAULT_SHAPE]["tile_rows"]
 TC = SHAPE_CONFIGS[DEFAULT_SHAPE]["tile_cols"]
 CFG_SHAPE = SHAPE_CONFIGS[DEFAULT_SHAPE]["cfg_shape"]
 KT_ELEMS = shape_kt_elems(TR, TC)
+A_PACK_LANES = 16 if (TR, TC) == (8, 32) else TR
 DRAM_WORDS_MAX = 2 * 1024 * 1024
 MEM_WORDS = 8192
 
@@ -70,7 +71,9 @@ REG_CFG_SHAPE = 0x3C
 REG_BIAS_ADDR = 0x98
 REG_QUANT_CFG = 0x9C
 
-CTRL_BIAS_TILE = 0x211  # start | INT8 | OS | bias, raw INT32 result
+CTRL_BIAS_TILE_OS = 0x211  # start | INT8 | OS | bias, raw INT32 result
+CTRL_BIAS_TILE_WS = 0x201  # start | INT8 | WS | bias, raw INT32 result
+CTRL_BIAS_TILE = CTRL_BIAS_TILE_OS
 ARR_TILE = 0x080
 QUANT_DISABLED = 0x00010000
 
@@ -487,6 +490,9 @@ def emit_run_conv_layer(a):
     a.emit(ADDI("a5", "a5", 1))
     a.li("t1", TR // SIMD)
     a.branch("bne", "a5", "t1", "pack_group_loop")
+    for _ in range((A_PACK_LANES - TR) // SIMD):
+        a.emit(SW("zero", "gp", 0))
+        a.emit(ADDI("gp", "gp", 4))
     a.emit(ADDI("t6", "t6", 1))
     a.li("t1", 3)
     a.branch("bne", "t6", "t1", "pack_kw_loop")
@@ -766,13 +772,15 @@ def emit_firmware(conv_descs, pool_descs, cls_w_base, cls_b_base, expected_label
 
 
 def generate(args):
-    global TR, TC, CFG_SHAPE, KT_ELEMS
+    global TR, TC, CFG_SHAPE, KT_ELEMS, A_PACK_LANES, CTRL_BIAS_TILE
 
     shape = SHAPE_CONFIGS[args.shape]
     TR = shape["tile_rows"]
     TC = shape["tile_cols"]
     CFG_SHAPE = shape["cfg_shape"]
     KT_ELEMS = shape_kt_elems(TR, TC)
+    A_PACK_LANES = 16 if (TR, TC) == (8, 32) else TR
+    CTRL_BIAS_TILE = CTRL_BIAS_TILE_WS if args.flow == "ws" else CTRL_BIAS_TILE_OS
 
     out = Path(args.out_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -977,6 +985,7 @@ def generate(args):
         f.write(f'`define VGG_CLOSED_EXACT_LABEL {exact_pred}\n')
         f.write(f'`define VGG_CLOSED_FIXED_LABEL {fixed_pred}\n')
         f.write(f'`define VGG_CLOSED_SHAPE "{args.shape}"\n')
+        f.write(f'`define VGG_CLOSED_FLOW "{args.flow}"\n')
 
     meta = {
         "schema": "vgg_closed_loop_v1",
@@ -987,8 +996,10 @@ def generate(args):
         "fixed_scores": fixed_scores,
         "exact_scores": exact_scores,
         "shape": args.shape,
+        "flow": args.flow,
         "tile_rows": TR,
         "tile_cols": TC,
+        "a_pack_lanes": A_PACK_LANES,
         "kt_elems": KT_ELEMS,
         "firmware_words": len(fw),
         "max_addr": f"0x{max_addr:08x}",
@@ -999,7 +1010,7 @@ def generate(args):
         json.dump(meta, f, indent=2)
 
     print(f"Generated closed-loop VGG case: {out}")
-    print(f"  shape: {args.shape} (TR={TR}, TC={TC}, KT_ELEMS={KT_ELEMS})")
+    print(f"  shape: {args.shape} (TR={TR}, TC={TC}, A_PACK_LANES={A_PACK_LANES}, KT_ELEMS={KT_ELEMS}), flow={args.flow}")
     print(f"  firmware words: {len(fw)} / {MEM_WORDS}")
     print(f"  static end: 0x{next_static:08x}, desc end: 0x{desc_ptr:08x}, max: 0x{max_addr:08x}")
     print(f"  sparse dram words: {used_dram_words}")
@@ -1018,6 +1029,8 @@ def main():
     parser.add_argument("--image-size", type=int, default=32)
     parser.add_argument("--shape", choices=sorted(SHAPE_CONFIGS), default=DEFAULT_SHAPE,
                         help="NPU tile shape: 4x4, 8x8, 16x16, or 8x32")
+    parser.add_argument("--flow", choices=("os", "ws"), default="os",
+                        help="Tile dataflow mode for NPU conv GEMMs")
     parser.add_argument("--timeout-cycles", type=int, default=500000000)
     generate(parser.parse_args())
 

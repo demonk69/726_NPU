@@ -6,6 +6,7 @@
 #   ./run_vgg_closed_loop.sh 7
 #   ./run_vgg_closed_loop.sh --image cat.jpg
 #   ./run_vgg_closed_loop.sh --shape 8x8 --image cat.jpg
+#   ./run_vgg_closed_loop.sh --flow ws --shape 4x4 --image cat.jpg
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -15,6 +16,7 @@ TIMEOUT_CYCLES="${VGG_CLOSED_TIMEOUT_CYCLES:-150000000}"
 IMG_IDX="0"
 IMAGE=""
 SHAPE="16x16"
+FLOW="os"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -26,8 +28,12 @@ while [[ $# -gt 0 ]]; do
             SHAPE="${2:?missing shape}"
             shift 2
             ;;
+        --flow)
+            FLOW="${2:?missing flow}"
+            shift 2
+            ;;
         --help|-h)
-            echo "Usage: $0 [img_idx] [--image <file>] [--shape 4x4|8x8|16x16|8x32]"
+            echo "Usage: $0 [img_idx] [--image <file>] [--shape 4x4|8x8|16x16|8x32] [--flow os|ws]"
             exit 0
             ;;
         --*)
@@ -49,9 +55,18 @@ case "$SHAPE" in
         ;;
 esac
 
+case "$FLOW" in
+    os|ws) ;;
+    *)
+        echo "Invalid flow: $FLOW (expected os or ws)" >&2
+        exit 2
+        ;;
+esac
+
 GEN_ARGS=()
 GEN_ARGS+=(--timeout-cycles "$TIMEOUT_CYCLES")
 GEN_ARGS+=(--shape "$SHAPE")
+GEN_ARGS+=(--flow "$FLOW")
 if [[ -n "$IMAGE" ]]; then
     GEN_ARGS+=(--image "$IMAGE")
 else

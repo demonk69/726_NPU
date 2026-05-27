@@ -190,6 +190,38 @@ def pack_tile_w_8x32_pass(W, K, N, pass_idx, kt_elems):
             kpos += k_len
     return packed
 
+def pack_tile_w_8x32(W, K, N, kt_elems):
+    """Pack W for 8x32 as per-N-tile pass0+pass1 blocks.
+
+       This matches npu_ctrl's folded scheduling: each logical 8x32 N tile
+       computes cols 0..15, then cols 16..31 before advancing to the next
+       N tile.
+    """
+    packed = []
+    num_tiles_n = (N + 31) // 32
+    half_cols = 16
+    words_per_k = 4
+    for n_tile in range(num_tiles_n):
+        n0 = n_tile * 32
+        for pass_idx in (0, 1):
+            kpos = 0
+            while kpos < K:
+                k_len = min(K - kpos, kt_elems)
+                for k in range(kpos, kpos + k_len):
+                    for w in range(words_per_k):
+                        word = 0
+                        for c in range(4):
+                            lane = w * 4 + c
+                            logical_c = n0 + pass_idx * half_cols + lane
+                            val = W[k][logical_c] if logical_c < N else 0
+                            word |= (val & 0xFF) << (c * 8)
+                        packed.append(word)
+                pw = packed_pad_words(half_cols * 1, k_len)
+                for _ in range(pw):
+                    packed.append(0)
+                kpos += k_len
+    return packed
+
 def gen_int32_bias(N, seed=None):
     """Generate random signed int32 bias vector."""
     import random as _r
@@ -259,6 +291,7 @@ def main():
     parser.add_argument("--out-dir", default=".")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--name", default=None)
+    parser.add_argument("--flow", choices=["os", "ws"], default="os")
     parser.add_argument("--bias", action="store_true", help="Add per-column int32 bias")
     parser.add_argument("--activation", choices=["none","relu","relu6"], default="none")
     parser.add_argument("--quant", action="store_true", help="Apply INT8 quantize/saturate")
@@ -299,7 +332,7 @@ def main():
         bias_words = [v & 0xFFFFFFFF for v in bias]
         C = apply_bias(C, bias, M, N)
     # ── Activation ──
-    ctrl_val = 0x11  # base: INT8(00) + OS(01) + start
+    ctrl_val = 0x11 if args.flow == "os" else 0x01  # INT8 + OS/WS + start
     if args.bias:
         ctrl_val |= (1 << 9)  # CTRL[9] = bias enable
     if args.activation == 'relu':
@@ -333,10 +366,8 @@ def main():
     a_eff_lanes = 16 if args.shape == "8x32" else grid_rows
     a_tile = pack_tile_a_ksplit(A, M, K, grid_rows, kt_elems, a_eff_lanes)
     if args.shape == "8x32":
-        w_tile0 = pack_tile_w_8x32_pass(W, K, N, 0, kt_elems)  # cols 0-15
-        w_tile1 = pack_tile_w_8x32_pass(W, K, N, 1, kt_elems)  # cols 16-31
-        w_tile = w_tile0 + w_tile1
-        W_ADDR2 = W_BASE + len(w_tile0) * 4  # second pass starts after first
+        w_tile = pack_tile_w_8x32(W, K, N, kt_elems)
+        W_ADDR2 = W_BASE + ((K + SIMD_LANES - 1) // SIMD_LANES) * SIMD_LANES * 16
     else:
         w_tile = pack_tile_w_ksplit(W, K, N, grid_cols, kt_elems)
         W_ADDR2 = 0  # unused

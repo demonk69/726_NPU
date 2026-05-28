@@ -63,8 +63,8 @@ def pack_tile_a_ksplit(A, M, K, grid_rows, kt_elems, eff_lanes=0):
                             val = A[mr][k] if mr < M else 0
                             word |= (val & 0xFF) << (r * 8)
                     packed.append(word)
-            pw = packed_pad_words(grid_rows * 1, k_len)
-            for _ in range(pw):
+            padded_k = ((k_len + SIMD_LANES - 1) // SIMD_LANES) * SIMD_LANES
+            for _ in range((padded_k - k_len) * words_per_k):
                 packed.append(0)
             kpos += k_len
     return packed

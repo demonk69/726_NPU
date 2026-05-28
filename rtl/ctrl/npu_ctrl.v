@@ -1328,6 +1328,7 @@ always @(posedge clk) begin
                         tile_i     <= seq1_i;
                         tile_j     <= seq1_j;
                         k_tile_idx <= seq1_k;
+                        pass_idx   <= 1'b0;
 
                         // Decide what to do based on prefetch status
                         if (dma_load_done) begin

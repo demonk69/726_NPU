@@ -1008,6 +1008,7 @@ reconfig_pe_array #(
 // ---------------------------------------------------------------------------
 reg [31:0] tile_bias_buf [0:TILE_BIAS_DEPTH-1];
 reg [5:0]  tile_bias_idx;
+reg        tile_bias_fetch_active;
 reg        tile_bias_ctrl_start_d1;
 wire       tile_bias_ctrl_start_rise = ctrl_reg[0] && !tile_bias_ctrl_start_d1;
 
@@ -1021,9 +1022,18 @@ end
 always @(posedge sys_clk) begin
     if (!sys_rst_n || !ctrl_tile_mode || !ctrl_bias_en || tile_bias_ctrl_start_rise) begin
         tile_bias_idx <= 6'd0;
+        tile_bias_fetch_active <= 1'b0;
+    end else if (dma_bias_start && !tile_bias_fetch_active) begin
+        tile_bias_idx <= 6'd0;
+        tile_bias_fetch_active <= 1'b1;
     end else if (dma_bias_done && ctrl_bias_en) begin
-        tile_bias_buf[tile_bias_idx] <= dma_bias_data;
-        tile_bias_idx <= tile_bias_idx + 1'b1;
+        tile_bias_buf[tile_bias_idx[4:0]] <= dma_bias_data;
+        if (tile_bias_idx + 6'd1 >= {1'b0, ctrl_tile_active_cols}) begin
+            tile_bias_idx <= 6'd0;
+            tile_bias_fetch_active <= 1'b0;
+        end else begin
+            tile_bias_idx <= tile_bias_idx + 1'b1;
+        end
     end
 end
 

@@ -30,7 +30,8 @@ module npu_top #(
     parameter ACC_W        = 32,
     parameter PPB_DEPTH    = 64,
     parameter PPB_THRESH   = 16,
-    parameter INT8_SIMD_LANES = 4
+    parameter INT8_SIMD_LANES = 4,
+    parameter PERF_ENABLE_DERIVED = 0
 )(
     // System
     input  wire              sys_clk,
@@ -139,6 +140,7 @@ wire [63:0] perf_mac_ops, perf_ops;
 wire [31:0] perf_busy_cycles, perf_compute_cycles, perf_dma_cycles;
 wire [31:0] perf_tops_x1e6, perf_compute_util_bp, perf_e2e_util_bp;
 wire [31:0] perf_peak_ops_per_cycle;
+wire        perf_clear;
 
 // ---------------------------------------------------------------------------
 // AXI4-Lite Register File
@@ -211,6 +213,7 @@ npu_axi_lite u_axi_lite (
     .perf_compute_util_bp(perf_compute_util_bp),
     .perf_e2e_util_bp(perf_e2e_util_bp),
     .perf_peak_ops_per_cycle(perf_peak_ops_per_cycle),
+    .perf_clear (perf_clear),
     .npu_irq    (npu_irq)
 );
 
@@ -566,10 +569,12 @@ npu_dma #(
 // AXI Performance Monitor
 // ---------------------------------------------------------------------------
 axi_monitor #(
-    .ACC_W(ACC_W)
+    .ACC_W(ACC_W),
+    .ENABLE_DERIVED(PERF_ENABLE_DERIVED)
 ) u_axi_monitor (
     .clk(sys_clk),
     .rst_n(sys_rst_n),
+    .clear(perf_clear),
     .s_awvalid(s_axi_awvalid),
     .s_awready(s_axi_awready),
     .s_wvalid(s_axi_wvalid),
@@ -812,10 +817,12 @@ wire       perf_compute_valid = ctrl_tile_mode ? tile_feed_step : scalar_pe_en;
 op_counter #(
     .ROWS(PHY_ROWS),
     .COLS(MAX_TILE_RESULTS),
-    .FREQ_MHZ(500)
+    .FREQ_MHZ(500),
+    .ENABLE_DERIVED(PERF_ENABLE_DERIVED)
 ) u_op_counter (
     .clk(sys_clk),
     .rst_n(sys_rst_n),
+    .clear(perf_clear),
     .pe_en(pe_en),
     .pe_flush(pe_flush),
     .ctrl_busy(status_busy),

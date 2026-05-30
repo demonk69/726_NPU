@@ -60,8 +60,8 @@ RepOpt VGG needs per-output-channel requant. The runtime closed-loop flow theref
 | RTL descriptor-v1 mode | Present in controller; not used by current VGG firmware |
 | Direct scalar Conv/im2col path | Legacy/smoke-test path |
 
-## Planned Additions For FPGA Deployment
+## FPGA Deployment Notes
 
-The current PYNQ-Z2 route uses Zynq PS ARM for runtime control and PL for the NPU. Immediate RTL work focuses on board-ready raw performance counters with clear/snapshot support. Pure-PL UART/SPI/Boot ROM modules are deferred unless targeting a non-Zynq FPGA board.
+The current PYNQ-Z2 route uses Zynq PS ARM for runtime control and PL for the NPU. The AXI-Lite register file exposes `PERF_CTRL` at `0x78` for raw-counter clear/snapshot, and board-default builds keep derived division-based metrics disabled. Pure-PL UART/SPI/Boot ROM modules are deferred unless targeting a non-Zynq FPGA board.
 
 See `doc/pynq_z2_deployment.md` for the current interface and bring-up order.

@@ -19,7 +19,8 @@ Primary route for PYNQ-Z2:
 ```text
 PC
   |
-  | UART 921600 or PYNQ host channel
+  | PYNQ host path first: notebook, SSH, or Python API
+  | Optional later: UART packet protocol
   v
 Zynq PS ARM
   |
@@ -78,45 +79,51 @@ The bus-utilization scope is the NPU AXI master traffic unless PS/DDR system cou
 
 ## Counter RTL Work
 
-1. Add `PERF_CTRL`:
+1. Add `PERF_CTRL` at `0x78`:
 
 | Bit | Meaning |
 |---:|---|
 | 0 | clear raw counters |
 | 1 | snapshot raw counters |
-| 2 | optional freeze |
+| 2 | reserved for optional freeze |
 
 2. Add snapshot registers for all raw counters.
 3. Keep existing read addresses where practical.
-4. Parameterize or remove board-build hardware division outputs.
+4. Parameterize board-build hardware division outputs and default them off.
 5. Verify clear/snapshot/read consistency from AXI-Lite.
 
 Snapshot is required because 64-bit counters are read as two 32-bit words. PS should trigger snapshot once after each inference and read the stable shadow values.
 
-## PC/PS Result Packet
+Current register behavior:
 
-UART target baud: `921600`.
+- Write `0x78 = 0x1` immediately before starting an inference to clear raw counters.
+- Write `0x78 = 0x2` after inference completion to snapshot counters.
+- Read `0x48..0x70` and `0xA0..0xC8` after snapshot; reads return stable shadow values.
+- Board-default derived registers are zero unless `PERF_ENABLE_DERIVED` is enabled for simulation/debug builds.
 
-Per image, return one fixed packet:
+## PYNQ Result Interface
 
-| Field | Bytes |
-|---|---:|
-| magic | 1 |
-| class_id | 1 |
-| status | 1 |
-| total_cycles | 4 |
-| busy_cycles | 4 |
-| compute_cycles | 4 |
-| dma_cycles | 4 |
-| rd_bytes | 4 |
-| wr_bytes | 4 |
-| rd_beats | 4 |
-| wr_beats | 4 |
-| ops_low | 4 |
-| ops_high | 4 |
-| checksum or crc | 1 |
+The first board route uses the normal PYNQ workflow rather than a mandatory UART protocol. The PS runtime can be called from a notebook, SSH session, or Python script and should return one result object per image.
+
+Per image, return these fields:
+
+| Field | Meaning |
+|---|---|
+| `class_id` | predicted CIFAR-10 class |
+| `status` | runtime/NPU status |
+| `total_cycles` | AXI monitor cycles since clear |
+| `busy_cycles` | NPU busy cycles |
+| `compute_cycles` | compute-active cycles |
+| `dma_cycles` | busy cycles not in compute |
+| `rd_bytes` | NPU AXI master read bytes |
+| `wr_bytes` | NPU AXI master write bytes |
+| `rd_beats` | NPU AXI master read beats |
+| `wr_beats` | NPU AXI master write beats |
+| `ops` | useful operations, one MAC = two ops |
 
 Input image payload remains 3072 signed INT8 bytes in CHW order after host preprocessing.
+
+UART at `921600` can be added later as an alternate transport by serializing the same fields.
 
 ## Workstream 1: Documentation
 
@@ -127,7 +134,7 @@ Tasks:
 - keep this document as the deployment source of truth
 - remove obsolete plan documents
 - keep README, architecture, user manual, and RTL reference links current
-- document the counter register map once `PERF_CTRL` and snapshots are implemented
+- keep the counter register map current as RTL evolves
 
 Acceptance:
 
@@ -140,7 +147,7 @@ Acceptance:
 Tasks:
 
 - audit existing counters and AXI-Lite register map
-- implement raw-counter clear/snapshot/freeze
+- implement raw-counter clear/snapshot
 - avoid board-build critical paths from division operators
 - run Verilator lint
 - run micro regressions, especially `8x32 M=13 K=9 N=40 bias`
@@ -163,7 +170,7 @@ Tasks:
 - expose optional NPU interrupt to PS
 - generate bitstream and `.hwh`
 - write PS runtime to perform the current closed-loop firmware work
-- write host tool to send image and decode result/perf packet
+- write PYNQ/host tool to load images and decode result/perf fields
 
 Bring-up order:
 
@@ -171,8 +178,8 @@ Bring-up order:
 2. PS runs a tiny GEMM/tile smoke test from DDR.
 3. PS verifies counter clear/snapshot/readback.
 4. PS runs one fixed image and returns class.
-5. PC sends image over UART 921600 and receives class plus raw counters.
-6. PC computes and prints cycles, TOPS, read/write bus utilization.
+5. PYNQ Python sends or loads an image and receives class plus raw counters.
+6. PS or PC computes and prints cycles, TOPS, read/write bus utilization.
 7. Run repeated images to check buffer and counter isolation.
 
 Acceptance:

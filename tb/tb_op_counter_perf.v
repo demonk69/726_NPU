@@ -34,10 +34,12 @@ wire [31:0] e2e_util_bp;
 op_counter #(
     .ROWS(16),
     .COLS(16),
-    .FREQ_MHZ(500)
+    .FREQ_MHZ(500),
+    .ENABLE_DERIVED(1)
 ) dut (
     .clk(clk),
     .rst_n(rst_n),
+    .clear(1'b0),
     .pe_en(pe_en),
     .pe_flush(pe_flush),
     .ctrl_busy(ctrl_busy),

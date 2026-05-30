@@ -1,6 +1,6 @@
 # Known Issues
 
-Updated: 2026-05-26
+Updated: 2026-05-30
 
 This document lists current limitations. Historical issue lists are archived and should not be used as current status.
 
@@ -8,10 +8,10 @@ This document lists current limitations. Historical issue lists are archived and
 
 | Issue | Status | Impact | Planned direction |
 |---|---|---|---|
-| No UART peripheral | Open | FPGA cannot receive images from an upper PC yet | Add memory-mapped UART at `0x03000000` |
-| No SPI Flash reader | Open | Static model assets are loaded by testbench `$readmemh`, not by hardware | Add SPI Flash read-only controller |
-| No Boot ROM | Open | Firmware and static assets are simulation-initialized | Add small boot ROM to copy Flash contents into SRAM/DRAM |
-| No board constraints | Open | No real Xilinx board build yet | Add XDC after target board is fixed |
+| No Vivado/PYNQ integration yet | Open | NPU has not been packaged into a PYNQ-Z2 bitstream | Add PS+PL block design and export bitstream/`.hwh` |
+| No UART peripheral | Deferred | Not a blocker for PYNQ; normal PYNQ Python/SSH/notebook path is primary | Add UART later only if a serial transport is required |
+| No SPI Flash reader | Deferred | PYNQ route loads assets from PS/DDR rather than PL flash | Keep for future pure-PL boards |
+| No Boot ROM | Deferred | PYNQ route uses PS ARM runtime rather than PL firmware boot | Keep for future pure-PL boards |
 
 ## Runtime Flow Limitations
 

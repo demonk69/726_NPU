@@ -15,10 +15,12 @@
 module op_counter #(
     parameter ROWS = 4,
     parameter COLS = 4,
-    parameter FREQ_MHZ = 500
+    parameter FREQ_MHZ = 500,
+    parameter ENABLE_DERIVED = 0
 )(
     input  wire              clk,
     input  wire              rst_n,
+    input  wire              clear,
     // Legacy controller/PE signals
     input  wire              pe_en,
     input  wire              pe_flush,
@@ -88,6 +90,9 @@ always @(posedge clk) begin
     if (!rst_n) begin
         ctrl_done_d <= 1'b0;
         ctrl_busy_d <= 1'b0;
+    end else if (clear) begin
+        ctrl_done_d <= ctrl_done;
+        ctrl_busy_d <= ctrl_busy;
     end else begin
         ctrl_done_d <= ctrl_done;
         ctrl_busy_d <= ctrl_busy;
@@ -127,7 +132,7 @@ reg [7:0]  peak_pe_r;
 wire [7:0] active_pe_now = popcount_valid(pe_valid);
 
 always @(posedge clk) begin
-    if (!rst_n) begin
+    if (!rst_n || clear) begin
         mac_ops_r            <= 64'd0;
         pe_cycles_r          <= 32'd0;
         busy_cycles_r        <= 32'd0;
@@ -164,21 +169,6 @@ always @(posedge clk) begin
 end
 
 wire [63:0] ops_total_w = mac_ops_r << 1;
-wire [95:0] tops_num = {32'd0, ops_total_w} * FREQ_MHZ;
-wire [95:0] util_num = {32'd0, ops_total_w} * 32'd10000;
-wire [63:0] compute_peak_ops =
-    {32'd0, compute_cycles_r} * {32'd0, peak_ops_per_cycle_r};
-wire [63:0] busy_peak_ops =
-    {32'd0, busy_cycles_r} * {32'd0, peak_ops_per_cycle_r};
-wire [95:0] tops_w = (busy_cycles_r != 32'd0) ? (tops_num / busy_cycles_r)
-                                              : 96'd0;
-wire [95:0] compute_util_w = (compute_peak_ops != 64'd0) ? (util_num / compute_peak_ops)
-                                                         : 96'd0;
-wire [95:0] e2e_util_w = (busy_peak_ops != 64'd0) ? (util_num / busy_peak_ops)
-                                                 : 96'd0;
-wire [63:0] mac_per_cycle_w =
-    (busy_cycles_r != 32'd0) ? (mac_ops_r * 64'd100 / {32'd0, busy_cycles_r})
-                             : 64'd0;
 
 assign total_mac_ops       = mac_ops_r;
 assign total_ops           = ops_total_w;
@@ -190,13 +180,41 @@ assign active_pe_cnt       = {24'd0, active_pe_now};
 assign peak_active_pe      = {24'd0, peak_pe_r};
 assign fsm_transitions     = fsm_trans_r;
 assign peak_ops_per_cycle  = peak_ops_per_cycle_r;
-assign tops_x1e6           = sat32_from_96(tops_w);
-assign compute_util_bp     = sat32_from_96(compute_util_w);
-assign e2e_util_bp         = sat32_from_96(e2e_util_w);
 
-// Legacy aliases retain the historical fixed-point names.
-assign utilization_pct = compute_util_bp;
-assign mac_per_cycle   = sat32_from_64(mac_per_cycle_w);
-assign efficiency_pct  = e2e_util_bp;
+generate
+    if (ENABLE_DERIVED) begin : gen_derived_metrics
+        wire [95:0] tops_num = {32'd0, ops_total_w} * FREQ_MHZ;
+        wire [95:0] util_num = {32'd0, ops_total_w} * 32'd10000;
+        wire [63:0] compute_peak_ops =
+            {32'd0, compute_cycles_r} * {32'd0, peak_ops_per_cycle_r};
+        wire [63:0] busy_peak_ops =
+            {32'd0, busy_cycles_r} * {32'd0, peak_ops_per_cycle_r};
+        wire [95:0] tops_w = (busy_cycles_r != 32'd0) ? (tops_num / busy_cycles_r)
+                                                      : 96'd0;
+        wire [95:0] compute_util_w = (compute_peak_ops != 64'd0) ? (util_num / compute_peak_ops)
+                                                                 : 96'd0;
+        wire [95:0] e2e_util_w = (busy_peak_ops != 64'd0) ? (util_num / busy_peak_ops)
+                                                         : 96'd0;
+        wire [63:0] mac_per_cycle_w =
+            (busy_cycles_r != 32'd0) ? (mac_ops_r * 64'd100 / {32'd0, busy_cycles_r})
+                                     : 64'd0;
+
+        assign tops_x1e6       = sat32_from_96(tops_w);
+        assign compute_util_bp = sat32_from_96(compute_util_w);
+        assign e2e_util_bp     = sat32_from_96(e2e_util_w);
+
+        // Legacy aliases retain the historical fixed-point names.
+        assign utilization_pct = compute_util_bp;
+        assign mac_per_cycle   = sat32_from_64(mac_per_cycle_w);
+        assign efficiency_pct  = e2e_util_bp;
+    end else begin : gen_raw_only_metrics
+        assign tops_x1e6       = 32'd0;
+        assign compute_util_bp = 32'd0;
+        assign e2e_util_bp     = 32'd0;
+        assign utilization_pct = 32'd0;
+        assign mac_per_cycle   = 32'd0;
+        assign efficiency_pct  = 32'd0;
+    end
+endgenerate
 
 endmodule

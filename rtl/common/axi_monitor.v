@@ -10,10 +10,12 @@
 `timescale 1ns/1ps
 
 module axi_monitor #(
-    parameter ACC_W = 32
+    parameter ACC_W = 32,
+    parameter ENABLE_DERIVED = 0
 )(
     input  wire        clk,
     input  wire        rst_n,
+    input  wire        clear,
     // AXI4-Lite slave (CPU config port) - monitor
     input  wire        s_awvalid,
     input  wire        s_awready,
@@ -73,7 +75,7 @@ reg [7:0]  s_wr_lat_cnt, s_rd_lat_cnt;
 
 // Write transaction tracking
 always @(posedge clk) begin
-    if (!rst_n) begin
+    if (!rst_n || clear) begin
         s_wr_cnt_r  <= 0;
         s_wr_beats_r <= 0;
         s_wr_lat_r <= 0;
@@ -99,7 +101,7 @@ end
 
 // Read transaction tracking
 always @(posedge clk) begin
-    if (!rst_n) begin
+    if (!rst_n || clear) begin
         s_rd_cnt_r  <= 0;
         s_rd_beats_r <= 0;
         s_rd_lat_r <= 0;
@@ -131,7 +133,7 @@ reg [7:0]  m_wr_lat_cnt, m_rd_lat_cnt;
 
 // Write burst tracking
 always @(posedge clk) begin
-    if (!rst_n) begin
+    if (!rst_n || clear) begin
         m_wr_cnt_r   <= 0;
         m_wr_bytes_r <= 0;
         m_wr_beats_r <= 0;
@@ -162,7 +164,7 @@ end
 
 // Read burst tracking
 always @(posedge clk) begin
-    if (!rst_n) begin
+    if (!rst_n || clear) begin
         m_rd_cnt_r   <= 0;
         m_rd_bytes_r <= 0;
         m_rd_beats_r <= 0;
@@ -193,17 +195,26 @@ end
 // ---------------------------------------------------------------------------
 reg [31:0] cycle_cnt;
 always @(posedge clk) begin
-    if (!rst_n) cycle_cnt <= 0;
-    else        cycle_cnt <= cycle_cnt + 1;
+    if (!rst_n || clear) cycle_cnt <= 0;
+    else                 cycle_cnt <= cycle_cnt + 1;
 end
 
 // ---------------------------------------------------------------------------
 // Bandwidth computation (bytes per cycle, ×1000 for fixed-point)
 // ---------------------------------------------------------------------------
-assign m_axi_rd_bw = (cycle_cnt > 0) ? (m_rd_bytes_r * 1000 / cycle_cnt) : 0;
-assign m_axi_wr_bw = (cycle_cnt > 0) ? (m_wr_bytes_r * 1000 / cycle_cnt) : 0;
-assign m_axi_rd_util = (cycle_cnt > 0) ? (m_rd_beats_r * 10000 / cycle_cnt) : 0;
-assign m_axi_wr_util = (cycle_cnt > 0) ? (m_wr_beats_r * 10000 / cycle_cnt) : 0;
+generate
+    if (ENABLE_DERIVED) begin : gen_derived_metrics
+        assign m_axi_rd_bw = (cycle_cnt > 0) ? (m_rd_bytes_r * 1000 / cycle_cnt) : 0;
+        assign m_axi_wr_bw = (cycle_cnt > 0) ? (m_wr_bytes_r * 1000 / cycle_cnt) : 0;
+        assign m_axi_rd_util = (cycle_cnt > 0) ? (m_rd_beats_r * 10000 / cycle_cnt) : 0;
+        assign m_axi_wr_util = (cycle_cnt > 0) ? (m_wr_beats_r * 10000 / cycle_cnt) : 0;
+    end else begin : gen_raw_only_metrics
+        assign m_axi_rd_bw = 32'd0;
+        assign m_axi_wr_bw = 32'd0;
+        assign m_axi_rd_util = 32'd0;
+        assign m_axi_wr_util = 32'd0;
+    end
+endgenerate
 
 // ---------------------------------------------------------------------------
 // Output assignments

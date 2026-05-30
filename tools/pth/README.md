@@ -1,6 +1,6 @@
 # PyTorch/VGG Tooling
 
-Updated: 2026-05-26
+Updated: 2026-05-30
 
 This directory contains host-side tooling for RepOpt VGG-like CIFAR-10 inference tests.
 
@@ -88,8 +88,8 @@ For PYNQ-Z2 deployment, runtime host preprocessing should be split from PyTorch 
 
 - Extract input quant constants once from the checkpoint.
 - Use a small Pillow + numpy script to convert images to 3072 INT8 bytes.
-- Send one image per inference to the PYNQ runtime.
+- Pass one image per inference to the PYNQ runtime through the normal Python/notebook/SSH path.
 - Receive one class plus raw performance counters.
-- Compute TOPS and bus utilization on the host from raw counters.
+- Compute TOPS and bus utilization on PS or the host from raw counters.
 
 See `doc/pynq_z2_deployment.md`.

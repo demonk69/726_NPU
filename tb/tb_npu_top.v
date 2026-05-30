@@ -241,8 +241,8 @@ wire [31:0] m_axi_wr_cnt, m_axi_rd_cnt, m_axi_wr_bytes, m_axi_rd_bytes;
 wire [31:0] m_axi_wr_beats, m_axi_rd_beats, m_axi_wr_lat, m_axi_rd_lat;
 wire [31:0] total_cycles, m_axi_rd_bw, m_axi_wr_bw;
 
-axi_monitor #(.ACC_W(ACC_W)) u_monitor (
-    .clk(clk), .rst_n(rst_n),
+axi_monitor #(.ACC_W(ACC_W), .ENABLE_DERIVED(1)) u_monitor (
+    .clk(clk), .rst_n(rst_n), .clear(1'b0),
     .s_awvalid(s_awvalid),  .s_awready(s_awready),
     .s_wvalid(s_wvalid),    .s_wready(s_wready),
     .s_bvalid(s_bvalid),    .s_bready(s_bready),
@@ -287,8 +287,8 @@ wire [4:0]  op_active_rows = u_npu.ctrl_tile_mode ? 5'd4 : 5'd1;
 wire [5:0]  op_active_cols = u_npu.ctrl_tile_mode ? 6'd4 : 6'd1;
 wire        op_compute_valid = u_npu.ctrl_tile_mode ? u_npu.tile_feed_step : u_npu.scalar_pe_en;
 
-op_counter #(.ROWS(ROWS), .COLS(COLS)) u_opcnt (
-    .clk(clk), .rst_n(rst_n),
+op_counter #(.ROWS(ROWS), .COLS(COLS), .ENABLE_DERIVED(1)) u_opcnt (
+    .clk(clk), .rst_n(rst_n), .clear(1'b0),
     .pe_en(u_npu.pe_en),
     .pe_flush(u_npu.pe_flush),
     .ctrl_busy(u_npu.status_busy),

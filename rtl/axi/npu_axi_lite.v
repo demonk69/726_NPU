@@ -24,18 +24,19 @@
 //             0x3C  CFG_SHAPE - [1:0]=shape (00=4x4, 01=8x8, 10=16x16, 11=8x32)
 //             0x40  DESC_BASE - descriptor list base address
 //             0x44  DESC_COUNT- descriptor count / fetch limit
-//             0x48  PERF_CYCLES      - monitor cycles since reset
-//             0x4C  PERF_RD_BEATS    - AXI master read data beats
-//             0x50  PERF_WR_BEATS    - AXI master write data beats
-//             0x54  PERF_RD_BYTES    - AXI master read bytes
-//             0x58  PERF_WR_BYTES    - AXI master write bytes
-//             0x5C  PERF_RD_BW       - read bytes/cycle x1000
-//             0x60  PERF_WR_BW       - write bytes/cycle x1000
-//             0x64  PERF_RD_UTIL     - read data-channel utilization in bp
-//             0x68  PERF_WR_UTIL     - write data-channel utilization in bp
-//             0x6C  PERF_RD_BURSTS   - AXI master read burst count
-//             0x70  PERF_WR_BURSTS   - AXI master write burst count
+//             0x48  PERF_CYCLES      - snapshotted monitor cycles since clear
+//             0x4C  PERF_RD_BEATS    - snapshotted AXI master read data beats
+//             0x50  PERF_WR_BEATS    - snapshotted AXI master write data beats
+//             0x54  PERF_RD_BYTES    - snapshotted AXI master read bytes
+//             0x58  PERF_WR_BYTES    - snapshotted AXI master write bytes
+//             0x5C  PERF_RD_BW       - derived read bytes/cycle x1000, optional
+//             0x60  PERF_WR_BW       - derived write bytes/cycle x1000, optional
+//             0x64  PERF_RD_UTIL     - derived read data-channel utilization, optional
+//             0x68  PERF_WR_UTIL     - derived write data-channel utilization, optional
+//             0x6C  PERF_RD_BURSTS   - snapshotted AXI master read burst count
+//             0x70  PERF_WR_BURSTS   - snapshotted AXI master write burst count
 //             0x74  ERR_STATUS        - W1C error status from controller
+//             0x78  PERF_CTRL         - W1P bit0=clear counters, bit1=snapshot
 //             0x80  CONV_IFM_SHAPE    - [15:0]=IH, [31:16]=IW
 //             0x84  CONV_CHANNELS     - [15:0]=Cin, [31:16]=Batch
 //             0x88  CONV_KERNEL       - [15:0]=KH, [31:16]=KW
@@ -47,17 +48,17 @@
 //             0x9C  QUANT_CFG         - bit0=enable, bit1=round,
 //                                      - [15:8]=right shift,
 //                                      - [31:16]=signed scale
-//             0xA0  PERF_MAC_OPS_LO   - useful MAC operations[31:0]
-//             0xA4  PERF_MAC_OPS_HI   - useful MAC operations[63:32]
-//             0xA8  PERF_OPS_LO       - useful operations[31:0], 1 MAC = 2 ops
-//             0xAC  PERF_OPS_HI       - useful operations[63:32]
-//             0xB0  PERF_BUSY_CYCLES  - NPU busy cycles
-//             0xB4  PERF_COMPUTE_CYCLES - compute-active cycles
-//             0xB8  PERF_DMA_CYCLES   - busy cycles not in compute
-//             0xBC  PERF_TOPS_X1E6    - TOPS * 1,000,000 at FREQ_MHZ
-//             0xC0  PERF_COMPUTE_UTIL - compute utilization, basis points
-//             0xC4  PERF_E2E_UTIL     - end-to-end utilization, basis points
-//             0xC8  PERF_PEAK_OPS_CYC - peak operations per cycle used by util
+//             0xA0  PERF_MAC_OPS_LO   - snapshotted useful MAC operations[31:0]
+//             0xA4  PERF_MAC_OPS_HI   - snapshotted useful MAC operations[63:32]
+//             0xA8  PERF_OPS_LO       - snapshotted useful operations[31:0]
+//             0xAC  PERF_OPS_HI       - snapshotted useful operations[63:32]
+//             0xB0  PERF_BUSY_CYCLES  - snapshotted NPU busy cycles
+//             0xB4  PERF_COMPUTE_CYCLES - snapshotted compute-active cycles
+//             0xB8  PERF_DMA_CYCLES   - snapshotted busy cycles not in compute
+//             0xBC  PERF_TOPS_X1E6    - derived TOPS * 1,000,000, optional
+//             0xC0  PERF_COMPUTE_UTIL - derived compute utilization, optional
+//             0xC4  PERF_E2E_UTIL     - derived end-to-end utilization, optional
+//             0xC8  PERF_PEAK_OPS_CYC - snapshotted peak operations per cycle
 //
 //           IRQ Clear dual path:
 //             Path A: write 0x0C (INT_CLR) bit0 = 1  → clears int_pending
@@ -145,6 +146,7 @@ module npu_axi_lite (
     input  wire [31:0]           perf_compute_util_bp,
     input  wire [31:0]           perf_e2e_util_bp,
     input  wire [31:0]           perf_peak_ops_per_cycle,
+    output reg                   perf_clear,
     // Interrupt output
     output wire                  npu_irq
 );
@@ -157,6 +159,26 @@ reg [31:0] int_clr_reg;
 reg        int_pending;
 reg        irq_flag_d;
 reg        status_error_d;
+reg [31:0] perf_cycles_snap;
+reg [31:0] perf_m_axi_rd_beats_snap;
+reg [31:0] perf_m_axi_wr_beats_snap;
+reg [31:0] perf_m_axi_rd_bytes_snap;
+reg [31:0] perf_m_axi_wr_bytes_snap;
+reg [31:0] perf_m_axi_rd_bw_snap;
+reg [31:0] perf_m_axi_wr_bw_snap;
+reg [31:0] perf_m_axi_rd_util_snap;
+reg [31:0] perf_m_axi_wr_util_snap;
+reg [31:0] perf_m_axi_rd_bursts_snap;
+reg [31:0] perf_m_axi_wr_bursts_snap;
+reg [63:0] perf_mac_ops_snap;
+reg [63:0] perf_ops_snap;
+reg [31:0] perf_busy_cycles_snap;
+reg [31:0] perf_compute_cycles_snap;
+reg [31:0] perf_dma_cycles_snap;
+reg [31:0] perf_tops_x1e6_snap;
+reg [31:0] perf_compute_util_bp_snap;
+reg [31:0] perf_e2e_util_bp_snap;
+reg [31:0] perf_peak_ops_per_cycle_snap;
 
 // ---------------------------------------------------------------------------
 // Write FSM
@@ -209,9 +231,31 @@ always @(posedge aclk) begin
         quant_cfg <= 32'h0001_0000;
         err_clear <= 1'b0;
         err_clear_mask <= 32'd0;
+        perf_clear <= 1'b0;
+        perf_cycles_snap <= 32'd0;
+        perf_m_axi_rd_beats_snap <= 32'd0;
+        perf_m_axi_wr_beats_snap <= 32'd0;
+        perf_m_axi_rd_bytes_snap <= 32'd0;
+        perf_m_axi_wr_bytes_snap <= 32'd0;
+        perf_m_axi_rd_bw_snap <= 32'd0;
+        perf_m_axi_wr_bw_snap <= 32'd0;
+        perf_m_axi_rd_util_snap <= 32'd0;
+        perf_m_axi_wr_util_snap <= 32'd0;
+        perf_m_axi_rd_bursts_snap <= 32'd0;
+        perf_m_axi_wr_bursts_snap <= 32'd0;
+        perf_mac_ops_snap <= 64'd0;
+        perf_ops_snap <= 64'd0;
+        perf_busy_cycles_snap <= 32'd0;
+        perf_compute_cycles_snap <= 32'd0;
+        perf_dma_cycles_snap <= 32'd0;
+        perf_tops_x1e6_snap <= 32'd0;
+        perf_compute_util_bp_snap <= 32'd0;
+        perf_e2e_util_bp_snap <= 32'd0;
+        perf_peak_ops_per_cycle_snap <= 32'd0;
     end else if (wr_en) begin
         err_clear <= 1'b0;
         err_clear_mask <= 32'd0;
+        perf_clear <= 1'b0;
         case (awaddr_q)
             32'h00: begin
                 if (w_strb[0]) begin
@@ -237,6 +281,33 @@ always @(posedge aclk) begin
                 err_clear      <= 1'b1;
                 err_clear_mask <= wdata;
             end
+            32'h78: begin
+                if (w_strb[0]) begin
+                    perf_clear <= wdata[0];
+                    if (wdata[1]) begin
+                        perf_cycles_snap <= perf_cycles;
+                        perf_m_axi_rd_beats_snap <= perf_m_axi_rd_beats;
+                        perf_m_axi_wr_beats_snap <= perf_m_axi_wr_beats;
+                        perf_m_axi_rd_bytes_snap <= perf_m_axi_rd_bytes;
+                        perf_m_axi_wr_bytes_snap <= perf_m_axi_wr_bytes;
+                        perf_m_axi_rd_bw_snap <= perf_m_axi_rd_bw;
+                        perf_m_axi_wr_bw_snap <= perf_m_axi_wr_bw;
+                        perf_m_axi_rd_util_snap <= perf_m_axi_rd_util;
+                        perf_m_axi_wr_util_snap <= perf_m_axi_wr_util;
+                        perf_m_axi_rd_bursts_snap <= perf_m_axi_rd_bursts;
+                        perf_m_axi_wr_bursts_snap <= perf_m_axi_wr_bursts;
+                        perf_mac_ops_snap <= perf_mac_ops;
+                        perf_ops_snap <= perf_ops;
+                        perf_busy_cycles_snap <= perf_busy_cycles;
+                        perf_compute_cycles_snap <= perf_compute_cycles;
+                        perf_dma_cycles_snap <= perf_dma_cycles;
+                        perf_tops_x1e6_snap <= perf_tops_x1e6;
+                        perf_compute_util_bp_snap <= perf_compute_util_bp;
+                        perf_e2e_util_bp_snap <= perf_e2e_util_bp;
+                        perf_peak_ops_per_cycle_snap <= perf_peak_ops_per_cycle;
+                    end
+                end
+            end
             32'h80: if (w_strb[0]) conv_ifm_shape <= wdata;
             32'h84: if (w_strb[0]) conv_channels <= wdata;
             32'h88: if (w_strb[0]) conv_kernel <= wdata;
@@ -250,6 +321,7 @@ always @(posedge aclk) begin
     end else begin
         err_clear <= 1'b0;
         err_clear_mask <= 32'd0;
+        perf_clear <= 1'b0;
     end
 end
 
@@ -289,18 +361,19 @@ always @(*) begin
         32'h3C: rdata_r = {30'b0, cfg_shape};
         32'h40: rdata_r = desc_base;
         32'h44: rdata_r = desc_count;
-        32'h48: rdata_r = perf_cycles;
-        32'h4C: rdata_r = perf_m_axi_rd_beats;
-        32'h50: rdata_r = perf_m_axi_wr_beats;
-        32'h54: rdata_r = perf_m_axi_rd_bytes;
-        32'h58: rdata_r = perf_m_axi_wr_bytes;
-        32'h5C: rdata_r = perf_m_axi_rd_bw;
-        32'h60: rdata_r = perf_m_axi_wr_bw;
-        32'h64: rdata_r = perf_m_axi_rd_util;
-        32'h68: rdata_r = perf_m_axi_wr_util;
-        32'h6C: rdata_r = perf_m_axi_rd_bursts;
-        32'h70: rdata_r = perf_m_axi_wr_bursts;
+        32'h48: rdata_r = perf_cycles_snap;
+        32'h4C: rdata_r = perf_m_axi_rd_beats_snap;
+        32'h50: rdata_r = perf_m_axi_wr_beats_snap;
+        32'h54: rdata_r = perf_m_axi_rd_bytes_snap;
+        32'h58: rdata_r = perf_m_axi_wr_bytes_snap;
+        32'h5C: rdata_r = perf_m_axi_rd_bw_snap;
+        32'h60: rdata_r = perf_m_axi_wr_bw_snap;
+        32'h64: rdata_r = perf_m_axi_rd_util_snap;
+        32'h68: rdata_r = perf_m_axi_wr_util_snap;
+        32'h6C: rdata_r = perf_m_axi_rd_bursts_snap;
+        32'h70: rdata_r = perf_m_axi_wr_bursts_snap;
         32'h74: rdata_r = err_status;
+        32'h78: rdata_r = 32'd0;
         32'h80: rdata_r = conv_ifm_shape;
         32'h84: rdata_r = conv_channels;
         32'h88: rdata_r = conv_kernel;
@@ -309,17 +382,17 @@ always @(*) begin
         32'h94: rdata_r = conv_dilation;
         32'h98: rdata_r = bias_addr;
         32'h9C: rdata_r = quant_cfg;
-        32'hA0: rdata_r = perf_mac_ops[31:0];
-        32'hA4: rdata_r = perf_mac_ops[63:32];
-        32'hA8: rdata_r = perf_ops[31:0];
-        32'hAC: rdata_r = perf_ops[63:32];
-        32'hB0: rdata_r = perf_busy_cycles;
-        32'hB4: rdata_r = perf_compute_cycles;
-        32'hB8: rdata_r = perf_dma_cycles;
-        32'hBC: rdata_r = perf_tops_x1e6;
-        32'hC0: rdata_r = perf_compute_util_bp;
-        32'hC4: rdata_r = perf_e2e_util_bp;
-        32'hC8: rdata_r = perf_peak_ops_per_cycle;
+        32'hA0: rdata_r = perf_mac_ops_snap[31:0];
+        32'hA4: rdata_r = perf_mac_ops_snap[63:32];
+        32'hA8: rdata_r = perf_ops_snap[31:0];
+        32'hAC: rdata_r = perf_ops_snap[63:32];
+        32'hB0: rdata_r = perf_busy_cycles_snap;
+        32'hB4: rdata_r = perf_compute_cycles_snap;
+        32'hB8: rdata_r = perf_dma_cycles_snap;
+        32'hBC: rdata_r = perf_tops_x1e6_snap;
+        32'hC0: rdata_r = perf_compute_util_bp_snap;
+        32'hC4: rdata_r = perf_e2e_util_bp_snap;
+        32'hC8: rdata_r = perf_peak_ops_per_cycle_snap;
         default: rdata_r = 32'hDEADBEEF;
     endcase
 end

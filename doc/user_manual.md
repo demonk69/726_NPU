@@ -116,4 +116,4 @@ Closed-loop testbench compares the class marker against exact Python model outpu
 
 ## FPGA I/O ABI Planned
 
-PYNQ-Z2 deployment uses PS ARM plus PL NPU as the primary route. Each image returns one class plus raw performance counters; derived TOPS and bus utilization are computed on the host. The current ABI direction is documented in `doc/pynq_z2_deployment.md`.
+PYNQ-Z2 deployment uses PS ARM plus PL NPU as the primary route. The first board interface is the normal PYNQ Python/SSH/notebook path, with UART deferred as an optional transport. Each image returns one class plus raw performance counters; derived TOPS and bus utilization are computed on PS or the host. The current ABI direction is documented in `doc/pynq_z2_deployment.md`.

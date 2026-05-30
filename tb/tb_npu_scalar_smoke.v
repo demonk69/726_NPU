@@ -34,6 +34,7 @@ localparam REG_PERF_RD_UTIL   = 32'h64;
 localparam REG_PERF_WR_UTIL   = 32'h68;
 localparam REG_PERF_RD_BURSTS = 32'h6C;
 localparam REG_PERF_WR_BURSTS = 32'h70;
+localparam REG_PERF_CTRL      = 32'h78;
 localparam REG_PERF_MAC_OPS_LO = 32'hA0;
 localparam REG_PERF_OPS_LO     = 32'hA8;
 localparam REG_PERF_BUSY_CYCLES = 32'hB0;
@@ -46,6 +47,8 @@ localparam REG_PERF_PEAK_OPS_CYCLE = 32'hC8;
 
 localparam CTRL_START    = 32'h01;
 localparam CTRL_OS       = 32'h10;
+localparam PERF_CTRL_CLEAR    = 32'h01;
+localparam PERF_CTRL_SNAPSHOT = 32'h02;
 
 reg clk = 1'b0;
 always #(CLK_T/2) clk = ~clk;
@@ -252,21 +255,43 @@ task axi_write;
         s_wstrb   <= 4'hF;
         s_wvalid  <= 1'b1;
         s_bready  <= 1'b1;
-        @(posedge clk);
-        while (!s_awready) @(posedge clk);
+        guard = 0;
+        while (!s_awready && guard < 100) begin
+            @(posedge clk);
+            guard = guard + 1;
+        end
+        if (guard >= 100) begin
+            $display("[FAIL] AXI-Lite write AW timeout at 0x%08h", addr);
+            $finish;
+        end
         @(posedge clk);
         s_awvalid <= 1'b0;
-        s_wvalid  <= 1'b0;
+
+        guard = 0;
+        while (!s_wready && guard < 100) begin
+            @(posedge clk);
+            guard = guard + 1;
+        end
+        if (guard >= 100) begin
+            $display("[FAIL] AXI-Lite write W timeout at 0x%08h", addr);
+            $finish;
+        end
+
         guard = 0;
         while (!s_bvalid && guard < 100) begin
             @(posedge clk);
             guard = guard + 1;
         end
+
+        @(posedge clk);
+        s_wvalid <= 1'b0;
         s_bready <= 1'b0;
+        s_wstrb  <= 4'h0;
         if (guard >= 100) begin
-            $display("[FAIL] AXI-Lite write timeout at 0x%08h", addr);
+            $display("[FAIL] AXI-Lite write B timeout at 0x%08h", addr);
             $finish;
         end
+        @(posedge clk);
     end
 endtask
 
@@ -309,8 +334,9 @@ task wait_done;
             guard = guard + 1;
         end
         if (!status[1]) begin
-            $display("[FAIL] NPU timeout state=%0d dma=%0d",
-                     u_npu.u_ctrl.state, u_npu.u_dma.dma_state);
+            $display("[FAIL] NPU timeout state=%0d dma=%0d ctrl=0x%08h busy=%0d done=%0d err=%0d",
+                     u_npu.u_ctrl.state, u_npu.u_dma.dma_state, u_npu.ctrl_reg,
+                     u_npu.status_busy, u_npu.status_done, u_npu.status_error);
             $finish;
         end
         axi_write(REG_CTRL, 32'h0);
@@ -328,6 +354,9 @@ reg [31:0] perf_mac_ops_lo, perf_ops_lo;
 reg [31:0] perf_busy_cycles, perf_compute_cycles, perf_dma_cycles;
 reg [31:0] perf_tops_x1e6, perf_compute_util, perf_e2e_util;
 reg [31:0] perf_peak_ops_cycle;
+reg [31:0] perf_cycles_again, perf_rd_beats_again;
+reg [31:0] clear_rd_beats, clear_wr_beats, clear_mac_ops_lo;
+reg [31:0] clear_busy_cycles, clear_compute_cycles, clear_dma_cycles;
 
 initial begin
     for (i = 0; i < DRAM_SZ; i = i + 1)
@@ -350,6 +379,7 @@ initial begin
     axi_write(REG_A_ADDR, 32'h120);
     axi_write(REG_R_ADDR, 32'h140);
     axi_write(REG_CFG_SHAPE, 32'h0);
+    axi_write(REG_PERF_CTRL, PERF_CTRL_CLEAR);
     axi_write(REG_CTRL, CTRL_START | CTRL_OS);
 
     repeat (3) @(posedge clk);
@@ -367,6 +397,8 @@ initial begin
         $display("[FAIL] cfg_shape was not latched for current run: got %0d", u_npu.ctrl_cfg_shape);
         $finish;
     end
+
+    axi_write(REG_PERF_CTRL, PERF_CTRL_SNAPSHOT);
 
     axi_read(REG_PERF_CYCLES, perf_cycles);
     axi_read(REG_PERF_RD_BEATS, perf_rd_beats);
@@ -389,12 +421,20 @@ initial begin
     axi_read(REG_PERF_E2E_UTIL, perf_e2e_util);
     axi_read(REG_PERF_PEAK_OPS_CYCLE, perf_peak_ops_cycle);
 
+    repeat (4) @(posedge clk);
+    axi_read(REG_PERF_CYCLES, perf_cycles_again);
+    axi_read(REG_PERF_RD_BEATS, perf_rd_beats_again);
+
+    if (perf_cycles_again !== perf_cycles || perf_rd_beats_again !== perf_rd_beats) begin
+        $display("[FAIL] perf snapshot changed cycles=%0d/%0d rd_beats=%0d/%0d",
+                 perf_cycles, perf_cycles_again, perf_rd_beats, perf_rd_beats_again);
+        $finish;
+    end
+
     if (perf_cycles == 32'd0 ||
         perf_rd_beats !== 32'd2 || perf_wr_beats !== 32'd1 ||
         perf_rd_bytes !== 32'd8 || perf_wr_bytes !== 32'd4 ||
-        perf_rd_bursts !== 32'd2 || perf_wr_bursts !== 32'd1 ||
-        perf_rd_bw == 32'd0 || perf_wr_bw == 32'd0 ||
-        perf_rd_util == 32'd0 || perf_wr_util == 32'd0) begin
+        perf_rd_bursts !== 32'd2 || perf_wr_bursts !== 32'd1) begin
         $display("[FAIL] perf counters cycles=%0d rd_beats=%0d wr_beats=%0d rd_bytes=%0d wr_bytes=%0d rd_bw=%0d wr_bw=%0d rd_util=%0d wr_util=%0d rd_bursts=%0d wr_bursts=%0d",
                  perf_cycles, perf_rd_beats, perf_wr_beats,
                  perf_rd_bytes, perf_wr_bytes, perf_rd_bw, perf_wr_bw,
@@ -402,11 +442,17 @@ initial begin
         $finish;
     end
 
+    if (perf_rd_bw !== 32'd0 || perf_wr_bw !== 32'd0 ||
+        perf_rd_util !== 32'd0 || perf_wr_util !== 32'd0) begin
+        $display("[FAIL] board-default AXI derived counters should be disabled rd_bw=%0d wr_bw=%0d rd_util=%0d wr_util=%0d",
+                 perf_rd_bw, perf_wr_bw, perf_rd_util, perf_wr_util);
+        $finish;
+    end
+
     if (perf_mac_ops_lo !== 32'd4 || perf_ops_lo !== 32'd8 ||
         perf_busy_cycles == 32'd0 || perf_compute_cycles == 32'd0 ||
-        perf_dma_cycles == 32'd0 || perf_tops_x1e6 == 32'd0 ||
-        perf_compute_util == 32'd0 || perf_e2e_util == 32'd0 ||
-        perf_peak_ops_cycle !== 32'd2) begin
+        perf_dma_cycles == 32'd0 ||
+        perf_peak_ops_cycle !== 32'd8) begin
         $display("[FAIL] op perf mac=%0d ops=%0d busy=%0d compute=%0d dma=%0d tops_x1e6=%0d compute_util=%0d e2e_util=%0d peak_ops=%0d",
                  perf_mac_ops_lo, perf_ops_lo, perf_busy_cycles,
                  perf_compute_cycles, perf_dma_cycles, perf_tops_x1e6,
@@ -414,11 +460,35 @@ initial begin
         $finish;
     end
 
-    $display("[PERF] scalar_smoke MAC_OPS=%0d OPS=%0d BUSY_CYCLES=%0d COMPUTE_CYCLES=%0d DMA_CYCLES=%0d TOPS_X1E6=%0d COMPUTE_UTIL_BP=%0d E2E_UTIL_BP=%0d PEAK_OPS_CYCLE=%0d",
+    if (perf_tops_x1e6 !== 32'd0 || perf_compute_util !== 32'd0 || perf_e2e_util !== 32'd0) begin
+        $display("[FAIL] board-default op derived counters should be disabled tops_x1e6=%0d compute_util=%0d e2e_util=%0d",
+                 perf_tops_x1e6, perf_compute_util, perf_e2e_util);
+        $finish;
+    end
+
+    axi_write(REG_PERF_CTRL, PERF_CTRL_CLEAR);
+    repeat (2) @(posedge clk);
+    axi_write(REG_PERF_CTRL, PERF_CTRL_SNAPSHOT);
+    axi_read(REG_PERF_RD_BEATS, clear_rd_beats);
+    axi_read(REG_PERF_WR_BEATS, clear_wr_beats);
+    axi_read(REG_PERF_MAC_OPS_LO, clear_mac_ops_lo);
+    axi_read(REG_PERF_BUSY_CYCLES, clear_busy_cycles);
+    axi_read(REG_PERF_COMPUTE_CYCLES, clear_compute_cycles);
+    axi_read(REG_PERF_DMA_CYCLES, clear_dma_cycles);
+
+    if (clear_rd_beats !== 32'd0 || clear_wr_beats !== 32'd0 ||
+        clear_mac_ops_lo !== 32'd0 || clear_busy_cycles !== 32'd0 ||
+        clear_compute_cycles !== 32'd0 || clear_dma_cycles !== 32'd0) begin
+        $display("[FAIL] perf clear failed rd=%0d wr=%0d mac=%0d busy=%0d compute=%0d dma=%0d",
+                 clear_rd_beats, clear_wr_beats, clear_mac_ops_lo,
+                 clear_busy_cycles, clear_compute_cycles, clear_dma_cycles);
+        $finish;
+    end
+
+    $display("[PERF] scalar_smoke MAC_OPS=%0d OPS=%0d BUSY_CYCLES=%0d COMPUTE_CYCLES=%0d DMA_CYCLES=%0d PEAK_OPS_CYCLE=%0d",
              perf_mac_ops_lo, perf_ops_lo, perf_busy_cycles,
-             perf_compute_cycles, perf_dma_cycles, perf_tops_x1e6,
-             perf_compute_util, perf_e2e_util, perf_peak_ops_cycle);
-    $display("[PASS] tb_npu_scalar_smoke: scalar INT8 OS result=300, cfg_shape latched, perf counters valid");
+             perf_compute_cycles, perf_dma_cycles, perf_peak_ops_cycle);
+    $display("[PASS] tb_npu_scalar_smoke: scalar INT8 OS result=300, cfg_shape latched, perf clear/snapshot valid");
     $finish;
 end
 

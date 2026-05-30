@@ -62,10 +62,6 @@ RepOpt VGG needs per-output-channel requant. The runtime closed-loop flow theref
 
 ## Planned Additions For FPGA Deployment
 
-| Planned module | Purpose |
-|---|---|
-| `uart` | Receive 3x32x32 INT8 images and return class byte |
-| `spi_flash_reader` | Read firmware/static assets from SPI Flash |
-| `boot_rom` | Copy Flash contents into SRAM/DRAM after reset |
+The current PYNQ-Z2 route uses Zynq PS ARM for runtime control and PL for the NPU. Immediate RTL work focuses on board-ready raw performance counters with clear/snapshot support. Pure-PL UART/SPI/Boot ROM modules are deferred unless targeting a non-Zynq FPGA board.
 
-See `doc/uart_spi_fpga_plan.md` for the planned interface and bring-up order.
+See `doc/pynq_z2_deployment.md` for the current interface and bring-up order.

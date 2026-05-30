@@ -171,4 +171,4 @@ sim/wave/<task_id>_<test_name>.vcd
 sim/wave/<task_id>_<test_name>.log
 ```
 
-并在 [task_breakdown.md](task_breakdown.md) 中记录 PASS/FAIL。
+并在当前验证文档中记录 PASS/FAIL。

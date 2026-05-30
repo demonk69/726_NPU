@@ -116,4 +116,4 @@ Closed-loop testbench compares the class marker against exact Python model outpu
 
 ## FPGA I/O ABI Planned
 
-UART/SPI/Boot ROM are not implemented yet. The planned ABI is documented in `doc/uart_spi_fpga_plan.md`.
+PYNQ-Z2 deployment uses PS ARM plus PL NPU as the primary route. Each image returns one class plus raw performance counters; derived TOPS and bus utilization are computed on the host. The current ABI direction is documented in `doc/pynq_z2_deployment.md`.

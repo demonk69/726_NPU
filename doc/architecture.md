@@ -4,7 +4,7 @@ Updated: 2026-05-26
 
 This document describes the current implementation state. It is not a historical roadmap and not a target-only architecture plan.
 
-For verification results, see `doc/verification_status.md`. For the FPGA UART/SPI deployment plan, see `doc/uart_spi_fpga_plan.md`.
+For verification results, see `doc/verification_status.md`. For the PYNQ-Z2 deployment direction, see `doc/pynq_z2_deployment.md`.
 
 ## System Boundary
 
@@ -148,11 +148,6 @@ Current policy:
 
 ## FPGA Deployment Direction
 
-The next hardware integration stage adds:
+The current board target is PYNQ-Z2. The primary route uses Zynq PS ARM as the runtime CPU and keeps the NPU in PL. PS/host software will receive images, manage DDR buffers, program NPU registers, read raw performance counters, and compute derived TOPS and bus utilization.
 
-- UART for image input and class output
-- SPI Flash reader for firmware/static model assets
-- Boot ROM to copy Flash contents into SRAM/DRAM
-- Host-side image preprocessing and serial client
-
-The planned flow is documented in `doc/uart_spi_fpga_plan.md`.
+The previous pure-PL UART/SPI Flash/Boot ROM route is deferred for non-Zynq boards. The current flow is documented in `doc/pynq_z2_deployment.md`.

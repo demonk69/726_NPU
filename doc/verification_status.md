@@ -58,14 +58,14 @@ The default runtime closed-loop shape is `16x16`. The generator and script accep
 
 ## Deployment Status
 
-The RTL SoC is still a simulation SoC. It has PicoRV32, SRAM, DRAM model, and NPU, but no UART, SPI Flash controller, or boot ROM yet.
+The RTL SoC is still a simulation SoC. It has PicoRV32, SRAM, DRAM model, and NPU. The current board target is PYNQ-Z2, with PS ARM as the runtime CPU and the NPU in PL.
 
-The planned FPGA deployment path is documented in `doc/uart_spi_fpga_plan.md`:
+The deployment path is documented in `doc/pynq_z2_deployment.md`:
 
-- SPI Flash stores firmware and static model assets.
-- Boot ROM copies firmware and static assets into SRAM/DRAM.
-- Upper PC preprocesses each image to 3x32x32 INT8 bytes.
-- UART sends one image to FPGA and receives one class byte.
+- PS ARM programs the PL NPU and accesses DDR buffers.
+- Host sends one preprocessed 3x32x32 INT8 image per inference.
+- Each image returns one class plus raw performance counters.
+- TOPS and bus utilization are computed from raw counters on the host.
 
 ## Regression Notes
 

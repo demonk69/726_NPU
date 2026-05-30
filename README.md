@@ -2,7 +2,7 @@
 
 Current state: Linux + Verilator simulation of a PicoRV32-controlled NPU SoC for RepOpt VGG-like CIFAR-10 inference.
 
-This README describes the maintained flow. Older Windows/Icarus plans and worklogs are archived under `doc/archive/` and should not be treated as current guidance.
+This README describes the maintained flow. Older Windows/Icarus worklogs are archived under `doc/archive/` and should not be treated as current guidance. Obsolete plan documents have been removed.
 
 ## What Works Now
 
@@ -72,15 +72,14 @@ The default closed-loop shape is `16x16`. The run script and generator also supp
 
 ## FPGA Deployment Direction
 
-The planned board flow is:
+The current board target is PYNQ-Z2. The primary route uses the Zynq PS ARM as the runtime CPU and keeps the NPU in PL:
 
-- SPI Flash stores firmware and static model assets once.
-- Boot ROM copies firmware to SRAM and model assets to DRAM after reset.
-- Upper PC preprocesses each image into 3x32x32 INT8 bytes.
-- PC sends the bytes over UART.
-- FPGA runs closed-loop inference and returns one class byte.
+- PC/host sends one preprocessed 3x32x32 INT8 image per inference.
+- PS ARM writes image/model/runtime buffers in DDR and programs the PL NPU.
+- PL NPU runs tile GEMM and exposes raw performance counters.
+- PS/host returns one class plus raw counters; TOPS and bus utilization are computed on the host.
 
-See `doc/uart_spi_fpga_plan.md` for the deployment plan.
+See `doc/pynq_z2_deployment.md` for the current deployment plan.
 
 ## Documentation Map
 
@@ -90,7 +89,7 @@ See `doc/uart_spi_fpga_plan.md` for the deployment plan.
 | `doc/architecture.md` | Current SoC/NPU architecture and address map |
 | `doc/vgg_e2e_flow.md` | Fast e2e flow details |
 | `doc/vgg_closed_loop_flow.md` | Runtime closed-loop flow details |
-| `doc/uart_spi_fpga_plan.md` | UART/SPI Flash FPGA deployment plan |
+| `doc/pynq_z2_deployment.md` | PYNQ-Z2 deployment and counter readback plan |
 | `doc/known_issues.md` | Current limitations and risks |
 | `doc/user_manual.md` | Register and firmware-facing ABI reference |
 | `doc/rtl_reference.md` | RTL module reference |
@@ -101,5 +100,5 @@ See `doc/uart_spi_fpga_plan.md` for the deployment plan.
 
 - `run_vgg_e2e.sh` is the fast baseline, but Python pre-generates all Conv A tiles.
 - `run_vgg_closed_loop.sh` is the runtime closed-loop path and is the basis for FPGA I/O deployment.
-- The current SoC still has no UART/SPI peripherals in RTL. The FPGA deployment plan documents the next implementation stage.
+- PYNQ-Z2 deployment uses PS ARM plus PL NPU as the primary route; pure-PL UART/SPI/Boot ROM bring-up is deferred.
 - Do not use archived Windows/Icarus documents as current run instructions.

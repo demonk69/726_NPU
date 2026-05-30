@@ -84,11 +84,12 @@ These are generated artifacts and should not be committed.
 
 ## FPGA Host Direction
 
-For board deployment, runtime host preprocessing should be split from PyTorch checkpoint loading:
+For PYNQ-Z2 deployment, runtime host preprocessing should be split from PyTorch checkpoint loading:
 
 - Extract input quant constants once from the checkpoint.
 - Use a small Pillow + numpy script to convert images to 3072 INT8 bytes.
-- Send those bytes over UART.
-- Receive one class byte from FPGA.
+- Send one image per inference to the PYNQ runtime.
+- Receive one class plus raw performance counters.
+- Compute TOPS and bus utilization on the host from raw counters.
 
-See `doc/uart_spi_fpga_plan.md`.
+See `doc/pynq_z2_deployment.md`.

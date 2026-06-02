@@ -7,6 +7,7 @@ localparam REG_CTRL       = 32'h00;
 localparam REG_STATUS     = 32'h04;
 localparam REG_INT_EN     = 32'h08;
 localparam REG_INT_CLR    = 32'h0C;
+localparam REG_M_DIM      = 32'h10;
 localparam REG_DESC_BASE  = 32'h40;
 localparam REG_DESC_COUNT = 32'h44;
 localparam REG_ERR_STATUS = 32'h74;
@@ -153,6 +154,48 @@ task axi_write;
     end
 endtask
 
+task axi_write_delayed_bready;
+    input [31:0] addr;
+    input [31:0] data;
+    integer i;
+    begin
+        awaddr  <= addr;
+        awvalid <= 1'b1;
+        wdata   <= data;
+        wstrb   <= 4'hF;
+        wvalid  <= 1'b0;
+        bready  <= 1'b0;
+        @(posedge clk);
+        awvalid <= 1'b0;
+        wvalid  <= 1'b1;
+        @(posedge clk);
+        wvalid <= 1'b0;
+        @(posedge clk);
+
+        if (bvalid !== 1'b1) begin
+            $display("[FAIL] delayed-BREADY write did not assert BVALID");
+            $fatal;
+        end
+
+        for (i = 0; i < 3; i = i + 1) begin
+            @(posedge clk);
+            if (bvalid !== 1'b1) begin
+                $display("[FAIL] BVALID dropped before BREADY, hold_cycle=%0d", i);
+                $fatal;
+            end
+        end
+
+        bready <= 1'b1;
+        @(posedge clk);
+        bready <= 1'b0;
+        @(posedge clk);
+        if (bvalid !== 1'b0) begin
+            $display("[FAIL] BVALID did not clear after BREADY handshake");
+            $fatal;
+        end
+    end
+endtask
+
 task pulse_done_irq;
     begin
         @(negedge clk);
@@ -241,6 +284,9 @@ initial begin
 
     expect_read(REG_DESC_BASE, 32'd0);
     expect_read(REG_DESC_COUNT, 32'd0);
+
+    axi_write_delayed_bready(REG_M_DIM, 32'd17);
+    expect_read(REG_M_DIM, 32'd17);
 
     axi_write(REG_DESC_BASE, 32'h0000_4000);
     axi_write(REG_DESC_COUNT, 32'd3);

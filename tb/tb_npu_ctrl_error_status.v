@@ -3,6 +3,7 @@
 module tb_npu_ctrl_error_status;
     localparam CLK_T = 10;
 
+    localparam [31:0] CTRL_START_DIRECT = 32'h0000_0011;
     localparam [31:0] CTRL_START_DESC = 32'h0000_0081;
     localparam [31:0] DESC_CTRL_SUPPORTED =
         (32'h1 << 28) | // VERSION=1
@@ -20,12 +21,17 @@ module tb_npu_ctrl_error_status;
     localparam [31:0] ERR_DESC_COUNT_ZERO      = 32'h0000_0001;
     localparam [31:0] ERR_DESC_UNSUPPORTED     = 32'h0000_0002;
     localparam [31:0] ERR_DESC_COUNT_EXHAUSTED = 32'h0000_0004;
+    localparam [31:0] ERR_DMA_RRESP            = 32'h0000_0010;
+    localparam [31:0] ERR_DIRECT_INVALID_DIM   = 32'h0000_0100;
 
     reg clk = 1'b0;
     always #(CLK_T/2) clk = ~clk;
 
     reg rst_n;
     reg [31:0] ctrl_reg;
+    reg [31:0] m_dim_cfg;
+    reg [31:0] n_dim_cfg;
+    reg [31:0] k_dim_cfg;
     reg [31:0] desc_base;
     reg [31:0] desc_count;
     wire desc_start;
@@ -52,6 +58,7 @@ module tb_npu_ctrl_error_status;
     reg  dma_r_done;
     wire [31:0] dma_r_addr;
     wire [15:0] dma_r_len;
+    reg [31:0] dma_error_status;
     wire irq;
 
     npu_ctrl #(
@@ -64,9 +71,9 @@ module tb_npu_ctrl_error_status;
         .clk(clk),
         .rst_n(rst_n),
         .ctrl_reg(ctrl_reg),
-        .m_dim(32'd1),
-        .n_dim(32'd1),
-        .k_dim(32'd1),
+        .m_dim(m_dim_cfg),
+        .n_dim(n_dim_cfg),
+        .k_dim(k_dim_cfg),
         .w_addr(32'h0000_1000),
         .a_addr(32'h0000_2000),
         .r_addr(32'h0000_3000),
@@ -116,6 +123,7 @@ module tb_npu_ctrl_error_status;
         .dma_r_done(dma_r_done),
         .dma_r_addr(dma_r_addr),
         .dma_r_len(dma_r_len),
+        .dma_error_status(dma_error_status),
         .pe_en(),
         .pe_flush(),
         .pe_mode(),
@@ -154,6 +162,15 @@ module tb_npu_ctrl_error_status;
             desc_count = count;
             @(negedge clk);
             ctrl_reg = CTRL_START_DESC;
+            @(negedge clk);
+            ctrl_reg = 32'd0;
+        end
+    endtask
+
+    task start_direct;
+        begin
+            @(negedge clk);
+            ctrl_reg = CTRL_START_DIRECT;
             @(negedge clk);
             ctrl_reg = 32'd0;
         end
@@ -217,6 +234,9 @@ module tb_npu_ctrl_error_status;
     initial begin
         rst_n = 1'b0;
         ctrl_reg = 32'd0;
+        m_dim_cfg = 32'd1;
+        n_dim_cfg = 32'd1;
+        k_dim_cfg = 32'd1;
         desc_base = 32'h0000_4000;
         desc_count = 32'd0;
         desc_done = 1'b0;
@@ -224,12 +244,26 @@ module tb_npu_ctrl_error_status;
         dma_w_done = 1'b0;
         dma_a_done = 1'b0;
         dma_r_done = 1'b0;
+        dma_error_status = 32'd0;
         err_clear = 1'b0;
         err_clear_mask = 32'd0;
 
         repeat (4) @(posedge clk);
         rst_n = 1'b1;
         repeat (2) @(posedge clk);
+
+        m_dim_cfg = 32'd0;
+        start_direct();
+        wait_for_error(ERR_DIRECT_INVALID_DIM);
+        clear_errors();
+        m_dim_cfg = 32'd1;
+
+        @(negedge clk);
+        dma_error_status = ERR_DMA_RRESP;
+        @(negedge clk);
+        dma_error_status = 32'd0;
+        wait_for_error(ERR_DMA_RRESP);
+        clear_errors();
 
         start_desc(32'd0);
         wait_for_error(ERR_DESC_COUNT_ZERO);
@@ -245,7 +279,7 @@ module tb_npu_ctrl_error_status;
         wait_for_error(ERR_DESC_COUNT_EXHAUSTED);
         clear_errors();
 
-        $display("[PASS] tb_npu_ctrl_error_status: controller descriptor errors passed");
+        $display("[PASS] tb_npu_ctrl_error_status: controller errors passed");
         $finish;
     end
 

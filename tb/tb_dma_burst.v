@@ -101,7 +101,7 @@ npu_dma #(
     .a_ofm_m_base(32'd0),
     .a_ofm_k_base(32'd0),
     .a_ofm_k_len(16'd0),
-    .a_ofm_active_rows(3'd0),
+    .a_ofm_active_rows(5'd0),
     .a_ofm_fp16_mode(1'b0),
     .a_im2col_mode(1'b0),
     .a_im2col_m_index(32'd0),

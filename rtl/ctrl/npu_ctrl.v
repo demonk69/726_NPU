@@ -145,6 +145,7 @@ module npu_ctrl #(
     input  wire              dma_r_done,
     output reg [31:0]        dma_r_addr,
     output reg [15:0]        dma_r_len,
+    input  wire [31:0]       dma_error_status,
     // PE array control
     output reg               pe_en,
     output reg               pe_flush,
@@ -230,6 +231,8 @@ localparam [31:0] ERR_DESC_COUNT_ZERO      = 32'h0000_0001;
 localparam [31:0] ERR_DESC_UNSUPPORTED     = 32'h0000_0002;
 localparam [31:0] ERR_DESC_COUNT_EXHAUSTED = 32'h0000_0004;
 localparam [31:0] ERR_IFM_PREV_MISSING     = 32'h0000_0008;
+localparam [31:0] ERR_DIRECT_INVALID_DIM   = 32'h0000_0100;
+localparam [31:0] ERR_DIRECT_INVALID_CONV  = 32'h0000_0200;
 
 // ---------------------------------------------------------------------------
 // ctrl_reg bit decode  (live, from AXI-Lite)
@@ -304,6 +307,20 @@ end
 wire cfg_start_rise = cfg_start && !cfg_start_d1;
 wire direct_start_rise = cfg_start_rise && !cfg_desc_mode;
 wire desc_mode_start_rise = cfg_start_rise && cfg_desc_mode;
+
+wire direct_dim_invalid = (m_dim == 32'd0) || (n_dim == 32'd0) || (k_dim == 32'd0);
+wire direct_conv_invalid = cfg_conv_im2col &&
+    ((conv_ifm_shape[15:0] == 16'd0) || (conv_ifm_shape[31:16] == 16'd0) ||
+     (conv_channels[15:0] == 16'd0) ||
+     (conv_kernel[15:0] == 16'd0) || (conv_kernel[31:16] == 16'd0) ||
+     (conv_out_shape[15:0] == 16'd0) || (conv_out_shape[31:16] == 16'd0) ||
+     (conv_stride_pad[7:0] == 8'd0) || (conv_stride_pad[15:8] == 8'd0) ||
+     (conv_dilation[7:0] == 8'd0) || (conv_dilation[15:8] == 8'd0));
+wire [31:0] direct_start_err_mask =
+    (direct_dim_invalid ? ERR_DIRECT_INVALID_DIM : 32'd0) |
+    (direct_conv_invalid ? ERR_DIRECT_INVALID_CONV : 32'd0);
+wire direct_start_invalid = (direct_start_err_mask != 32'd0);
+wire direct_start_valid_rise = direct_start_rise && !direct_start_invalid;
 
 reg        prev_ofm_valid;
 reg [31:0] prev_ofm_addr;
@@ -408,7 +425,7 @@ always @(posedge clk) begin
         lk_conv_pad_h <= 8'd0; lk_conv_pad_w <= 8'd0;
         lk_conv_dilation_h <= 8'd1; lk_conv_dilation_w <= 8'd1;
         lk_desc_irq_en <= 1'b0;
-    end else if (direct_start_rise) begin
+    end else if (direct_start_valid_rise) begin
         lk_m_dim  <= m_dim;
         lk_n_dim  <= n_dim;
         lk_k_dim  <= k_dim;
@@ -825,6 +842,25 @@ always @(posedge clk) begin
         // ── done auto-clear when CPU de-asserts start ──
         if (!cfg_start) done <= 1'b0;
 
+        if (dma_error_status != 32'd0) begin
+            busy           <= 1'b0;
+            done           <= 1'b0;
+            irq            <= 1'b0;
+            pe_en          <= 1'b0;
+            pe_flush       <= 1'b0;
+            pe_load_w      <= 1'b0;
+            dma_w_start    <= 1'b0;
+            dma_a_start    <= 1'b0;
+            dma_bias_start <= 1'b0;
+            dma_r_start    <= 1'b0;
+            desc_start     <= 1'b0;
+            desc_mode_run  <= 1'b0;
+            w_ppb_clear    <= 1'b1;
+            a_ppb_clear    <= 1'b1;
+            r_fifo_clear   <= 1'b1;
+            err_set_mask   <= dma_error_status;
+            state          <= S_IDLE;
+        end else begin
         case (state)
 
             // =================================================================
@@ -872,7 +908,17 @@ always @(posedge clk) begin
                         desc_start    <= 1'b1;
                         state         <= S_FETCH_DESC;
                     end
-                end else if (direct_start_rise) begin
+                end else if (direct_start_rise && direct_start_invalid) begin
+                    busy           <= 1'b0;
+                    done           <= 1'b0;
+                    irq            <= 1'b0;
+                    desc_mode_run  <= 1'b0;
+                    w_ppb_clear    <= 1'b1;
+                    a_ppb_clear    <= 1'b1;
+                    r_fifo_clear   <= 1'b1;
+                    err_set_mask   <= direct_start_err_mask;
+                    state          <= S_IDLE;
+                end else if (direct_start_valid_rise) begin
                     busy           <= 1'b1;
                     desc_mode_run  <= 1'b0;
                     prev_ofm_valid <= 1'b0;
@@ -1410,6 +1456,7 @@ always @(posedge clk) begin
             default: state <= S_IDLE;
 
         endcase
+        end
     end
 end
 

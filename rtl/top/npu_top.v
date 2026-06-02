@@ -246,6 +246,7 @@ wire        dma_a_im2col_fp16_mode;
 wire desc_fetch_start, desc_fetch_done;
 wire [31:0] desc_fetch_addr;
 wire [511:0] desc_fetch_words;
+wire [31:0] dma_error_status;
 wire pe_en, pe_flush, pe_mode, pe_stat;
 wire pe_load_w, pe_swap_w, pe_acc_init_en;   // WS mode weight control and accumulator init
 wire pe_half_en;           // 8x32: half-array enable (0=top, 1=bottom)
@@ -360,6 +361,7 @@ npu_ctrl #(
     .dma_r_done   (dma_r_done),
     .dma_r_addr   (dma_r_addr),
     .dma_r_len    (dma_r_len),
+    .dma_error_status(dma_error_status),
     .pe_en        (pe_en),
     .pe_flush     (pe_flush),
     .pe_mode      (pe_mode),
@@ -537,6 +539,7 @@ npu_dma #(
     .r_fifo_wr_en   (r_fifo_wr_en),
     .r_fifo_din     (r_fifo_din),
     .r_fifo_full    (r_fifo_full),
+    .dma_err_status (dma_error_status),
     // AXI4 Master
     .m_axi_awaddr  (m_axi_awaddr),
     .m_axi_awlen   (m_axi_awlen),
@@ -812,7 +815,10 @@ wire [4:0] perf_active_rows = ctrl_tile_mode
 wire [5:0] perf_active_cols = ctrl_tile_mode
     ? ((ctrl_cfg_shape == 2'b11) ? 6'd32 : {1'b0, tile_lane_count})
     : 6'd1;
-wire       perf_compute_valid = ctrl_tile_mode ? tile_feed_step : scalar_pe_en;
+wire       tile_ws_perf_compute = tile_ws_direct && pe_en && !pe_flush &&
+                                  (ctrl_vec_consume || (ctrl_tile_k_cycle != 16'd0));
+wire       perf_compute_valid = ctrl_tile_mode ? (tile_feed_step || tile_ws_perf_compute)
+                                               : scalar_pe_en;
 
 op_counter #(
     .ROWS(PHY_ROWS),
@@ -1101,12 +1107,15 @@ always @(posedge sys_clk) begin
         tile_ser_active_cols <= 6'd0;
         tile_ser_row        <= 5'd0;
         tile_ser_col        <= 6'd0;
-        for (tile_ser_i = 0; tile_ser_i < 256; tile_ser_i = tile_ser_i + 1)
+        for (tile_ser_i = 0; tile_ser_i < MAX_TILE_RESULTS; tile_ser_i = tile_ser_i + 1)
             tile_result_buf[tile_ser_i] <= {ACC_W{1'b0}};
     end else if (tile_result_capture) begin
-        // Capture the full PE grid
-        for (tile_ser_i = 0; tile_ser_i < tile_capture_cnt; tile_ser_i = tile_ser_i + 1)
-            tile_result_buf[tile_ser_i] <= pe_array_result[tile_ser_i*ACC_W +: ACC_W];
+        // Fixed loop bound keeps synthesis tools from treating tile_capture_cnt
+        // as a dynamic generate-style limit.
+        for (tile_ser_i = 0; tile_ser_i < MAX_TILE_RESULTS; tile_ser_i = tile_ser_i + 1) begin
+            if (tile_ser_i < tile_capture_cnt)
+                tile_result_buf[tile_ser_i] <= pe_array_result[tile_ser_i*ACC_W +: ACC_W];
+        end
         tile_ser_active_rows <= ctrl_tile_active_rows;
         tile_ser_active_cols <= ctrl_tile_active_cols;
         tile_ser_row         <= 5'd0;

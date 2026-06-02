@@ -5,6 +5,8 @@ module tb_dma_write_burst;
 localparam DATA_W = 32;
 localparam CLK_T  = 10;
 localparam MEM_WORDS = 4096;
+localparam [31:0] ERR_DMA_BRESP    = 32'h0000_0020;
+localparam [31:0] ERR_DMA_WR_ALIGN = 32'h0000_0080;
 
 reg clk = 1'b0;
 always #(CLK_T/2) clk = ~clk;
@@ -66,6 +68,7 @@ reg  [1:0]  m_axi_rresp;
 reg         m_axi_rvalid;
 wire        m_axi_rready;
 reg         m_axi_rlast;
+wire [31:0] dma_err_status;
 
 npu_dma #(
     .DATA_W(DATA_W),
@@ -101,7 +104,7 @@ npu_dma #(
     .a_ofm_m_base(32'd0),
     .a_ofm_k_base(32'd0),
     .a_ofm_k_len(16'd0),
-    .a_ofm_active_rows(3'd0),
+    .a_ofm_active_rows(5'd0),
     .a_ofm_fp16_mode(1'b0),
     .a_im2col_mode(1'b0),
     .a_im2col_m_index(32'd0),
@@ -132,6 +135,7 @@ npu_dma #(
     .r_fifo_wr_en(r_fifo_wr_en),
     .r_fifo_din(r_fifo_din),
     .r_fifo_full(r_fifo_full),
+    .dma_err_status(dma_err_status),
     .m_axi_awaddr(m_axi_awaddr),
     .m_axi_awlen(m_axi_awlen),
     .m_axi_awsize(m_axi_awsize),
@@ -166,6 +170,7 @@ integer exp_aw_total;
 integer aw_seen;
 integer word_seen;
 integer errors;
+reg [31:0] saw_dma_err;
 
 reg [31:0] wr_base;
 reg [7:0]  wr_len;
@@ -243,6 +248,13 @@ always @(posedge clk) begin
     end
 end
 
+always @(posedge clk) begin
+    if (!rst_n)
+        saw_dma_err <= 32'd0;
+    else
+        saw_dma_err <= saw_dma_err | dma_err_status;
+end
+
 task push_result_words;
     input integer count;
     input [31:0] base;
@@ -312,6 +324,7 @@ initial begin
     m_axi_bresp = 0; m_axi_bvalid = 0;
     m_axi_arready = 0; m_axi_rdata = 0; m_axi_rresp = 0; m_axi_rvalid = 0; m_axi_rlast = 0;
     exp_aw_total = 0; aw_seen = 0; word_seen = 0; errors = 0; exp_data_base = 0;
+    saw_dma_err = 32'd0;
 
     for (i = 0; i < MEM_WORDS; i = i + 1)
         mem[i] = 32'd0;
@@ -359,8 +372,43 @@ initial begin
     expect_mem(32'h0000_0ff0, 32'hB000_0000);
     expect_mem(32'h0000_100C, 32'hB000_0007);
 
+    if (saw_dma_err !== 32'd0) begin
+        $display("[FAIL] unexpected DMA write error during aligned cases: 0x%08h", saw_dma_err);
+        errors = errors + 1;
+    end
+
+    // Case 3: unaligned write request is rejected before AW.
+    saw_dma_err = 32'd0;
+    exp_aw_total = 0;
+    aw_seen = 0;
+    word_seen = 0;
+    pulse_r_start(32'h0000_3001, 16'd4);
+    repeat (4) @(posedge clk);
+    if ((saw_dma_err & ERR_DMA_WR_ALIGN) == 32'd0 || aw_seen !== 0 || word_seen !== 0) begin
+        $display("[FAIL] unaligned write err=0x%08h aw=%0d words=%0d", saw_dma_err, aw_seen, word_seen);
+        errors = errors + 1;
+    end
+
+    // Case 4: BRESP error is surfaced after write response handshake.
+    saw_dma_err = 32'd0;
+    m_axi_bresp = 2'b10;
+    exp_awaddr[0] = 32'h0000_5000; exp_awlen[0] = 8'd0;
+    exp_aw_total = 1;
+    aw_seen = 0;
+    word_seen = 0;
+    exp_data_base = 32'hC000_0000;
+    push_result_words(1, exp_data_base);
+    pulse_r_start(32'h0000_5000, 16'd4);
+    wait_r_done();
+    m_axi_bresp = 2'b00;
+    repeat (2) @(posedge clk);
+    if ((saw_dma_err & ERR_DMA_BRESP) == 32'd0) begin
+        $display("[FAIL] BRESP write err=0x%08h", saw_dma_err);
+        errors = errors + 1;
+    end
+
     if (errors == 0)
-        $display("[PASS] tb_dma_write_burst: INCR write bursts and 4KB split passed");
+        $display("[PASS] tb_dma_write_burst: INCR writes, 4KB split, and errors passed");
     else
         $display("[FAIL] tb_dma_write_burst errors=%0d", errors);
     $finish;

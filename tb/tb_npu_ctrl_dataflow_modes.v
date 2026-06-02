@@ -25,10 +25,10 @@ module tb_npu_ctrl_dataflow_modes;
     wire vec_consume;
     wire [31:0] tile_m_base;
     wire [31:0] tile_n_base;
-    wire [3:0] tile_row_valid;
-    wire [3:0] tile_col_valid;
-    wire [2:0] tile_active_rows;
-    wire [2:0] tile_active_cols;
+    wire [15:0] tile_row_valid;
+    wire [15:0] tile_col_valid;
+    wire [4:0] tile_active_rows;
+    wire [5:0] tile_active_cols;
     wire [31:0] tile_k_base;
     wire [15:0] tile_k_len;
     wire [31:0] tile_k_index;
@@ -121,6 +121,7 @@ module tb_npu_ctrl_dataflow_modes;
         .dma_r_done(dma_r_done),
         .dma_r_addr(dma_r_addr),
         .dma_r_len(dma_r_len),
+        .dma_error_status(32'd0),
         .pe_en(pe_en),
         .pe_flush(pe_flush),
         .pe_mode(pe_mode),

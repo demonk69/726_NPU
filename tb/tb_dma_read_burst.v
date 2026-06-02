@@ -4,6 +4,8 @@ module tb_dma_read_burst;
 
 localparam DATA_W = 32;
 localparam CLK_T  = 10;
+localparam [31:0] ERR_DMA_RRESP    = 32'h0000_0010;
+localparam [31:0] ERR_DMA_RD_ALIGN = 32'h0000_0040;
 
 reg clk = 1'b0;
 always #(CLK_T/2) clk = ~clk;
@@ -32,6 +34,7 @@ reg         a_ppb_full;
 
 wire        r_done;
 wire        r_fifo_full;
+wire [31:0] dma_err_status;
 
 wire [31:0] m_axi_awaddr;
 wire [7:0]  m_axi_awlen;
@@ -94,7 +97,7 @@ npu_dma #(
     .a_ofm_m_base(32'd0),
     .a_ofm_k_base(32'd0),
     .a_ofm_k_len(16'd0),
-    .a_ofm_active_rows(3'd0),
+    .a_ofm_active_rows(5'd0),
     .a_ofm_fp16_mode(1'b0),
     .a_im2col_mode(1'b0),
     .a_im2col_m_index(32'd0),
@@ -125,6 +128,7 @@ npu_dma #(
     .r_fifo_wr_en(1'b0),
     .r_fifo_din(32'd0),
     .r_fifo_full(r_fifo_full),
+    .dma_err_status(dma_err_status),
     .m_axi_awaddr(m_axi_awaddr),
     .m_axi_awlen(m_axi_awlen),
     .m_axi_awsize(m_axi_awsize),
@@ -157,6 +161,7 @@ reg [7:0]  exp_arlen  [0:7];
 integer exp_ar_total;
 integer ar_seen;
 integer errors;
+reg [31:0] saw_dma_err;
 
 reg        rd_active;
 reg [31:0] rd_addr;
@@ -213,6 +218,13 @@ always @(posedge clk) begin
             rd_cnt       <= 8'd0;
         end
     end
+end
+
+always @(posedge clk) begin
+    if (!rst_n)
+        saw_dma_err <= 32'd0;
+    else
+        saw_dma_err <= saw_dma_err | dma_err_status;
 end
 
 integer w_wr_count;
@@ -279,6 +291,7 @@ initial begin
     m_axi_rresp = 0;
     exp_ar_total = 0;
     errors = 0;
+    saw_dma_err = 32'd0;
     w_data_base = 0;
     a_data_base = 0;
     for (i = 0; i < 8; i = i + 1) begin
@@ -336,8 +349,49 @@ initial begin
         errors = errors + 1;
     end
 
+    if (saw_dma_err !== 32'd0) begin
+        $display("[FAIL] unexpected DMA read error during aligned cases: 0x%08h", saw_dma_err);
+        errors = errors + 1;
+    end
+
+    // Case 3: unaligned read request is rejected before AR.
+    saw_dma_err = 32'd0;
+    exp_ar_total = 0;
+    ar_seen = 0;
+    w_base_addr = 32'h0000_3001; w_len_bytes = 16'd4;
+    @(negedge clk);
+    w_start = 1'b1;
+    @(negedge clk);
+    w_start = 1'b0;
+    repeat (4) @(posedge clk);
+    if ((saw_dma_err & ERR_DMA_RD_ALIGN) == 32'd0 || ar_seen !== 0) begin
+        $display("[FAIL] unaligned read err=0x%08h ar_seen=%0d", saw_dma_err, ar_seen);
+        errors = errors + 1;
+    end
+
+    // Case 4: RRESP error is surfaced and bad data is not written to PPBuf.
+    saw_dma_err = 32'd0;
+    m_axi_rresp = 2'b10;
+    exp_araddr[0] = 32'h0000_4000; exp_arlen[0] = 8'd0;
+    exp_ar_total = 1;
+    ar_seen = 0;
+    w_wr_count = 0;
+    w_data_base = 32'h0000_4000;
+    w_base_addr = 32'h0000_4000; w_len_bytes = 16'd4;
+    @(negedge clk);
+    w_start = 1'b1;
+    @(negedge clk);
+    w_start = 1'b0;
+    wait_for_done(1, 0);
+    m_axi_rresp = 2'b00;
+    repeat (2) @(posedge clk);
+    if ((saw_dma_err & ERR_DMA_RRESP) == 32'd0 || w_wr_count !== 0) begin
+        $display("[FAIL] RRESP read err=0x%08h w_wr_count=%0d", saw_dma_err, w_wr_count);
+        errors = errors + 1;
+    end
+
     if (errors == 0)
-        $display("[PASS] tb_dma_read_burst: INCR read bursts and 4KB split passed");
+        $display("[PASS] tb_dma_read_burst: INCR reads, 4KB split, and errors passed");
     else
         $display("[FAIL] tb_dma_read_burst errors=%0d", errors);
     $finish;

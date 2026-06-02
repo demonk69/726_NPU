@@ -184,23 +184,33 @@ reg [31:0] perf_peak_ops_per_cycle_snap;
 // Write FSM
 // ---------------------------------------------------------------------------
 reg        aw_q, ar_q;
+reg        bvalid_r;
 reg [31:0] awaddr_q, araddr_q;
 wire       wr_en = aw_q && wvalid && wready;
 wire [3:0] w_strb = wstrb;
 
-assign awready = !aw_q;
-assign wready  = aw_q;
-assign bvalid  = aw_q && wvalid && wready;
+assign awready = !aw_q && !bvalid_r;
+assign wready  = aw_q && !bvalid_r;
+assign bvalid  = bvalid_r;
 assign bresp   = 2'b00; // OKAY
 
 always @(posedge aclk) begin
     if (!aresetn) aw_q <= 0;
-    else if (awvalid && !aw_q) aw_q <= 1;
     else if (wr_en) aw_q <= 0;
+    else if (awvalid && awready) aw_q <= 1;
 end
 
 always @(posedge aclk) begin
-    if (awvalid && !aw_q) awaddr_q <= awaddr;
+    if (awvalid && awready) awaddr_q <= awaddr;
+end
+
+always @(posedge aclk) begin
+    if (!aresetn)
+        bvalid_r <= 1'b0;
+    else if (wr_en)
+        bvalid_r <= 1'b1;
+    else if (bvalid_r && bready)
+        bvalid_r <= 1'b0;
 end
 
 // Write data to register file

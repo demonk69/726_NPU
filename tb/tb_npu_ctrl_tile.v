@@ -21,10 +21,10 @@ module tb_npu_ctrl_tile;
     wire vec_consume;
     wire [31:0] tile_m_base;
     wire [31:0] tile_n_base;
-    wire [3:0] tile_row_valid;
-    wire [3:0] tile_col_valid;
-    wire [2:0] tile_active_rows;
-    wire [2:0] tile_active_cols;
+    wire [15:0] tile_row_valid;
+    wire [15:0] tile_col_valid;
+    wire [4:0] tile_active_rows;
+    wire [5:0] tile_active_cols;
     wire [31:0] tile_k_base;
     wire [15:0] tile_k_len;
     wire [31:0] tile_k_index;
@@ -108,6 +108,7 @@ module tb_npu_ctrl_tile;
         .dma_r_done(dma_r_done),
         .dma_r_addr(dma_r_addr),
         .dma_r_len(dma_r_len),
+        .dma_error_status(32'd0),
         .pe_en(pe_en),
         .pe_flush(pe_flush),
         .pe_mode(pe_mode),
@@ -196,10 +197,10 @@ module tb_npu_ctrl_tile;
                         errors = errors + 1;
                     end
                 endcase
-                if (dma_w_len !== 16'd8 || dma_a_len !== 16'd8) begin
-                    $display("[FAIL] vector tile len mismatch w_len=%0d a_len=%0d", dma_w_len, dma_a_len);
-                    errors = errors + 1;
-                end
+            if (dma_w_len !== 16'd16 || dma_a_len !== 16'd16) begin
+                $display("[FAIL] vector tile len mismatch w_len=%0d a_len=%0d", dma_w_len, dma_a_len);
+                errors = errors + 1;
+            end
                 wb_idx <= wb_idx + 1;
             end
         end
@@ -242,8 +243,8 @@ module tb_npu_ctrl_tile;
             $display("[FAIL] expected 10 row writeback bursts, got %0d", wb_idx);
             errors = errors + 1;
         end
-        if (vec_count !== 8) begin
-            $display("[FAIL] expected 8 vec_consume pulses, got %0d", vec_count);
+        if (vec_count !== 4) begin
+            $display("[FAIL] expected 4 vec_consume pulses, got %0d", vec_count);
             errors = errors + 1;
         end
 

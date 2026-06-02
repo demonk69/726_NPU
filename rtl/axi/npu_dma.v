@@ -95,6 +95,7 @@ module npu_dma #(
     input  wire        r_fifo_wr_en,
     input  wire [DATA_W-1:0] r_fifo_din,
     output wire        r_fifo_full,
+    output wire [31:0] dma_err_status,
 
     // ---- AXI4 Master (shared) ----
     // AW channel
@@ -151,8 +152,10 @@ wire r_fifo_empty_n;
 // ===========================================================================
 // PPBuf write enables
 // ===========================================================================
+wire read_resp_ok = (m_axi_rresp == 2'b00);
+
 assign w_ppb_wr_en = (load_state == L_WREAD || (load_state == L_WA_READ && load_reading_w))
-                      && m_axi_rvalid && m_axi_rready && !w_ppb_full;
+                      && m_axi_rvalid && m_axi_rready && read_resp_ok && !w_ppb_full;
 assign w_ppb_wr_data = m_axi_rdata;
 
 reg        a_ofm_wr_en;
@@ -161,7 +164,7 @@ reg        a_im2col_wr_en;
 reg [DATA_W-1:0] a_im2col_wr_data;
 
 wire a_read_ppb_wr_en = (load_state == L_AREAD || (load_state == L_WA_READ && !load_reading_w))
-                         && m_axi_rvalid && m_axi_rready && !a_ppb_full;
+                         && m_axi_rvalid && m_axi_rready && read_resp_ok && !a_ppb_full;
 
 assign a_ppb_wr_en = a_read_ppb_wr_en ||
                      (a_ofm_wr_en && !a_ppb_full) ||
@@ -227,9 +230,45 @@ reg [31:0] im2col_pack_word;
 
 localparam integer AXI_DATA_BYTES = DATA_W / 8;
 localparam integer AXI_BYTE_SHIFT = $clog2(DATA_W / 8);
+localparam [31:0] AXI_ALIGN_MASK = AXI_DATA_BYTES - 1;
 localparam [15:0] READ_BURST_MAX_BEATS =
     (BURST_MAX > 256) ? 16'd256 : BURST_MAX;
 localparam [15:0] DESC_BYTES = 16'd64;
+
+localparam [31:0] ERR_DMA_RRESP    = 32'h0000_0010;
+localparam [31:0] ERR_DMA_BRESP    = 32'h0000_0020;
+localparam [31:0] ERR_DMA_RD_ALIGN = 32'h0000_0040;
+localparam [31:0] ERR_DMA_WR_ALIGN = 32'h0000_0080;
+
+reg [31:0] load_err_status;
+reg [31:0] wb_err_status;
+
+assign dma_err_status = load_err_status | wb_err_status;
+
+function req_aligned;
+    input [31:0] addr;
+    input [15:0] len_bytes;
+    begin
+        req_aligned = (((addr & AXI_ALIGN_MASK) == 32'd0) &&
+                       ((({16'd0, len_bytes}) & AXI_ALIGN_MASK) == 32'd0));
+    end
+endfunction
+
+function addr_aligned;
+    input [31:0] addr;
+    begin
+        addr_aligned = ((addr & AXI_ALIGN_MASK) == 32'd0);
+    end
+endfunction
+
+wire a_start_nonzero = a_start &&
+    ((a_ofm_mode && (a_ofm_k_len != 16'd0)) ||
+     (a_im2col_mode && (a_im2col_k_len != 16'd0)) ||
+     (!a_ofm_mode && !a_im2col_mode && (a_len_bytes != 16'd0)));
+wire a_start_align_ok = (a_ofm_mode || a_im2col_mode) ? addr_aligned(a_base_addr) :
+                                                           req_aligned(a_base_addr, a_len_bytes);
+wire a_after_w_align_bad = a_start_nonzero && !a_start_align_ok;
+wire bias_align_bad = bias_start && !req_aligned(bias_addr, 16'd4);
 
 wire [15:0] load_target_len =
     (load_state == L_DESC)  ? DESC_BYTES  :
@@ -401,7 +440,11 @@ always @(posedge clk) begin
         im2col_lane_pos <= 2'd0;
         im2col_pack_word <= 32'd0;
         m_axi_arvalid <= 0; m_axi_rready <= 0;
+        load_err_status <= 32'd0;
     end else begin
+        load_err_status <= 32'd0;
+        if (m_axi_rvalid && m_axi_rready && !read_resp_ok)
+            load_err_status <= ERR_DMA_RRESP;
         w_done <= 1'b0;
         a_done <= 1'b0;
         desc_done <= 1'b0;
@@ -442,12 +485,19 @@ always @(posedge clk) begin
                 // Result WB uses independent AW/W/B channels; read-side DMA can
                 // issue W/A bursts while writeback is active.
                 if (desc_start) begin
-                    load_state       <= L_DESC;
-                    load_addr_cnt    <= desc_base_addr;
-                    load_byte_cnt    <= 16'd0;
-                    desc_bytes_done  <= 16'd0;
-                    desc_word_idx    <= 5'd0;
+                    if (!req_aligned(desc_base_addr, DESC_BYTES)) begin
+                        load_err_status <= ERR_DMA_RD_ALIGN;
+                    end else begin
+                        load_state       <= L_DESC;
+                        load_addr_cnt    <= desc_base_addr;
+                        load_byte_cnt    <= 16'd0;
+                        desc_bytes_done  <= 16'd0;
+                        desc_word_idx    <= 5'd0;
+                    end
                 end else if (w_start && (w_len_bytes != 16'd0) && !w_ppb_full) begin
+                    if (!req_aligned(w_base_addr, w_len_bytes) || a_after_w_align_bad || bias_align_bad) begin
+                        load_err_status <= ERR_DMA_RD_ALIGN;
+                    end else begin
                     `ifdef DIAG_8X32
                     $display("[DIAG_DMA] W DMA start: addr=0x%08h len=%0d", w_base_addr, w_len_bytes);
                     `endif
@@ -493,7 +543,11 @@ always @(posedge clk) begin
                         im2col_lane_pos <= 2'd0;
                         im2col_pack_word <= 32'd0;
                     end
+                    end
                 end else if (a_start && a_ofm_mode && (a_ofm_k_len != 16'd0) && !a_ppb_full) begin
+                    if (!a_start_align_ok || bias_align_bad) begin
+                        load_err_status <= ERR_DMA_RD_ALIGN;
+                    end else begin
                     load_state       <= L_A_OFM;
                     load_addr_cnt    <= a_base_addr;
                     load_byte_cnt    <= 16'd0;
@@ -512,7 +566,11 @@ always @(posedge clk) begin
                     ofm_pack1 <= 32'd0;
                     load_bias_after_data <= bias_start;
                     bias_addr_latch <= bias_addr;
+                    end
                 end else if (a_start && a_im2col_mode && (a_im2col_k_len != 16'd0) && !a_ppb_full) begin
+                    if (!a_start_align_ok || bias_align_bad) begin
+                        load_err_status <= ERR_DMA_RD_ALIGN;
+                    end else begin
                     load_state <= L_A_IM2COL;
                     load_addr_cnt <= a_base_addr;
                     load_byte_cnt <= 16'd0;
@@ -539,17 +597,26 @@ always @(posedge clk) begin
                     im2col_pack_word <= 32'd0;
                     load_bias_after_data <= bias_start;
                     bias_addr_latch <= bias_addr;
+                    end
                 end else if (a_start && (a_len_bytes != 16'd0) && !a_ppb_full) begin
+                    if (!a_start_align_ok || bias_align_bad) begin
+                        load_err_status <= ERR_DMA_RD_ALIGN;
+                    end else begin
                     load_state    <= L_AREAD;
                     load_addr_cnt <= a_base_addr;
                     load_byte_cnt <= 16'd0;
                     a_bytes_done  <= 16'd0;
                     load_bias_after_data <= bias_start;
                     bias_addr_latch <= bias_addr;
+                    end
                 end else if (bias_start) begin
-                    load_state <= L_BIAS;
-                    load_addr_cnt <= bias_addr;
-                    load_byte_cnt <= 16'd0;
+                    if (bias_align_bad) begin
+                        load_err_status <= ERR_DMA_RD_ALIGN;
+                    end else begin
+                        load_state <= L_BIAS;
+                        load_addr_cnt <= bias_addr;
+                        load_byte_cnt <= 16'd0;
+                    end
                 end
             end
 
@@ -971,9 +1038,11 @@ always @(posedge clk) begin
         r_pending_clr <= 0;
         m_axi_awvalid <= 0; m_axi_wvalid <= 0;
         m_axi_bready <= 0; m_axi_wstrb <= 0;
+        wb_err_status <= 32'd0;
     end else begin
         r_pending_clr <= 0;
         r_done <= 0;   // default: single-cycle pulse (cleared every cycle)
+        wb_err_status <= 32'd0;
         case (wb_state)
             WB_IDLE: begin
                 m_axi_awvalid <= 0; m_axi_wvalid <= 0;
@@ -981,6 +1050,9 @@ always @(posedge clk) begin
                 wb_wait_b <= 1'b0; wb_req_done_after_b <= 1'b0;
                 if (r_pending && (r_len_latch == 16'd0)) begin
                     r_done        <= 1'b1;
+                    r_pending_clr <= 1'b1;
+                end else if (r_pending && !req_aligned(r_base_latch, r_len_latch)) begin
+                    wb_err_status <= ERR_DMA_WR_ALIGN;
                     r_pending_clr <= 1'b1;
                 end else if (r_pending && !r_fifo_empty_n) begin
                     wb_state      <= WB_ACTIVE;
@@ -999,6 +1071,8 @@ always @(posedge clk) begin
                     m_axi_wvalid  <= 1'b0;
                     m_axi_bready  <= 1'b1;
                     if (m_axi_bvalid && m_axi_bready) begin
+                        if (m_axi_bresp != 2'b00)
+                            wb_err_status <= ERR_DMA_BRESP;
                         m_axi_bready <= 1'b0;
                         wb_wait_b    <= 1'b0;
                         wb_aw_sent   <= 1'b0;

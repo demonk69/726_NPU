@@ -9,7 +9,7 @@ This README describes the maintained flow. Older Windows/Icarus worklogs are arc
 | Flow | Entry point | Purpose | Current status |
 |---|---|---|---|
 | Fast VGG e2e | `./run_vgg_e2e.sh` or `./run_all.sh standard` | Python pre-generates all Conv A tiles; CPU firmware runs 1024 NPU tiles plus avgpool/classifier/argmax | PASS, cat/class 3, 10,768,727 cycles |
-| Runtime closed-loop VGG | `./run_vgg_closed_loop.sh` or `./run_all.sh closed_loop` | CPU firmware packs A tiles at runtime, runs NPU, performs per-channel requant/scatter, maxpool, avgpool, classifier | PASS on tested images, about 114M cycles |
+| Runtime closed-loop VGG | `./run_vgg_closed_loop.sh` or `./run_all.sh closed_loop` | CPU firmware packs A tiles at runtime, runs NPU, performs per-channel requant/scatter, maxpool, avgpool, classifier | PASS on tested images, about 114M cycles for default `16x16`; about 161M cycles for `4x4` |
 | Arbitrary image e2e | `./run_all.sh image <file>` | Classify an image after host resize/normalize/quantize | Supported |
 
 The closed-loop flow is the path closest to an FPGA deployment: model assets are static, while each inference only needs a new 3x32x32 INT8 input image.
@@ -24,6 +24,12 @@ Requirements:
 - Verilator 5.x
 - GNU coreutils (`timeout`, `stdbuf`, `tee`, `grep`)
 
+CPU-only PyTorch install used by the current environment:
+
+```bash
+python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+```
+
 Run the verified fast baseline:
 
 ```bash
@@ -37,6 +43,7 @@ Run the unified entry point:
 ./run_all.sh image ./pic/test_cifar10_2.jpg
 ./run_all.sh closed_loop --image ./pic/test_cifar10_2.jpg
 ./run_all.sh closed_loop --shape 8x8 --image ./pic/test_cifar10_2.jpg
+./run_vgg_closed_loop_sweep.sh --shapes 4x4,8x8 --flows os,ws
 ```
 
 Run the full fast regression set:
@@ -68,7 +75,7 @@ Use this for quick regression and baseline confidence.
 
 This flow avoids the old per-16-channel hardware `QUANT_CFG` approximation and validates against the exact Python model target.
 
-The default closed-loop shape is `16x16`. The run script and generator also support `4x4`, `8x8`, and `8x32` shape selection; new tile/packed-SIMD work should keep those modes shape-aware.
+The default closed-loop shape is `16x16`. The run script and generator also support `4x4`, `8x8`, and `8x32` shape selection; new tile/packed-SIMD work should keep those modes shape-aware. Use `run_vgg_closed_loop_sweep.sh` for serial OS/WS shape sweeps.
 
 ## FPGA Deployment Direction
 

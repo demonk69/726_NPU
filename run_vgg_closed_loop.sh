@@ -11,7 +11,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 OUT_DIR="$ROOT/sim/vgg_closed_loop"
-TIMEOUT_CYCLES="${VGG_CLOSED_TIMEOUT_CYCLES:-150000000}"
+TIMEOUT_CYCLES="${VGG_CLOSED_TIMEOUT_CYCLES:-250000000}"
+RUN_TIMEOUT_SECONDS="${VGG_CLOSED_SHELL_TIMEOUT_SECONDS:-4800}"
 
 IMG_IDX="0"
 IMAGE=""
@@ -102,7 +103,7 @@ verilator --binary --timing \
 echo "=== Run ==="
 LOG_FILE="$OUT_DIR/run.log"
 set +e
-timeout 2400 stdbuf -oL -eL "$OUT_DIR/obj_dir/Vtb_soc_vgg_closed_loop" 2>&1 | tee "$LOG_FILE"
+timeout "$RUN_TIMEOUT_SECONDS" stdbuf -oL -eL "$OUT_DIR/obj_dir/Vtb_soc_vgg_closed_loop" 2>&1 | tee "$LOG_FILE"
 RUN_RC=${PIPESTATUS[0]}
 set -e
 

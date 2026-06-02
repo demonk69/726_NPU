@@ -21,10 +21,10 @@ module tb_npu_ctrl_ksplit;
     wire vec_consume;
     wire [31:0] tile_m_base;
     wire [31:0] tile_n_base;
-    wire [3:0] tile_row_valid;
-    wire [3:0] tile_col_valid;
-    wire [2:0] tile_active_rows;
-    wire [2:0] tile_active_cols;
+    wire [15:0] tile_row_valid;
+    wire [15:0] tile_col_valid;
+    wire [4:0] tile_active_rows;
+    wire [5:0] tile_active_cols;
     wire [31:0] tile_k_base;
     wire [15:0] tile_k_len;
     wire [31:0] tile_k_index;
@@ -112,6 +112,7 @@ module tb_npu_ctrl_ksplit;
         .dma_r_done(dma_r_done),
         .dma_r_addr(dma_r_addr),
         .dma_r_len(dma_r_len),
+        .dma_error_status(32'd0),
         .pe_en(pe_en),
         .pe_flush(pe_flush),
         .pe_mode(pe_mode),
@@ -202,7 +203,7 @@ module tb_npu_ctrl_ksplit;
                 case (load_idx)
                     0: expect_load(0, 32'h1000, 32'h2000, 16'd16); // k=0..3
                     1: expect_load(1, 32'h1010, 32'h2010, 16'd16); // k=4..7
-                    2: expect_load(2, 32'h1020, 32'h2020, 16'd8);  // k=8..9
+                    2: expect_load(2, 32'h1020, 32'h2020, 16'd16); // k=8..9, padded to SIMD group
                     default: begin
                         $display("[FAIL] unexpected load index %0d", load_idx);
                         errors = errors + 1;
@@ -267,8 +268,8 @@ module tb_npu_ctrl_ksplit;
             $display("[FAIL] expected 4 final row writebacks, got %0d", wb_idx);
             errors = errors + 1;
         end
-        if (vec_count !== 10) begin
-            $display("[FAIL] expected 10 vec_consume pulses, got %0d", vec_count);
+        if (vec_count !== 3) begin
+            $display("[FAIL] expected 3 vec_consume pulses, got %0d", vec_count);
             errors = errors + 1;
         end
         if (flush_count !== 1) begin

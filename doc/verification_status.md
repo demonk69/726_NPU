@@ -1,6 +1,6 @@
 # Verification Status
 
-Updated: 2026-05-26
+Updated: 2026-06-02
 
 This document is the current verification record. Older status files and worklogs in `doc/archive/` are historical and may describe superseded Windows/Icarus flows.
 
@@ -12,6 +12,7 @@ This document is the current verification record. Older status files and worklog
 | `./run_all.sh standard [idx]` | Unified wrapper for fast baseline | PASS |
 | `./run_all.sh image <file>` | Fast baseline with arbitrary image input | Supported |
 | `./run_vgg_closed_loop.sh [idx|--image <file>] [--shape <shape>]` | Runtime closed-loop VGG | PASS on tested default shape images |
+| `./run_vgg_closed_loop_sweep.sh [--shapes <csv>] [--flows <csv>]` | Serial closed-loop shape/dataflow sweep | PASS for `4x4,8x8,16x16,8x32` x `os,ws` on 2026-06-02 |
 | `./run_all.sh closed_loop [args...]` | Unified wrapper for runtime closed-loop | PASS on tested images |
 
 `./run_all.sh all` is a fast regression set and intentionally does not include the long runtime closed-loop test.
@@ -20,18 +21,67 @@ This document is the current verification record. Older status files and worklog
 
 | Flow | Command | Result | Prediction | Cycles |
 |---|---|---|---|---:|
-| Fast VGG e2e baseline | `./run_vgg_e2e.sh` | PASS | cat/class 3 | 10,768,727 |
+| Fast VGG e2e baseline | `./run_vgg_e2e.sh` | PASS on 2026-05-31 | cat/class 3 | 10,768,727 |
 | Runtime closed-loop image2 | `./run_all.sh closed_loop --image ./pic/test_cifar10_2.jpg` | PASS | frog/class 6 | 114,014,769 |
 | Runtime closed-loop image4 | `./run_all.sh closed_loop --image ./pic/test_cifar10_4.jpg` | PASS | dog/class 5 | 114,013,544 |
+| Runtime closed-loop local image, 4x4 OS | `./run_vgg_closed_loop.sh --image <local-image> --shape 4x4 --flow os` | PASS on 2026-06-01 | automobile/class 1 | 160,809,527 |
+| Runtime closed-loop local image, 4x4 WS | `./run_vgg_closed_loop.sh --image <local-image> --shape 4x4 --flow ws` | PASS on 2026-06-01 | automobile/class 1 | 160,809,527 |
+| Runtime closed-loop full shape/dataflow sweep | `./run_vgg_closed_loop_sweep.sh --image <local-image>` | PASS on 2026-06-02, 8/8 cases | ship/class 8 | see sweep table below |
 | Closed-loop generator sanity image3 | `python3 -B tools/pth/gen_vgg_closed_loop.py --out-dir /tmp/opencode/cl_test_3_fixed --image pic/test_cifar10_3.jpg` | PASS generation | fixed-runtime 6, exact-python 6 | N/A |
+
+## Closed-Loop Shape/Dataflow Sweep
+
+Result directory: `sim/vgg_closed_loop_sweep_20260602_103852/`.
+
+| Shape | Flow | Result | Pred | Exact | Fixed | Cycles | Elapsed s |
+|---|---|---|---:|---:|---:|---:|---:|
+| `4x4` | `os` | PASS | 8 | 8 | 8 | 160,809,627 | 2,206 |
+| `4x4` | `ws` | PASS | 8 | 8 | 8 | 160,809,627 | 2,195 |
+| `8x8` | `os` | PASS | 8 | 8 | 8 | 128,708,571 | 1,775 |
+| `8x8` | `ws` | PASS | 8 | 8 | 8 | 128,675,931 | 1,762 |
+| `16x16` | `os` | PASS | 8 | 8 | 8 | 114,010,939 | 1,582 |
+| `16x16` | `ws` | PASS | 8 | 8 | 8 | 113,998,459 | 1,573 |
+| `8x32` | `os` | PASS | 8 | 8 | 8 | 130,858,011 | 1,829 |
+| `8x32` | `ws` | PASS | 8 | 8 | 8 | 130,842,651 | 1,803 |
+
+The prior `4x4` timeout was caused by the old 150M-cycle default limit, not by an NPU deadlock. The default closed-loop timeout is now 250M cycles.
+
+## RTL Bring-Up Checks
+
+| Command | Coverage | Result |
+|---|---|---|
+| `iverilog -g2012 -o /tmp/opencode/tb_npu_axi_lite_desc.vvp rtl/axi/npu_axi_lite.v tb/tb_npu_axi_lite_desc.v && vvp /tmp/opencode/tb_npu_axi_lite_desc.vvp` | AXI-Lite register file, delayed `BREADY`, IRQ, `ERR_STATUS` W1C | PASS |
+| `iverilog -g2012 -o /tmp/opencode/tb_dma_read_burst.vvp rtl/common/fifo.v rtl/axi/npu_dma.v tb/tb_dma_read_burst.v && vvp /tmp/opencode/tb_dma_read_burst.vvp` | DMA read burst split, `RRESP`, read alignment errors | PASS |
+| `iverilog -g2012 -o /tmp/opencode/tb_dma_write_burst.vvp rtl/common/fifo.v rtl/axi/npu_dma.v tb/tb_dma_write_burst.v && vvp /tmp/opencode/tb_dma_write_burst.vvp` | DMA write burst split, `BRESP`, write alignment errors | PASS |
+| `iverilog -g2012 -o /tmp/opencode/tb_dma_burst.vvp rtl/common/fifo.v rtl/axi/npu_dma.v tb/tb_dma_burst.v && vvp /tmp/opencode/tb_dma_burst.vvp` | Mixed DMA read/write burst data | PASS |
+| `iverilog -g2012 -o /tmp/opencode/tb_dma_perf.vvp rtl/common/fifo.v rtl/axi/npu_dma.v tb/tb_dma_perf.v && vvp /tmp/opencode/tb_dma_perf.vvp` | DMA read/write utilization smoke | PASS |
+| `iverilog -g2012 -o /tmp/opencode/tb_npu_ctrl_error_status.vvp rtl/ctrl/npu_ctrl.v tb/tb_npu_ctrl_error_status.v && vvp /tmp/opencode/tb_npu_ctrl_error_status.vvp` | Descriptor errors, direct invalid dimension, DMA error latching | PASS |
+| `iverilog -g2012 -o /tmp/opencode/tb_npu_ctrl_tile.vvp rtl/ctrl/npu_ctrl.v tb/tb_npu_ctrl_tile.v && vvp /tmp/opencode/tb_npu_ctrl_tile.vvp` | Tile controller edge writeback | PASS |
+| `iverilog -g2012 -o /tmp/opencode/tb_npu_ctrl_ksplit.vvp rtl/ctrl/npu_ctrl.v tb/tb_npu_ctrl_ksplit.v && vvp /tmp/opencode/tb_npu_ctrl_ksplit.vvp` | Tile K-split sequencing | PASS |
+| `iverilog -g2012 -o /tmp/opencode/tb_npu_ctrl_dataflow_modes.vvp rtl/ctrl/npu_ctrl.v tb/tb_npu_ctrl_dataflow_modes.v && vvp /tmp/opencode/tb_npu_ctrl_dataflow_modes.vvp` | Direct OS/WS controller branches | PASS |
+| `iverilog -g2012 -s npu_top -o /tmp/opencode/npu_top_elab.vvp rtl/pe/*.v rtl/common/*.v rtl/buf/*.v rtl/array/*.v rtl/axi/*.v rtl/ctrl/*.v rtl/power/*.v rtl/top/npu_top.v` | `npu_top` elaboration | PASS |
+| `iverilog -g2012 -s npu_pynq_wrapper -o /tmp/opencode/npu_pynq_wrapper_elab.vvp rtl/pe/*.v rtl/common/*.v rtl/buf/*.v rtl/array/*.v rtl/axi/*.v rtl/ctrl/*.v rtl/power/*.v rtl/top/*.v` | PYNQ wrapper elaboration | PASS |
+| `tb/tile4/run_verilator.sh --shape 16x16 --M 16 --K 4 --N 16 --bias` | 16x16 tile Icarus + Verilator smoke | PASS |
+| `verilator --lint-only -Wall -Wno-fatal --top-module npu_pynq_wrapper rtl/pe/*.v rtl/common/*.v rtl/buf/*.v rtl/array/*.v rtl/axi/*.v rtl/ctrl/*.v rtl/power/*.v rtl/top/*.v` | PYNQ wrapper lint | Completes with existing width/unused warnings |
 
 ## Syntax Checks
 
 | Command | Result |
 |---|---|
 | `python3 -B -m py_compile tools/pth/gen_vgg_closed_loop.py` | PASS |
-| `bash -n run_vgg_closed_loop.sh` | PASS |
+| `bash -n run_vgg_closed_loop.sh run_vgg_closed_loop_sweep.sh` | PASS |
 | `bash -n run_all.sh` | PASS |
+| `tclsh scripts/create_pynq_z2_npu_project.tcl` | PASS syntax-only load; Vivado execution not run in this shell |
+
+## Python Environment
+
+The current environment has CPU PyTorch installed for the VGG generators:
+
+```bash
+python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+```
+
+Observed package: `torch-2.12.0+cpu` for Python `3.13.13`.
 
 ## What Is Being Verified
 
@@ -54,7 +104,7 @@ The closed-loop flow verifies that firmware can perform the runtime steps needed
 
 The current closed-loop validation target is exact Python model output. The older per-16-channel hardware `QUANT_CFG` approximation is no longer used as the PASS criterion.
 
-The default runtime closed-loop shape is `16x16`. The generator and script accept `4x4`, `8x8`, `16x16`, and `8x32`; only the default `16x16` commands above are currently recorded as full long-run RTL PASS results.
+The default runtime closed-loop shape is `16x16`. The generator and script accept `4x4`, `8x8`, `16x16`, and `8x32`. The `4x4` shape is slower in the current firmware-driven Verilator path and needs a timeout above 150M cycles; `run_vgg_closed_loop.sh` defaults to 250M cycles.
 
 ## Deployment Status
 

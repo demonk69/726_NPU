@@ -3,6 +3,11 @@
 *.vcd
 *.out
 *.log
+/build/
+
+# Vivado local outputs
+/.Xil/
+/vivado*.jou
 
 # Icarus/compiled simulation binaries without extensions
 sim/npu_sim
@@ -32,6 +37,11 @@ __pycache__/
 /sim/pth_*/
 /sim/vgg_e2e/
 /sim/vgg_closed_loop/
+/sim/vgg_closed_loop_sweep_*/
 
 # Generated CIFAR-10 sample images
 /pic/test_cifar10_*.jpg
+/pic/test_cifar10_*.jpeg
+
+# Local session scratch
+/session

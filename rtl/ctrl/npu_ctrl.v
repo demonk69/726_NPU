@@ -52,7 +52,8 @@ module npu_ctrl #(
     parameter COLS   = 4,
     parameter DATA_W = 16,
     parameter ACC_W  = 32,
-    parameter PPB_DEPTH = 64
+    parameter PPB_DEPTH = 64,
+    parameter FP16_ENABLE = 0
 )(
     input  wire              clk,
     input  wire              rst_n,
@@ -233,6 +234,7 @@ localparam [31:0] ERR_DESC_COUNT_EXHAUSTED = 32'h0000_0004;
 localparam [31:0] ERR_IFM_PREV_MISSING     = 32'h0000_0008;
 localparam [31:0] ERR_DIRECT_INVALID_DIM   = 32'h0000_0100;
 localparam [31:0] ERR_DIRECT_INVALID_CONV  = 32'h0000_0200;
+localparam [31:0] ERR_FP16_DISABLED        = 32'h0000_0400;
 
 // ---------------------------------------------------------------------------
 // ctrl_reg bit decode  (live, from AXI-Lite)
@@ -256,7 +258,10 @@ wire        cfg_desc_mode = ctrl_reg[7];
 wire        cfg_conv_im2col = ctrl_reg[8];
 wire        cfg_bias_en = ctrl_reg[9];
 wire [1:0]  cfg_post_act_mode = ctrl_reg[11:10]; // 00=none, 01=ReLU, 10=ReLU6
-wire [1:0]  cfg_data_bytes = (cfg_mode == 2'b00) ? 2'd1 : 2'd2;
+wire        cfg_non_int8_mode = (cfg_mode != 2'b00);
+wire        cfg_fp16_disabled = (FP16_ENABLE == 0) && cfg_non_int8_mode;
+wire        cfg_dma_fp16_mode = (FP16_ENABLE != 0) && (cfg_mode == 2'b10);
+wire [1:0]  cfg_data_bytes = ((FP16_ENABLE != 0) && cfg_non_int8_mode) ? 2'd2 : 2'd1;
 wire [4:0]  cfg_shape_lanes = shape_tile_a_lanes(cfg_shape_in);
 wire [15:0] cfg_scalar_elem_bytes = {14'b0, cfg_data_bytes};
 wire [15:0] cfg_vector_elem_bytes_max = (cfg_half_bytes_w_8x32 > cfg_vector_elem_bytes_a)
@@ -318,7 +323,8 @@ wire direct_conv_invalid = cfg_conv_im2col &&
      (conv_dilation[7:0] == 8'd0) || (conv_dilation[15:8] == 8'd0));
 wire [31:0] direct_start_err_mask =
     (direct_dim_invalid ? ERR_DIRECT_INVALID_DIM : 32'd0) |
-    (direct_conv_invalid ? ERR_DIRECT_INVALID_CONV : 32'd0);
+    (direct_conv_invalid ? ERR_DIRECT_INVALID_CONV : 32'd0) |
+    (cfg_fp16_disabled ? ERR_FP16_DISABLED : 32'd0);
 wire direct_start_invalid = (direct_start_err_mask != 32'd0);
 wire direct_start_valid_rise = direct_start_rise && !direct_start_invalid;
 
@@ -362,6 +368,7 @@ wire       desc_use_bias      = desc_ctrl_word[21];
 wire       desc_use_psum      = desc_ctrl_word[22];
 wire       desc_ifm_from_prev_ofm = desc_ctrl_word[23];
 wire       desc_ifm_prev_missing = desc_ifm_from_prev_ofm && !prev_ofm_valid;
+wire       desc_fp16_disabled = (FP16_ENABLE == 0) && (desc_dtype_field == 4'd2);
 wire       desc_supported_base =
     (desc_version_field == 4'd1) &&
     (desc_op_field == 4'd1) &&                    // GEMM_TILEPACK
@@ -374,7 +381,8 @@ wire       desc_supported_base =
     (desc_reserved_bits == 4'd0);
 wire [31:0] desc_decode_err_mask =
     (desc_supported_base ? 32'd0 : ERR_DESC_UNSUPPORTED) |
-    (desc_ifm_prev_missing ? ERR_IFM_PREV_MISSING : 32'd0);
+    (desc_ifm_prev_missing ? ERR_IFM_PREV_MISSING : 32'd0) |
+    (desc_fp16_disabled ? ERR_FP16_DISABLED : 32'd0);
 wire       desc_decode_error = (desc_decode_err_mask != 32'd0);
 
 // ---------------------------------------------------------------------------
@@ -405,12 +413,16 @@ assign post_quant_cfg = lk_quant_cfg;
 assign bias_en = lk_bias_en;
 assign tile_mode = lk_arr_cfg[7];
 
+wire lk_non_int8_mode = (lk_mode != 2'b00);
+wire lk_fp16_mode = (FP16_ENABLE != 0) && lk_non_int8_mode;
+wire lk_dma_fp16_mode = (FP16_ENABLE != 0) && (lk_mode == 2'b10);
+
 always @(posedge clk) begin
     if (!rst_n) begin
         lk_m_dim  <= 32'd1; lk_n_dim  <= 32'd1; lk_k_dim  <= 32'd1;
         lk_w_addr <= 32'd0; lk_a_addr <= 32'd0; lk_r_addr <= 32'd0;
         lk_bias_addr <= 32'd0;
-        lk_mode   <= 2'b10;                      // default FP16
+        lk_mode   <= (FP16_ENABLE != 0) ? 2'b10 : 2'b00;
         lk_stat   <= 2'b01;                      // default OS
         lk_shape  <= 2'b10;                      // default 16x16
         lk_arr_cfg <= 8'd0;
@@ -488,15 +500,19 @@ end
 // Mode decode (combinational, uses shadow regs)
 // ---------------------------------------------------------------------------
 always @(*) begin
-    case (lk_mode)
-        2'b00:   pe_mode = 1'b0;   // INT8
-        2'b10:   pe_mode = 1'b1;   // FP16
-        default: pe_mode = 1'b1;
-    endcase
+    if (FP16_ENABLE == 0) begin
+        pe_mode = 1'b0;
+    end else begin
+        case (lk_mode)
+            2'b00:   pe_mode = 1'b0;   // INT8
+            2'b10:   pe_mode = 1'b1;   // FP16
+            default: pe_mode = 1'b1;
+        endcase
+    end
 end
 
 // Bytes per element and active tile lane count (from shadow)
-wire [1:0] data_bytes = (lk_mode == 2'b00) ? 2'd1 : 2'd2;
+wire [1:0] data_bytes = lk_fp16_mode ? 2'd2 : 2'd1;
 wire [4:0] tile_shape_lanes = shape_tile_lanes(lk_shape);
 wire [4:0] tile_shape_a_lanes = shape_tile_a_lanes(lk_shape);
 wire [5:0] tile_shape_n_lanes = shape_tile_n_lanes(lk_shape);
@@ -969,7 +985,7 @@ always @(posedge clk) begin
                     dma_a_im2col_pad_w <= conv_stride_pad[31:24];
                     dma_a_im2col_dilation_h <= conv_dilation[7:0];
                     dma_a_im2col_dilation_w <= conv_dilation[15:8];
-                    dma_a_im2col_fp16_mode <= (cfg_mode == 2'b10);
+                    dma_a_im2col_fp16_mode <= cfg_dma_fp16_mode;
                     dma_bias_addr <= bias_addr;
                     dma_w_start <= 1'b1;
                     dma_a_start <= 1'b1;
@@ -1037,7 +1053,7 @@ always @(posedge clk) begin
                 dma_a_ofm_k_base <= tile_k_base;
                 dma_a_ofm_k_len <= tile_k_len;
                 dma_a_ofm_active_rows <= tile_active_rows;
-                dma_a_ofm_fp16_mode <= (lk_mode == 2'b10);
+                dma_a_ofm_fp16_mode <= lk_dma_fp16_mode;
                 dma_a_im2col_m_index <= 32'd0;
                 dma_a_im2col_k_len <= 16'd0;
                 dma_w_start  <= 1'b1;
@@ -1109,7 +1125,7 @@ always @(posedge clk) begin
                     dma_a_ofm_k_base <= seq1_k_base;
                     dma_a_ofm_k_len <= seq1_k_len_32[15:0];
                     dma_a_ofm_active_rows <= seq1_active_rows;
-                    dma_a_ofm_fp16_mode <= (lk_mode == 2'b10);
+                    dma_a_ofm_fp16_mode <= lk_dma_fp16_mode;
                     dma_a_im2col_m_index <= seq1_m_base;
                     dma_a_im2col_k_len <= lk_k_dim[15:0];
                     dma_a_im2col_ih <= lk_conv_ih;
@@ -1125,7 +1141,7 @@ always @(posedge clk) begin
                     dma_a_im2col_pad_w <= lk_conv_pad_w;
                     dma_a_im2col_dilation_h <= lk_conv_dilation_h;
                     dma_a_im2col_dilation_w <= lk_conv_dilation_w;
-                    dma_a_im2col_fp16_mode <= (lk_mode == 2'b10);
+                    dma_a_im2col_fp16_mode <= lk_dma_fp16_mode;
                     dma_bias_addr <= lk_bias_addr + (seq1_j << 2);
                 end
 
@@ -1206,7 +1222,7 @@ always @(posedge clk) begin
                                 dma_a_ofm_k_base <= seq1_k_base;
                                 dma_a_ofm_k_len <= seq1_k_len_32[15:0];
                                 dma_a_ofm_active_rows <= seq1_active_rows;
-                                dma_a_ofm_fp16_mode <= (lk_mode == 2'b10);
+                                dma_a_ofm_fp16_mode <= lk_dma_fp16_mode;
                                 dma_a_im2col_m_index <= seq1_m_base;
                                 dma_a_im2col_k_len <= lk_k_dim[15:0];
                                 dma_a_im2col_ih <= lk_conv_ih;
@@ -1222,7 +1238,7 @@ always @(posedge clk) begin
                                 dma_a_im2col_pad_w <= lk_conv_pad_w;
                                 dma_a_im2col_dilation_h <= lk_conv_dilation_h;
                                 dma_a_im2col_dilation_w <= lk_conv_dilation_w;
-                                dma_a_im2col_fp16_mode <= (lk_mode == 2'b10);
+                                dma_a_im2col_fp16_mode <= lk_dma_fp16_mode;
                                 dma_w_start <= 1'b1;
                                 dma_a_start <= 1'b1;
                                 dma_w_done_r <= 1'b0;

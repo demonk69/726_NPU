@@ -12,7 +12,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 OUT_DIR="$ROOT/sim/vgg_closed_loop"
 TIMEOUT_CYCLES="${VGG_CLOSED_TIMEOUT_CYCLES:-250000000}"
-RUN_TIMEOUT_SECONDS="${VGG_CLOSED_SHELL_TIMEOUT_SECONDS:-4800}"
+RUN_TIMEOUT_SECONDS="${VGG_CLOSED_SHELL_TIMEOUT_SECONDS:-12000}"
 
 IMG_IDX="0"
 IMAGE=""
@@ -107,9 +107,13 @@ timeout "$RUN_TIMEOUT_SECONDS" stdbuf -oL -eL "$OUT_DIR/obj_dir/Vtb_soc_vgg_clos
 RUN_RC=${PIPESTATUS[0]}
 set -e
 
-grep -E '\[PASS\]|\[FAIL\]|\[TIMEOUT\]|Cycles' "$LOG_FILE" || true
+if [[ "$RUN_RC" -eq 124 ]]; then
+    echo "[SHELL_TIMEOUT] ${RUN_TIMEOUT_SECONDS} seconds" | tee -a "$LOG_FILE"
+fi
 
-if grep -qE '\[FAIL\]|\[TIMEOUT\]' "$LOG_FILE"; then
+grep -E '\[PASS\]|\[FAIL\]|\[TIMEOUT\]|\[SHELL_TIMEOUT\]|Cycles' "$LOG_FILE" || true
+
+if grep -qE '\[FAIL\]|\[TIMEOUT\]|\[SHELL_TIMEOUT\]' "$LOG_FILE"; then
     RUN_RC=1
 elif ! grep -q '\[PASS\]' "$LOG_FILE"; then
     RUN_RC=1

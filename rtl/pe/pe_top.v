@@ -13,7 +13,7 @@
 //           WS mode: load_w=1 latches w_in into the PREFETCH weight register.
 //                    swap_w atomically swaps active/prefetch registers.
 //           OS mode: weight streams through like activation.
-//           FP16/INT8 support with mixed-precision FP32 accumulation.
+//           Optional FP16/INT8 support with mixed-precision FP32 accumulation.
 //           INT8 mode supports packed 2-lane SIMD with DATA_W=16 and
 //           packed 4-lane SIMD with DATA_W=32.
 //           Legacy sign-extended scalar INT8 inputs are treated as 1-lane.
@@ -26,7 +26,8 @@
 module pe_top #(
     parameter DATA_W = 16,   // max data width (FP16)
     parameter ACC_W  = 32,   // accumulator width
-    parameter INT8_SIMD_LANES = (DATA_W >= 32) ? 4 : 2
+    parameter INT8_SIMD_LANES = (DATA_W >= 32) ? 4 : 2,
+    parameter FP16_ENABLE = 0
 )(
     input  wire              clk,
     input  wire              rst_n,
@@ -78,6 +79,8 @@ end
 
 // The active weight value presented to Stage-0
 wire [DATA_W-1:0] active_weight = w_reg[w_sel];
+wire pe_fp16_mode = (FP16_ENABLE != 0) && mode;
+wire unused_acc_in = |acc_in;
 
 // ---------------------------------------------------------------------------
 // Stage-0 : Input register
@@ -101,10 +104,10 @@ always @(posedge clk) begin
         s0_a     <= 0;
         s0_valid <= 0;
         s0_flush <= 0;
-        s0_mode  <= mode;
+        s0_mode  <= pe_fp16_mode;
         s0_stat  <= stat_mode;
     end else if (en) begin
-        s0_mode  <= mode;
+        s0_mode  <= pe_fp16_mode;
         s0_stat <= stat_mode;
         s0_flush <= flush;
         s0_valid <= 1'b1;
@@ -135,7 +138,6 @@ reg               s1_valid;
 reg               s1_flush;
 reg               s1_stat;
 reg               s1_mode;
-reg  [ACC_W-1:0]  s1_acc_in;
 
 // INT8: DATA_W carries up to four signed INT8 lanes in packed SIMD form.
 // Existing scalar feeders sign-extend one INT8 value to 16 bits; detect that
@@ -192,16 +194,22 @@ wire signed [17:0] int8_sum_18   = int8_mul0_ext +
                                    (int8_lane3_en ? int8_mul3_ext : 18'sd0);
 wire [ACC_W-1:0] int8_prod = {{(ACC_W-18){int8_sum_18[17]}}, int8_sum_18};
 
-// FP16: instantiate fp16_mul (combinational)
+// FP16: instantiated only when enabled so INT8-only builds can drop it.
 wire [ACC_W-1:0] fp16_mul_out;
-fp16_mul u_fp16_mul (
-    .clk     (clk),
-    .rst_n   (rst_n),
-    .en      (en),
-    .a       (s0_w[15:0]),
-    .b       (s0_a[15:0]),
-    .result  (fp16_mul_out)
-);
+generate
+    if (FP16_ENABLE != 0) begin : gen_fp16_mul
+        fp16_mul u_fp16_mul (
+            .clk     (clk),
+            .rst_n   (rst_n),
+            .en      (en),
+            .a       (s0_w[15:0]),
+            .b       (s0_a[15:0]),
+            .result  (fp16_mul_out)
+        );
+    end else begin : gen_no_fp16_mul
+        assign fp16_mul_out = {ACC_W{1'b0}};
+    end
+endgenerate
 
 // Mux INT8 / FP16 + register
 always @(posedge clk) begin
@@ -211,20 +219,17 @@ always @(posedge clk) begin
         s1_flush  <= 0;
         s1_stat   <= 0;
         s1_mode   <= 0;
-        s1_acc_in <= 0;
     end else if (acc_init_en) begin
         s1_mul    <= 0;
         s1_valid  <= 0;
         s1_flush  <= 0;
         s1_stat   <= stat_mode;
-        s1_mode   <= mode;
-        s1_acc_in <= 0;
+        s1_mode   <= pe_fp16_mode;
     end else if (s0_valid) begin
         s1_valid  <= s0_valid;
         s1_flush  <= s0_flush;
         s1_stat   <= s0_stat;
         s1_mode   <= s0_mode;
-        s1_acc_in <= acc_in;
         s1_mul    <= s0_mode ? fp16_mul_out : int8_prod;
     end else begin
         s1_valid <= 0;
@@ -271,23 +276,22 @@ function [31:0] fp16_to_fp32;
     end
 endfunction
 
-// FP32 adders
-wire [31:0] fp32_a = s1_stat ? os_acc : ws_acc;
-wire [31:0] fp32_b = fp16_to_fp32(s1_mul[15:0]);
+// FP32 adder for FP16 accumulation. Removed from INT8-only elaboration.
 wire [31:0] fp32_sum;
+generate
+    if (FP16_ENABLE != 0) begin : gen_fp16_accum
+        wire [31:0] fp32_a = s1_stat ? os_acc : ws_acc;
+        wire [31:0] fp32_b = fp16_to_fp32(s1_mul[15:0]);
 
-fp32_add u_fp32_add (
-    .a      (fp32_a),
-    .b      (fp32_b),
-    .result (fp32_sum)
-);
-
-wire [31:0] fp32_ws_ext_sum;
-fp32_add u_fp32_add_ws_ext (
-    .a      (s1_acc_in),
-    .b      (fp32_b),
-    .result (fp32_ws_ext_sum)
-);
+        fp32_add u_fp32_add (
+            .a      (fp32_a),
+            .b      (fp32_b),
+            .result (fp32_sum)
+        );
+    end else begin : gen_no_fp16_accum
+        assign fp32_sum = 32'd0;
+    end
+endgenerate
 
 always @(posedge clk) begin
     if (!rst_n) begin

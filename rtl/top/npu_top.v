@@ -31,7 +31,8 @@ module npu_top #(
     parameter PPB_DEPTH    = 64,
     parameter PPB_THRESH   = 16,
     parameter INT8_SIMD_LANES = 4,
-    parameter PERF_ENABLE_DERIVED = 0
+    parameter PERF_ENABLE_DERIVED = 0,
+    parameter FP16_ENABLE = 0
 )(
     // System
     input  wire              sys_clk,
@@ -248,6 +249,7 @@ wire [31:0] desc_fetch_addr;
 wire [511:0] desc_fetch_words;
 wire [31:0] dma_error_status;
 wire pe_en, pe_flush, pe_mode, pe_stat;
+wire pe_mode_hw = (FP16_ENABLE != 0) && pe_mode;
 wire pe_load_w, pe_swap_w, pe_acc_init_en;   // WS mode weight control and accumulator init
 wire pe_half_en;           // 8x32: half-array enable (0=top, 1=bottom)
 wire ctrl_w_ppb_swap, ctrl_a_ppb_swap, ctrl_w_ppb_clear, ctrl_a_ppb_clear;
@@ -257,7 +259,7 @@ wire [1:0] ctrl_post_act_mode;
 wire [31:0] ctrl_post_quant_cfg;
 wire       ctrl_bias_en;
 wire ctrl_tile_mode, ctrl_vec_consume;
-wire ppb_packed_int8 = ctrl_tile_mode && !pe_mode && (INT8_SIMD_LANES > 1);
+wire ppb_packed_int8 = ctrl_tile_mode && !pe_mode_hw && (INT8_SIMD_LANES > 1);
 wire tile_ws_direct = ppb_packed_int8 && !pe_stat;
 wire [31:0] ctrl_tile_m_base, ctrl_tile_n_base; // global C tile origin: m0/n0
 wire [15:0] ctrl_tile_row_valid, ctrl_tile_col_valid; // valid r/c lanes for edge tiles
@@ -273,7 +275,8 @@ npu_ctrl #(
     .COLS  (PHY_COLS),
     .DATA_W(DATA_W),
     .ACC_W (ACC_W),
-    .PPB_DEPTH(PPB_DEPTH)
+    .PPB_DEPTH(PPB_DEPTH),
+    .FP16_ENABLE(FP16_ENABLE)
 ) u_ctrl (
     .clk          (sys_clk),
     .rst_n        (sys_rst_n),
@@ -418,7 +421,6 @@ pingpong_buf #(
     .rd_vec_valid(w_ppb_rd_vec_valid),
     .swap      (ctrl_w_ppb_swap),
     .clear     (ctrl_w_ppb_clear),
-    .fp16_mode (pe_mode),
     .packed_int8(ppb_packed_int8),
     .buf_empty (w_ppb_buf_empty_int),
     .buf_full  (w_ppb_full),
@@ -448,7 +450,6 @@ pingpong_buf #(
     .rd_vec_valid(a_ppb_rd_vec_valid),
     .swap      (ctrl_a_ppb_swap),
     .clear     (ctrl_a_ppb_clear),
-    .fp16_mode (pe_mode),
     .packed_int8(ppb_packed_int8),
     .buf_empty (a_ppb_buf_empty_int),
     .buf_full  (a_ppb_full),
@@ -857,11 +858,12 @@ op_counter #(
 
 pe_top #(
     .DATA_W(DATA_W),
-    .ACC_W (ACC_W)
+    .ACC_W (ACC_W),
+    .FP16_ENABLE(FP16_ENABLE)
 ) u_scalar_pe (
     .clk      (sys_clk),
     .rst_n    (sys_rst_n),
-    .mode     (pe_mode),
+    .mode     (pe_mode_hw),
     .stat_mode(pe_stat),
     .en       (scalar_pe_en),
     .flush    (pe_flush),
@@ -963,23 +965,23 @@ function [31:0] apply_scalar_quant;
 endfunction
 
 assign scalar_act_result = apply_scalar_activation(scalar_result,
-                                                   pe_mode,
+                                                   pe_mode_hw,
                                                    ctrl_post_act_mode);
 assign scalar_post_result = apply_scalar_quant(scalar_act_result,
-                                               pe_mode,
+                                               pe_mode_hw,
                                                ctrl_post_quant_cfg);
 
 // Tile-mode post-processing: bias -> activation -> quant.
 // Order: accumulator -> bias -> ReLU/ReLU6 -> quant/saturate.
-wire [31:0] tile_bias_val = ctrl_bias_en ? tile_bias_buf[tile_ser_col] : 32'd0;
+wire [31:0] tile_bias_val = ctrl_bias_en ? tile_bias_buf[tile_ser_col[4:0]] : 32'd0;
 wire [ACC_W-1:0] tile_with_bias = tile_result_buf[tile_ser_idx] + tile_bias_val;
 wire [ACC_W-1:0] tile_act_result;
 wire [ACC_W-1:0] tile_post_result;
 assign tile_act_result = apply_scalar_activation(tile_with_bias,
-                                                  pe_mode,
-                                                  ctrl_post_act_mode);
+                                                   pe_mode_hw,
+                                                   ctrl_post_act_mode);
 assign tile_post_result = apply_scalar_quant(tile_act_result,
-                                             pe_mode,
+                                             pe_mode_hw,
                                              ctrl_post_quant_cfg);
 
 // WS load row indicator (for debug/status)
@@ -990,12 +992,13 @@ reconfig_pe_array #(
     .PHY_COLS(PHY_COLS),
     .DATA_W  (DATA_W),
     .ACC_W   (ACC_W),
-    .MAX_TILE_RESULTS(MAX_TILE_RESULTS)
+    .MAX_TILE_RESULTS(MAX_TILE_RESULTS),
+    .FP16_ENABLE(FP16_ENABLE)
 ) u_pe_array (
     .clk            (sys_clk),
     .rst_n          (sys_rst_n),
     .cfg_shape      (ctrl_cfg_shape),
-    .mode           (pe_mode),
+    .mode           (pe_mode_hw),
     .stat_mode      (pe_stat),
     .en             (pe_en),
     .flush          (pe_flush),

@@ -844,14 +844,20 @@ always @(posedge clk) begin
             // Cin/KH/KW, reads IFM[b,cin,ih,iw] when in bounds, emits zero for
             // padding, and packs the generated A row into 32-bit PPBuf words.
             L_A_IM2COL: begin
+                `ifdef DIAG_IM2COL
                 if (im2col_k_pos == 16'd0) $display("[DMA_IM2COL] START k_len=%0d total=%0d ppb_full=%0d",
                     im2col_k_len_latch, im2col_total_lanes, a_ppb_full);
+                `endif
                 if (im2col_k_pos >= im2col_total_lanes) begin
+                    `ifdef DIAG_IM2COL
                     $display("[DMA_IM2COL] DONE at cycle %0t, k_pos=%0d", $time, im2col_k_pos);
+                    `endif
                     load_state <= L_A_IM2COL_DONE;
                 end else if (im2col_is_padding || !im2col_in_bounds) begin
                     if (!im2col_lane_last || !a_ppb_full) begin
+                        `ifdef DIAG_IM2COL
                         if (im2col_k_pos < 16'd20) $display("[DMA_IM2COL] pad k=%0d", im2col_k_pos);
+                        `endif
                         if (im2col_lane_last) begin
                             a_im2col_wr_en <= 1'b1;
                             a_im2col_wr_data <= pack_im2col_elem(im2col_pack_word,
@@ -872,7 +878,9 @@ always @(posedge clk) begin
                             load_state <= L_A_IM2COL_DONE;
                     end
                 end else if (!m_axi_arvalid && !load_r_active && (!im2col_lane_last || !a_ppb_full)) begin
+                    `ifdef DIAG_IM2COL
                     if (im2col_k_pos < 16'd20) $display("[DMA_IM2COL] read k=%0d addr=0x%08h", im2col_k_pos, im2col_aligned_addr);
+                    `endif
                     load_addr_cnt <= im2col_aligned_addr;
                     load_arlen    <= 8'd0;
                     m_axi_arvalid <= 1'b1;
@@ -882,14 +890,18 @@ always @(posedge clk) begin
                     m_axi_rready  <= 1'b1;
                 end else if (load_r_active) begin
                     m_axi_rready <= 1'b1;
+                    `ifdef DIAG_IM2COL
                     if (im2col_k_pos == 16'd4) begin
                         if (!m_axi_rvalid) $display("[DMA_IM2COL] WAIT RVALID k=4 cycle=%0t", $time);
                         else if (a_ppb_full) $display("[DMA_IM2COL] PPB FULL k=4 cycle=%0t", $time);
                     end
+                    `endif
                     if (m_axi_rvalid && m_axi_rready && (!im2col_lane_last || !a_ppb_full)) begin
                         load_r_active <= 1'b0;
                         m_axi_rready  <= 1'b0;
+                        `ifdef DIAG_IM2COL
                         if (im2col_k_pos < 16'd20) $display("[DMA_IM2COL] rcv k=%0d", im2col_k_pos);
+                        `endif
                         if (im2col_lane_last) begin
                             a_im2col_wr_en <= 1'b1;
                             a_im2col_wr_data <= pack_im2col_elem(im2col_pack_word,

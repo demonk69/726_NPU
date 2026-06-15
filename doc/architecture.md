@@ -1,6 +1,6 @@
 # Current NPU/SoC Architecture
 
-Updated: 2026-05-26
+Updated: 2026-06-15
 
 This document describes the current implementation state. It is not a historical roadmap and not a target-only architecture plan.
 
@@ -37,6 +37,57 @@ soc_top
 ```
 
 There is currently no UART, SPI Flash controller, Boot ROM, GPIO, or board-level I/O peripheral in RTL.
+
+## Vivado/Board Boundary
+
+The simulation SoC files under `rtl/soc/` are not the board-level NPU source set. For Vivado block-design integration, use `rtl/top/npu_pynq_wrapper.v` as the RTL module boundary and connect it to the Zynq PS or another AXI-capable host.
+
+```text
+Zynq PS or external host
+  |
+  +-- AXI4-Lite master  --> npu_pynq_wrapper.S_AXI registers
+  +-- AXI4/DDR slave    <-- npu_pynq_wrapper.M_AXI DMA traffic
+  +-- clock/reset       --> aclk / aresetn
+  +-- interrupt         <-- npu_irq
+
+npu_pynq_wrapper
+  |
+  +-- npu_top
+      +-- npu_axi_lite register file
+      +-- npu_ctrl scheduler
+      +-- npu_dma AXI master
+      +-- W/A pingpong buffers
+      +-- scalar PE and reconfigurable PE array
+```
+
+`scripts/vivado_npu_filelist.tcl` is the maintained source list for this boundary. Its default list is INT8-only and excludes the optional FP16 datapath files. Use `$npu_vivado_fp16_project_rtl_files` and set `FP16_ENABLE=1` only when a full FP16 build is required.
+
+## NPU Internal Data Path
+
+The direct tile GEMM path used by the maintained VGG firmware is:
+
+```text
+CPU firmware
+  |
+  | AXI-Lite writes: dimensions, W/A/R addresses, bias, quant, shape, start
+  v
+npu_axi_lite --> npu_ctrl
+                  |
+                  +-- issues W/A DMA reads
+                  +-- swaps ping-pong banks
+                  +-- controls PE enable/flush/load
+                  +-- issues bias fetch and result writeback
+
+DRAM/DDR --AXI4 read--> npu_dma --W words--> W pingpong_buf --vectors--> PE array
+DRAM/DDR --AXI4 read--> npu_dma --A words--> A pingpong_buf --vectors--> PE array
+
+PE array --INT32 accumulators--> serializer/postprocess --> result FIFO
+result FIFO --AXI4 write via npu_dma--> DRAM/DDR
+```
+
+The W/A ping-pong buffers hold 32-bit DMA words. In default INT8 mode each word contains four signed INT8 elements. Tile mode reads vectors from both buffers, feeds one row/column vector per logical K step, and lets each PE accumulate the dot product.
+
+`FP16_ENABLE=0` removes the PE FP16 multiply/add datapath at elaboration time. The controller also rejects FP16 work requests so software cannot silently run FP16 descriptors on INT8 hardware.
 
 ## Address Map
 
@@ -116,6 +167,65 @@ Generator: `tools/pth/gen_vgg_closed_loop.py`.
 Python generates static model assets and the selected input image. Firmware packs A tiles from dense activation buffers at runtime, runs the NPU, applies CPU-side per-channel Q24 requant/scatter, then performs maxpool, avgpool, classifier, and argmax.
 
 This is the deployment-oriented simulation path.
+
+## Model Inference Data Flow
+
+There are two maintained model-level flows. They share the same RTL NPU datapath but differ in where Conv A tiles are produced.
+
+### Fast E2E Baseline Data Flow
+
+```text
+Python generator
+  |
+  +-- runs host reference
+  +-- pre-packs every Conv A tile
+  +-- emits DRAM image with input, A tiles, W tiles, bias, quant, classifier
+  +-- emits PicoRV32 firmware and tile table
+
+Verilator testbench
+  |
+  +-- loads firmware into SRAM
+  +-- loads generated DRAM image into DRAM model
+
+Firmware
+  |
+  +-- iterates generated tile table
+  +-- programs NPU registers for each tile
+  +-- waits for NPU completion
+  +-- runs avgpool, classifier, argmax on CPU
+  +-- writes result marker
+```
+
+This flow is fast because Python has already created all Conv tile streams. It is useful as a regression baseline but is not the deployment model.
+
+### Runtime Closed-Loop Data Flow
+
+```text
+Python generator
+  |
+  +-- emits dense input activation buffer
+  +-- emits static weights, bias, Q24 multipliers, classifier params
+  +-- emits image-independent PicoRV32 firmware
+
+Firmware for each Conv layer
+  |
+  +-- reads dense INT8 activation buffer
+  +-- packs the next A tile into A_WORK
+  +-- programs W_ADDR, A_ADDR, R_ADDR, BIAS_ADDR, dimensions, shape
+  +-- starts the NPU
+  +-- reads raw INT32+bias tile results from R_WORK
+  +-- applies ReLU and per-output-channel Q24 requant on CPU
+  +-- scatters INT8 output into the next dense activation buffer
+
+Firmware after Conv layers
+  |
+  +-- maxpool between selected Conv groups
+  +-- avgpool final feature map
+  +-- classifier and argmax
+  +-- result marker for the testbench
+```
+
+This flow is the deployment-oriented simulation path because the runtime CPU owns dense activation buffers and performs tile packing/scatter itself. On Zynq deployment the PicoRV32/testbench roles are replaced by PS software and DDR, while the PL NPU register/DMA contract stays the same.
 
 ### RTL Descriptor-v1 Path
 

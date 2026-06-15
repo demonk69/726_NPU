@@ -1,12 +1,11 @@
 // =============================================================================
 // Module  : pingpong_buf
 // Project : NPU_prj
-// Desc    : Dual-buffer Ping-Pong buffer with sub-word read support.
+// Desc    : Dual-buffer Ping-Pong buffer with INT8 sub-word read support.
 //           - Two independent SRAM banks (BufA, BufB).
 //           - Writer (DMA) writes DATA_W words.
 //           - Reader (PE) reads OUT_WIDTH sub-words (OUT_WIDTH <= DATA_W).
-//           - Each DATA_W word is read in SUBW sub-words for INT8,
-//             or SUBW/2 sub-words for FP16 (fp16_mode=1).
+//           - Each DATA_W word is read in SUBW INT8 sub-words.
 //           - "swap" toggles which bank each side accesses.
 //           - "clear" resets all pointers and fill counts.
 //
@@ -15,12 +14,8 @@
 //   DEPTH      - entries per bank (word count, must be power of 2)
 //   OUT_WIDTH  - read data width (PE side, e.g. 16); DATA_W/OUT_WIDTH must be int
 //   THRESHOLD  - how many words DMA must fill before buf_ready asserts
-//   SUBW       - max sub-words per word (4 for INT8; FP16 uses SUBW/2=2)
+//   SUBW       - INT8 sub-words per DATA_W word
 //   VEC_LANES  - maximum number of PE lanes returned by rd_vec
-//
-// fp16_mode port:
-//   0 (INT8): each 32-bit word yields SUBW=4 bytes; rd_data is sign-extended byte
-//   1 (FP16): each 32-bit word yields 2 half-words; rd_data is the 16-bit FP16 value
 // =============================================================================
 
 `timescale 1ns/1ps
@@ -51,8 +46,6 @@ module pingpong_buf #(
     // ---- Control ----
     input  wire                      swap,       // toggle active bank
     input  wire                      clear,      // reset read/write pointers
-    input  wire                      fp16_mode,  // 1=FP16: 16-bit half-word reads (2 per word)
-                                                  // 0=INT8: 8-bit byte reads (SUBW=4 per word)
     input  wire                      packed_int8,  // 1=packed INT8 pairs {odd,even} for SIMD
 
     // ---- Status ----
@@ -72,20 +65,13 @@ localparam SUBW_W    = $clog2(SUBW);             // 2 bits for SUBW=4 index
 localparam RD_FILL_W = $clog2(DEPTH * SUBW) + 1; // max fill: DEPTH*4 sub-words
 localparam [4:0] VEC_LANES_5 = VEC_LANES;
 localparam [2:0] PACKED_LANES = (OUT_WIDTH + 7) / 8;  // 2 for 16b, 4 for 32b
+localparam [SUBW_W-1:0] SUBW_LAST = {SUBW_W{1'b1}};
 
 wire [4:0] rd_vec_lanes_eff =
     (rd_vec_lanes == 5'd0)      ? VEC_LANES_5 :
     (rd_vec_lanes > VEC_LANES_5) ? VEC_LANES_5 :
                                    rd_vec_lanes;
 wire [RD_FILL_W-1:0] rd_vec_lanes_fill = packed_int8 ? (rd_vec_lanes_eff * PACKED_LANES) : rd_vec_lanes_eff;
-
-// Effective sub-words per word (runtime):
-//   INT8:  eff_subw = 4 (SUBW)
-//   FP16:  eff_subw = 2 (SUBW/2)
-wire [SUBW_W-1:0] eff_subw_last = fp16_mode ? { { (SUBW_W-1) {1'b0} }, 1'b1 } : { { (SUBW_W-2) {1'b0} }, 2'b11 };
-// eff_subw_last: the index of the LAST sub-word before advancing to next word
-//   INT8:  SUBW-1 = 3
-//   FP16:  1      (only 2 sub-words: index 0 and 1)
 
 // ---------------------------------------------------------------------------
 // Bank select: 0 = BufA, 1 = BufB
@@ -107,7 +93,7 @@ wire [FILL_W-1:0] cur_wr_fill = wr_sel ? wr_fill_b : wr_fill_a;
 // ---------------------------------------------------------------------------
 // Read pointer & sub-word counter (per bank)
 // rd_ptr: word-level pointer
-// rd_sub: sub-word index within current word (0 to eff_subw-1)
+// rd_sub: INT8 sub-word index within current word (0 to SUBW-1)
 // rd_fill: total sub-words remaining to read
 // ---------------------------------------------------------------------------
 reg [ADDR_W-1:0] rd_ptr_a, rd_ptr_b;
@@ -138,21 +124,14 @@ always @(posedge clk) begin
     end
 end
 
-// Update write pointers & fill counts
-integer mem_init_i;
+// Update write pointers & fill counts. Bank contents are not reset here: fill
+// counts define validity, and keeping memory writes in one always block avoids
+// multi-driven RAM/register inference.
 always @(posedge clk) begin
     if (!rst_n) begin
         wr_ptr_a   <= 0; wr_ptr_b   <= 0; wr_fill_a  <= 0; wr_fill_b  <= 0;
-        for (mem_init_i = 0; mem_init_i < DEPTH; mem_init_i = mem_init_i + 1) begin
-            mem_a[mem_init_i] <= {DATA_W{1'b0}};
-            mem_b[mem_init_i] <= {DATA_W{1'b0}};
-        end
     end else if (clear) begin
         wr_ptr_a   <= 0; wr_ptr_b   <= 0; wr_fill_a  <= 0; wr_fill_b  <= 0;
-        for (mem_init_i = 0; mem_init_i < DEPTH; mem_init_i = mem_init_i + 1) begin
-            mem_a[mem_init_i] <= {DATA_W{1'b0}};
-            mem_b[mem_init_i] <= {DATA_W{1'b0}};
-        end
     end else if (swap) begin
         // Reset the NEW writer's bank (it was just drained by PE)
         // New writer's bank = next_wr_sel (after swap)
@@ -192,17 +171,8 @@ wire [7:0] rd_byte = (rd_sub == 0) ? rd_mem[ 7: 0] :
                                      rd_mem[31:24];
 wire [OUT_WIDTH-1:0] rd_int8 = {{(OUT_WIDTH-8){rd_byte[7]}}, rd_byte};
 
-// ---- FP16 path: read one 16-bit half-word, zero-extend to OUT_WIDTH ----
-// FP16 is always zero-extended (IEEE 754 bit pattern must NOT be sign-extended)
-wire [15:0] rd_fp16_hw = (rd_sub == 0) ? rd_mem[15: 0] :
-                                          rd_mem[31:16];
-wire [OUT_WIDTH-1:0] rd_fp16 = {{(OUT_WIDTH-16){1'b0}}, rd_fp16_hw};
-
-// Mux based on fp16_mode
-wire [OUT_WIDTH-1:0] rd_data_raw = fp16_mode ? rd_fp16 : rd_int8;
-
 // When buffer is empty, output 0 to avoid PE latching stale data
-assign rd_data = buf_empty ? {OUT_WIDTH{1'b0}} : rd_data_raw;
+assign rd_data = buf_empty ? {OUT_WIDTH{1'b0}} : rd_int8;
 
 // ---- Vector preview path ----
 // rd_vec starts at the same rd_ptr/rd_sub as rd_data.  The port exposes up to
@@ -216,11 +186,9 @@ generate
         // 2*VEC_LANES per K step, naturally stepping over word pairs.
         wire [5:0] lane_abs = ({4'b0000, rd_sub} + lane_i[5:0]);
         wire [ADDR_W-1:0] int_word_addr = rd_ptr + lane_abs[5:2];
-        wire [ADDR_W-1:0] fp_word_addr  = rd_ptr + lane_abs[5:1];
-        wire [1:0] sub_idx      = fp16_mode ? {1'b0, lane_abs[0]} : lane_abs[1:0];
+        wire [1:0] sub_idx      = lane_abs[1:0];
 
         wire [DATA_W-1:0] int_word = (rd_sel == 1'b0) ? mem_a[int_word_addr] : mem_b[int_word_addr];
-        wire [DATA_W-1:0] fp_word  = (rd_sel == 1'b0) ? mem_a[fp_word_addr]  : mem_b[fp_word_addr];
 
         wire [7:0] vec_byte = (sub_idx == 2'd0) ? int_word[ 7: 0] :
                               (sub_idx == 2'd1) ? int_word[15: 8] :
@@ -253,13 +221,11 @@ generate
                                (sub_idx == 2'd1) ? int_word4[15: 8] :
                                (sub_idx == 2'd2) ? int_word4[23:16] :
                                                     int_word4[31:24];
-        wire [15:0] vec_half = (sub_idx == 2'd0) ? fp_word[15:0] : fp_word[31:16];
 
         wire [OUT_WIDTH-1:0] vec_lane =
             packed_int8 ? (PACKED_LANES == 4 ? {vec_byte4, vec_byte3, vec_byte2, vec_byte}
                                             : {vec_byte2, vec_byte})
-                        : (fp16_mode ? {{(OUT_WIDTH-16){1'b0}}, vec_half}
-                                     : {{(OUT_WIDTH-8){vec_byte[7]}}, vec_byte});
+                        : {{(OUT_WIDTH-8){vec_byte[7]}}, vec_byte};
 
             assign rd_vec[lane_i*OUT_WIDTH +: OUT_WIDTH] =
                 rd_vec_valid ? vec_lane : {OUT_WIDTH{1'b0}};
@@ -271,11 +237,9 @@ assign rd_vec_valid = (rd_vec_lanes_eff != 5'd0) && (cur_rd_fill >= rd_vec_lanes
 wire [7:0] vec_abs_next = packed_int8
     ? ({4'b0000, rd_sub} + (rd_vec_lanes_eff * PACKED_LANES))
     : ({4'b0000, rd_sub} + {1'b0, rd_vec_lanes_eff});
-wire [ADDR_W:0] vec_word_inc = fp16_mode ? (vec_abs_next >> 1)
-                                          : (vec_abs_next >> 2);
+wire [ADDR_W:0] vec_word_inc = (vec_abs_next >> 2);
 wire [SUBW_W-1:0] vec_next_sub = packed_int8 ? vec_abs_next[SUBW_W-1:0]
-    : (fp16_mode ? {{(SUBW_W-1){1'b0}}, vec_abs_next[0]}
-                 : vec_abs_next[SUBW_W-1:0]);
+    : vec_abs_next[SUBW_W-1:0];
 
 // Update read pointers & fill counts
 always @(posedge clk) begin
@@ -284,17 +248,15 @@ always @(posedge clk) begin
         rd_ptr_b   <= 0;  rd_sub_b <= 0;  rd_fill_b <= 0;
     end else if (swap) begin
         // New reader's bank = old writer's bank = wr_sel (before swap)
-        // Copy the write fill count as the read fill count
-        //   INT8:  × SUBW (=4 sub-words per word)
-        //   FP16:  × 2    (=2 half-words per word)
+        // Copy the write fill count as the read fill count in INT8 sub-words.
         if (wr_sel == 1'b0) begin
             rd_ptr_a  <= 0;
             rd_sub_a  <= 0;
-            rd_fill_a <= fp16_mode ? (wr_fill_a << 1) : (wr_fill_a * SUBW);
+            rd_fill_a <= wr_fill_a * SUBW;
         end else begin
             rd_ptr_b  <= 0;
             rd_sub_b  <= 0;
-            rd_fill_b <= fp16_mode ? (wr_fill_b << 1) : (wr_fill_b * SUBW);
+            rd_fill_b <= wr_fill_b * SUBW;
         end
     end else if (do_vec_read) begin
         if (rd_sel == 1'b0) begin
@@ -314,8 +276,8 @@ always @(posedge clk) begin
         end
     end else if (do_read) begin
         if (rd_sel == 1'b0) begin
-            // Advance sub-word index; wrap at eff_subw_last
-            if (rd_sub_a == eff_subw_last) begin
+            // Advance INT8 sub-word index; wrap at SUBW-1.
+            if (rd_sub_a == SUBW_LAST) begin
                 rd_ptr_a  <= rd_ptr_a + 1'b1;
                 rd_sub_a  <= 0;
             end else begin
@@ -323,7 +285,7 @@ always @(posedge clk) begin
             end
             rd_fill_a <= rd_fill_a - 1'b1;
         end else begin
-            if (rd_sub_b == eff_subw_last) begin
+            if (rd_sub_b == SUBW_LAST) begin
                 rd_ptr_b  <= rd_ptr_b + 1'b1;
                 rd_sub_b  <= 0;
             end else begin

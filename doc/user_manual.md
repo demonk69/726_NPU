@@ -1,6 +1,6 @@
 # User Manual
 
-Updated: 2026-05-26
+Updated: 2026-06-15
 
 This document summarizes the firmware-facing ABI currently used by the maintained VGG simulation flows.
 
@@ -15,6 +15,44 @@ This document summarizes the firmware-facing ABI currently used by the maintaine
 ```
 
 Older PowerShell/Icarus commands are archived and are not the current workflow.
+
+## Vivado Source Lists And FP16 Build Options
+
+The default FPGA build is now INT8-only to reduce LUT/DSP pressure on Zynq boards. FP16 is not deleted from the RTL, but it is controlled by the synthesizable parameter `FP16_ENABLE`.
+
+Use the maintained Vivado filelist:
+
+```tcl
+source scripts/vivado_npu_filelist.tcl
+```
+
+Default INT8-only source set:
+
+```tcl
+add_files -fileset sources_1 $npu_vivado_project_rtl_files
+set_property top npu_pynq_wrapper [get_filesets sources_1]
+update_compile_order -fileset sources_1
+```
+
+This default list excludes the FP16 datapath source files because `FP16_ENABLE=0` makes `pe_top` elaborate only the INT8 datapath.
+
+To build with FP16 enabled:
+
+```tcl
+add_files -fileset sources_1 $npu_vivado_fp16_project_rtl_files
+set_property top npu_pynq_wrapper [get_filesets sources_1]
+update_compile_order -fileset sources_1
+```
+
+If the NPU is instantiated as a Vivado block-design module cell, also set the module parameter on the BD cell:
+
+```tcl
+set_property -dict [list CONFIG.FP16_ENABLE {1}] [get_bd_cells npu_0]
+```
+
+If `npu_pynq_wrapper` is used directly as the RTL top, set the Verilog generic/parameter `FP16_ENABLE=1` in the synthesis run or instantiate the wrapper with `.FP16_ENABLE(1)`.
+
+`scripts/create_pynq_z2_npu_project.tcl` intentionally sets `CONFIG.FP16_ENABLE {0}`. Change that value to `{1}` only for an explicit full FP16 build.
 
 ## NPU MMIO Base
 
@@ -46,7 +84,7 @@ Firmware writes NPU registers through PicoRV32 memory-mapped I/O.
 | Bit(s) | Meaning |
 |---|---|
 | `0` | start |
-| `3:2` | data mode, `00=INT8`, `10=FP16` |
+| `3:2` | data mode, `00=INT8`, `10=FP16` when `FP16_ENABLE=1` |
 | `5:4` | dataflow/stat mode, VGG uses OS |
 | `7` | descriptor mode |
 | `8` | direct scalar Conv/im2col mode |
@@ -54,6 +92,8 @@ Firmware writes NPU registers through PicoRV32 memory-mapped I/O.
 | `11:10` | activation mode |
 
 VGG tile mode uses direct register writes, not RTL descriptor-v1.
+
+When `FP16_ENABLE=0`, firmware should program `CTRL[3:2]=00`. If firmware requests FP16, the controller rejects the launch and sets `ERR_STATUS[10]`, encoded as `ERR_FP16_DISABLED = 32'h0000_0400`.
 
 ## Shape Select
 

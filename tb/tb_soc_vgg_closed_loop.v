@@ -71,6 +71,40 @@ module tb_soc_vgg_closed_loop;
         end
     end
 
+`ifdef DIAG_VGG_HEARTBEAT
+    reg [31:0] heartbeat_cnt;
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            heartbeat_cnt <= 32'd0;
+        end else if (heartbeat_cnt == 32'd999999) begin
+            heartbeat_cnt <= 32'd0;
+            $display("[HEARTBEAT] cycles=%0d marker=0x%08h pc=0x%08h trap=%0d mem_valid=%0d mem_addr=0x%08h npu_busy=%0d npu_done=%0d npu_error=%0d err=0x%08h ctrl_state=%0d tile_i=%0d tile_j=%0d k_tile=%0d dma_load=%0d dma_wb=%0d w_full=%0d a_full=%0d r_full=%0d",
+                     cyc,
+                     u_soc.u_dram.mem[`VGG_CLOSED_MARKER_ADDR >> 2],
+                     u_soc.u_cpu.reg_pc,
+                     u_soc.u_cpu.trap,
+                     u_soc.mem_valid,
+                     u_soc.mem_addr,
+                     u_soc.u_npu.status_busy,
+                     u_soc.u_npu.status_done,
+                     u_soc.u_npu.status_error,
+                     u_soc.u_npu.err_status,
+                     u_soc.u_npu.u_ctrl.state,
+                     u_soc.u_npu.u_ctrl.tile_i,
+                     u_soc.u_npu.u_ctrl.tile_j,
+                     u_soc.u_npu.u_ctrl.k_tile_idx,
+                     u_soc.u_npu.u_dma.load_state,
+                     u_soc.u_npu.u_dma.wb_state,
+                     u_soc.u_npu.w_ppb_full,
+                     u_soc.u_npu.a_ppb_full,
+                     u_soc.u_npu.r_fifo_full);
+            $fflush();
+        end else begin
+            heartbeat_cnt <= heartbeat_cnt + 32'd1;
+        end
+    end
+`endif
+
     initial begin
         wait(rst_n);
         fork

@@ -49,7 +49,8 @@ module reconfig_pe_array #(
     parameter PHY_COLS         = 16,
     parameter DATA_W           = 16,
     parameter ACC_W            = 32,
-    parameter MAX_TILE_RESULTS = 256  // max results per tile (16x16 or 8x32)
+    parameter MAX_TILE_RESULTS = 256, // max results per tile (16x16 or 8x32)
+    parameter FP16_ENABLE      = 0
 )(
     input  wire                          clk,
     input  wire                          rst_n,
@@ -304,7 +305,8 @@ generate
 
             pe_top #(
                 .DATA_W(DATA_W),
-                .ACC_W (ACC_W)
+                .ACC_W (ACC_W),
+                .FP16_ENABLE(FP16_ENABLE)
             ) u_pe (
                 .clk      (clk),
                 .rst_n    (rst_n),

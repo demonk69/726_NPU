@@ -10,7 +10,7 @@ module tb_pingpong_buf_vec;
     reg [4:0] rd_vec_lanes;
     reg swap;
     reg clear;
-    reg fp16_mode;
+    reg packed_int8;
 
     wire [15:0] rd_data;
     wire [255:0] rd_vec;
@@ -43,7 +43,7 @@ module tb_pingpong_buf_vec;
         .rd_vec_valid(rd_vec_valid),
         .swap        (swap),
         .clear       (clear),
-        .fp16_mode   (fp16_mode),
+        .packed_int8 (packed_int8),
         .buf_empty   (buf_empty),
         .buf_full    (buf_full),
         .buf_ready   (buf_ready),
@@ -158,7 +158,7 @@ module tb_pingpong_buf_vec;
         rd_vec_lanes = 5'd4;
         swap = 1'b0;
         clear = 1'b0;
-        fp16_mode = 1'b0;
+        packed_int8 = 1'b0;
 
         repeat (3) tick();
         rst_n = 1'b1;
@@ -180,23 +180,7 @@ module tb_pingpong_buf_vec;
 
         pulse_clear();
 
-        // FP16: two 32-bit words produce four 16-bit lanes.
-        fp16_mode = 1'b1;
-        write_word(32'h40003C00); // lanes: 0x3C00, 0x4000
-        write_word(32'h0000C000); // lanes: 0xC000, 0x0000
-        pulse_swap();
-
-        expect_vec(16'h3C00, 16'h4000, 16'hC000, 16'h0000, "FP16_VEC0");
-        consume_vec();
-        if (!buf_empty) begin
-            $display("[FAIL] FP16 consume: buffer not empty after one vector read");
-            errors = errors + 1;
-        end
-
-        pulse_clear();
-
         // INT8: consume eight lanes across two 32-bit words.
-        fp16_mode = 1'b0;
         rd_vec_lanes = 5'd8;
         write_word(32'h04030201);
         write_word(32'h08070605);
@@ -212,7 +196,6 @@ module tb_pingpong_buf_vec;
         pulse_clear();
 
         // INT8: consume sixteen lanes across four 32-bit words.
-        fp16_mode = 1'b0;
         rd_vec_lanes = 5'd16;
         write_word(32'h04030201);
         write_word(32'h08070605);
@@ -226,29 +209,6 @@ module tb_pingpong_buf_vec;
             $display("[FAIL] INT8_VEC16 consume: buffer not empty");
             errors = errors + 1;
         end
-
-        pulse_clear();
-
-        // FP16: consume sixteen lanes across eight 32-bit words.
-        fp16_mode = 1'b1;
-        rd_vec_lanes = 5'd16;
-        write_word(32'h20012000);
-        write_word(32'h20032002);
-        write_word(32'h20052004);
-        write_word(32'h20072006);
-        write_word(32'h20092008);
-        write_word(32'h200B200A);
-        write_word(32'h200D200C);
-        write_word(32'h200F200E);
-        pulse_swap();
-
-        expect_vec_seq(16, 16'h2000, "FP16_VEC16");
-        consume_vec();
-        if (!buf_empty) begin
-            $display("[FAIL] FP16_VEC16 consume: buffer not empty");
-            errors = errors + 1;
-        end
-
         if (errors == 0) begin
             $display("[PASS] tb_pingpong_buf_vec");
         end else begin

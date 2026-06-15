@@ -1,6 +1,6 @@
 # VGG Runtime Closed-Loop Flow
 
-Updated: 2026-05-26
+Updated: 2026-06-15
 
 This document describes the runtime closed-loop RepOpt VGG path driven by `run_vgg_closed_loop.sh` and `./run_all.sh closed_loop`.
 
@@ -48,6 +48,90 @@ For each Conv layer, firmware performs:
 6. Scatter resulting INT8 bytes into the dense output activation buffer.
 
 Firmware also performs maxpool, avgpool, classifier, and argmax on the CPU.
+
+## Full Inference Data Flow
+
+The closed-loop flow keeps model parameters static in DRAM and lets firmware build each Conv tile at runtime.
+
+```text
+Generated DRAM image
+  |
+  +-- ACT_A: dense input activation buffer
+  +-- ACT_B: dense output/scratch activation buffer
+  +-- STATIC_BASE: packed weights, bias, Q24 multipliers, classifier params
+  +-- DESC_BASE: firmware layer descriptors
+  +-- A_WORK: temporary packed activation tile workspace
+  +-- R_WORK: temporary raw INT32 NPU result workspace
+
+Firmware layer loop
+  |
+  +-- choose src/dst dense activation buffer
+  +-- for each output tile:
+        pack dense activation window into A_WORK
+        point W_ADDR to pre-packed W tile at STATIC_BASE
+        point A_ADDR to A_WORK
+        point R_ADDR to R_WORK
+        point BIAS_ADDR to bias for the output channels
+        start NPU and wait for done/IRQ
+        read raw INT32+bias results from R_WORK
+        apply ReLU and per-channel Q24 requant on CPU
+        scatter INT8 output to dst dense activation buffer
+  +-- run maxpool when the layer descriptor requests it
+  +-- swap ACT_A/ACT_B roles for the next layer
+
+Final stages
+  |
+  +-- avgpool dense final feature map into FEAT_BASE
+  +-- run classifier using generated classifier weights
+  +-- write scores to SCORE_BASE
+  +-- write class marker to MARKER_ADDR
+```
+
+The NPU only sees packed W/A tile streams and writes raw accumulator tiles. It does not own dense feature-map layout, maxpool, avgpool, classifier, or exact per-channel quantization in the closed-loop flow.
+
+## Conv Tile Packing In Firmware
+
+For a Conv layer, firmware maps convolution to GEMM with:
+
+```text
+M = batch * OH * OW
+K = Cin * KH * KW
+N = Cout
+```
+
+For each output tile `(m0,n0)`, firmware packs A rows from dense activation memory into `A_WORK`. Each packed A element is:
+
+```text
+m = (b * OH + oh) * OW + ow
+k = (cin * KH + kh) * KW + kw
+ih = oh * stride_h + kh * dilation_h - pad_h
+iw = ow * stride_w + kw * dilation_w - pad_w
+
+A[m,k] = in_bounds ? activation[src][b,cin,ih,iw] : 0
+```
+
+The W tile is already stored under `STATIC_BASE` in the same K-major tile stream order expected by the RTL. Runtime packing therefore only needs to build `A_WORK`; weights stay static.
+
+## Boundary And Padding Rules
+
+The firmware can run matrix sizes that are not multiples of the selected tile shape or the 4-lane INT8 SIMD width.
+
+| Boundary | Runtime action |
+|---|---|
+| Last M tile has fewer rows | Pack missing A rows as zero and skip scatter for invalid rows |
+| Last N tile has fewer cols | Use valid column count and skip scatter for invalid columns |
+| Last K group has fewer than 4 lanes | Pack missing SIMD lanes as zero |
+| Conv padding accesses outside IFM | Pack zero for that `A[m,k]` value |
+
+Example for `M=5,K=7,N=6` on 4x4 shape:
+
+```text
+M tiles: [rows 0..3], [row 4]
+N tiles: [cols 0..3], [cols 4..5]
+K groups: [0,1,2,3], [4,5,6,pad0]
+```
+
+Only valid dense output positions are scattered back. Padding lanes and invalid rows/cols never become visible in the dense activation buffer.
 
 ## Shape Modes
 

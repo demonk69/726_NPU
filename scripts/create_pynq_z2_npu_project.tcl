@@ -187,6 +187,7 @@ proc create_npu_bd {bd_name} {
         CONFIG.PPB_THRESH {16} \
         CONFIG.INT8_SIMD_LANES {4} \
         CONFIG.PERF_ENABLE_DERIVED {0} \
+        CONFIG.FP16_ENABLE {0} \
         CONFIG.S_AXI_OFFSET_BITS {16} \
         CONFIG.M_AXI_ID_WIDTH {1} \
     ] $npu

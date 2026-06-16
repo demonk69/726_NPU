@@ -33,6 +33,23 @@ localparam REG_BIAS_ADDR = 32'h98;
 localparam REG_QUANT_CFG = 32'h9C;
 localparam REG_ARR_CFG   = 32'h30;
 localparam REG_CFG_SHAPE = 32'h3C;
+localparam REG_PERF_CYCLES         = 32'h48;
+localparam REG_PERF_RD_BEATS       = 32'h4C;
+localparam REG_PERF_WR_BEATS       = 32'h50;
+localparam REG_PERF_RD_BYTES       = 32'h54;
+localparam REG_PERF_WR_BYTES       = 32'h58;
+localparam REG_PERF_RD_BURSTS      = 32'h6C;
+localparam REG_PERF_WR_BURSTS      = 32'h70;
+localparam REG_ERR_STATUS          = 32'h74;
+localparam REG_PERF_CTRL           = 32'h78;
+localparam REG_PERF_MAC_OPS_LO     = 32'hA0;
+localparam REG_PERF_MAC_OPS_HI     = 32'hA4;
+localparam REG_PERF_OPS_LO         = 32'hA8;
+localparam REG_PERF_OPS_HI         = 32'hAC;
+localparam REG_PERF_BUSY_CYCLES    = 32'hB0;
+localparam REG_PERF_COMPUTE_CYCLES = 32'hB4;
+localparam REG_PERF_DMA_CYCLES     = 32'hB8;
+localparam REG_PERF_PEAK_OPS_CYCLE = 32'hC8;
 
 localparam ARR_TILE     = 32'h80; // ARR_CFG[7]: enable tile planner/data path
 `ifdef CFG_SHAPE_VAL
@@ -107,6 +124,33 @@ integer aw_count;   // number of result row write bursts observed
 integer pass_cnt;
 integer fail_cnt;
 integer dump_fd;
+reg [63:0] cycle_count;
+reg [63:0] start_cycle;
+reg [63:0] done_cycle;
+reg [63:0] run_cycles;
+reg [31:0] perf_cycles;
+reg [31:0] perf_rd_beats;
+reg [31:0] perf_wr_beats;
+reg [31:0] perf_rd_bytes;
+reg [31:0] perf_wr_bytes;
+reg [31:0] perf_rd_bursts;
+reg [31:0] perf_wr_bursts;
+reg [31:0] perf_mac_ops_lo;
+reg [31:0] perf_mac_ops_hi;
+reg [31:0] perf_ops_lo;
+reg [31:0] perf_ops_hi;
+reg [31:0] perf_busy_cycles;
+reg [31:0] perf_compute_cycles;
+reg [31:0] perf_dma_cycles;
+reg [31:0] perf_peak_ops_cycle;
+reg [31:0] err_status;
+
+always @(posedge clk) begin
+    if (!rst_n)
+        cycle_count <= 64'd0;
+    else
+        cycle_count <= cycle_count + 64'd1;
+end
 
 // Diagnostic: snapshot PPBuf output on fire cycles (ifdef DIAG_TRACE only)
 `ifdef DIAG_TRACE
@@ -429,6 +473,9 @@ initial begin
     s_araddr = 0; s_arvalid = 0; s_rready = 0;
     pass_cnt = 0;
     fail_cnt = 0;
+    start_cycle = 64'd0;
+    done_cycle = 64'd0;
+    run_cycles = 64'd0;
 
     @(posedge rst_n);
     repeat (4) @(posedge clk);
@@ -452,6 +499,8 @@ initial begin
 `endif
     axi_write(REG_ARR_CFG, ARR_TILE);
     axi_write(REG_CFG_SHAPE, CFG_SHAPE);
+    axi_write(REG_PERF_CTRL, 32'h1);
+    start_cycle = cycle_count;
 `ifdef CTRL_VAL
     axi_write(REG_CTRL, `CTRL_VAL);
 `else
@@ -459,6 +508,25 @@ initial begin
 `endif
 
     wait_done(50000);
+    done_cycle = cycle_count;
+    run_cycles = done_cycle - start_cycle;
+    axi_write(REG_PERF_CTRL, 32'h2);
+    axi_read(REG_PERF_CYCLES, perf_cycles);
+    axi_read(REG_PERF_RD_BEATS, perf_rd_beats);
+    axi_read(REG_PERF_WR_BEATS, perf_wr_beats);
+    axi_read(REG_PERF_RD_BYTES, perf_rd_bytes);
+    axi_read(REG_PERF_WR_BYTES, perf_wr_bytes);
+    axi_read(REG_PERF_RD_BURSTS, perf_rd_bursts);
+    axi_read(REG_PERF_WR_BURSTS, perf_wr_bursts);
+    axi_read(REG_PERF_MAC_OPS_LO, perf_mac_ops_lo);
+    axi_read(REG_PERF_MAC_OPS_HI, perf_mac_ops_hi);
+    axi_read(REG_PERF_OPS_LO, perf_ops_lo);
+    axi_read(REG_PERF_OPS_HI, perf_ops_hi);
+    axi_read(REG_PERF_BUSY_CYCLES, perf_busy_cycles);
+    axi_read(REG_PERF_COMPUTE_CYCLES, perf_compute_cycles);
+    axi_read(REG_PERF_DMA_CYCLES, perf_dma_cycles);
+    axi_read(REG_PERF_PEAK_OPS_CYCLE, perf_peak_ops_cycle);
+    axi_read(REG_ERR_STATUS, err_status);
 
     `ifdef DIAG_TRACE
     begin
@@ -496,6 +564,14 @@ initial begin
     `endif
 
     if (fail_cnt == 0) begin
+        $display("RESULT\ttest=%s\tM=%0d\tN=%0d\tK=%0d\tcfg_shape=%0d\tlanes=%0d\tdata_w=%0d\trun_cycles=%0d\tperf_cycles=%0d\tbusy_cycles=%0d\tcompute_cycles=%0d\tdma_cycles=%0d\trd_beats=%0d\twr_beats=%0d\trd_bytes=%0d\twr_bytes=%0d\trd_bursts=%0d\twr_bursts=%0d\tmac_ops_lo=%0d\tmac_ops_hi=%0d\tops_lo=%0d\tops_hi=%0d\tpeak_ops_cycle=%0d\taw_count=%0d\terr_status=0x%08h\tstatus=PASS",
+                 `TEST_NAME, `M_DIM, `N_DIM, `K_DIM, CFG_SHAPE,
+                 INT8_SIMD_LANES, DATA_W, run_cycles, perf_cycles,
+                 perf_busy_cycles, perf_compute_cycles, perf_dma_cycles,
+                 perf_rd_beats, perf_wr_beats, perf_rd_bytes, perf_wr_bytes,
+                 perf_rd_bursts, perf_wr_bursts, perf_mac_ops_lo,
+                 perf_mac_ops_hi, perf_ops_lo, perf_ops_hi,
+                 perf_peak_ops_cycle, aw_count, err_status);
         $display("[PASS] %s: ALL %0d CHECKS PASSED", `TEST_NAME, pass_cnt);
     end else begin
         $display("[FAIL] %s: %0d passed, %0d failed", `TEST_NAME, pass_cnt, fail_cnt);

@@ -73,6 +73,8 @@ Firmware writes NPU registers through PicoRV32 memory-mapped I/O.
 | `0x24` | `A_ADDR` | W | DRAM A tile address |
 | `0x28` | `R_ADDR` | W | DRAM result address |
 | `0x30` | `ARR_CFG` | W | array mode, including tile mode |
+| `0x34` | `CLK_DIV` | W/R | stored divider select; compute CE path currently holds 1x |
+| `0x38` | `CG_EN` | W/R | enables shape-based row/column CE into the PE array |
 | `0x3C` | `CFG_SHAPE` | W | shape select |
 | `0x40` | `DESC_BASE` | W | RTL descriptor-v1 base |
 | `0x44` | `DESC_COUNT` | W | RTL descriptor-v1 count |
@@ -105,6 +107,12 @@ When `FP16_ENABLE=0`, firmware should program `CTRL[3:2]=00`. If firmware reques
 | `3` | 8x32 |
 
 Current VGG flows use `CFG_SHAPE=2` for 16x16.
+
+## Power/CE Control
+
+`CG_EN=1` enables row/column clock-enable masks derived from `CFG_SHAPE`. This uses normal register clock-enable logic inside the PE array; it does not create gated clocks.
+
+`CLK_DIV` is readable/writable for ABI compatibility, but the current top-level holds the compute CE path at 1x. Do not rely on `CLK_DIV` to slow the array until the controller and DMA schedule become CE-aware.
 
 ## VGG E2E Tile Table ABI
 

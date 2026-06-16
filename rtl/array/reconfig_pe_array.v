@@ -50,6 +50,7 @@ module reconfig_pe_array #(
     parameter DATA_W           = 16,
     parameter ACC_W            = 32,
     parameter MAX_TILE_RESULTS = 256, // max results per tile (16x16 or 8x32)
+    parameter INT8_SIMD_LANES  = (DATA_W >= 32) ? 4 : 2,
     parameter FP16_ENABLE      = 0
 )(
     input  wire                          clk,
@@ -65,6 +66,9 @@ module reconfig_pe_array #(
     input  wire                          ws_direct,   // packed tile WS: load all active rows directly
     input  wire                          acc_init_en,
     input  wire                          half_en,     // 8x32: 0=top half active, 1=bottom half active
+    input  wire                          array_ce,
+    input  wire [PHY_ROWS-1:0]           row_ce,
+    input  wire [PHY_COLS-1:0]           col_ce,
     // data inputs
     input  wire [PHY_COLS*DATA_W-1:0]    w_in,        // weight: per-column
     input  wire [PHY_ROWS*DATA_W-1:0]    act_in,      // activation: per-row
@@ -248,6 +252,7 @@ generate
                               1'b1;  // 16x16 and 8x32 use all cols
 
             wire pe_clk_en = row_active && col_active;
+            wire pe_power_ce = array_ce && row_ce[r] && col_ce[c];
             assign pe_active_flat[r * PHY_COLS + c] = pe_clk_en;
             // 8x32 two-pass: half_en gates which half-array is active.
             // half_en=0: rows 0-7 active (top half, logical cols 0-15)
@@ -259,6 +264,7 @@ generate
             wire pe_acc_init_en = acc_init_en &&
                                   pe_clk_en &&
                                   pe_half_active &&
+                                  pe_power_ce &&
                                   acc_init_mask[r * PHY_COLS + c];
 
             // ── Weight input selection ──
@@ -276,6 +282,9 @@ generate
                                           : (load_w &&
                                              (fold_enable ? fold_load_row_match
                                                           : (r == ws_load_row))));
+            wire pe_load_w_ce = pe_load_w && pe_power_ce;
+            wire pe_swap_w_ce = swap_w && pe_power_ce;
+            wire pe_flush_ce  = flush && pe_power_ce;
 
             // ── Activation input selection ──
             // OS mode: use act_in[r] directly (row skew is provided by act_h
@@ -306,16 +315,17 @@ generate
             pe_top #(
                 .DATA_W(DATA_W),
                 .ACC_W (ACC_W),
+                .INT8_SIMD_LANES(INT8_SIMD_LANES),
                 .FP16_ENABLE(FP16_ENABLE)
             ) u_pe (
                 .clk      (clk),
                 .rst_n    (rst_n),
                 .mode     (mode),
                 .stat_mode(stat_mode),
-                .en       (en && pe_clk_en && pe_half_active),
-                .flush    (flush),
-                .load_w   (pe_load_w),
-                .swap_w   (swap_w),
+                .en       (en && pe_clk_en && pe_half_active && pe_power_ce),
+                .flush    (pe_flush_ce),
+                .load_w   (pe_load_w_ce),
+                .swap_w   (pe_swap_w_ce),
                 .acc_init_en(pe_acc_init_en),
                 .w_in     (pe_w_in),
                 .a_in     (pe_a_in),
@@ -330,7 +340,7 @@ generate
             always @(posedge clk) begin
                 if (!rst_n)
                     act_reg <= {DATA_W{1'b0}};
-                else
+                else if (pe_power_ce)
                     act_reg <= act_h[r][c];
             end
             assign act_h[r][c+1] = act_reg;
@@ -344,7 +354,7 @@ generate
             always @(posedge clk) begin
                 if (!rst_n)
                     w_v_reg <= {DATA_W{1'b0}};
-                else
+                else if (pe_power_ce)
                     w_v_reg <= w_v[r][c];
             end
             if (r == 7) begin : fold_weight_boundary

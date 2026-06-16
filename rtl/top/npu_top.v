@@ -111,6 +111,32 @@ function [4:0] shape_tile_lanes;
     end
 endfunction
 
+function [PHY_ROWS-1:0] shape_row_ce_mask;
+    input [1:0] shape;
+    integer i;
+    integer active_rows;
+    begin
+        active_rows = (shape == 2'b00) ? 4 :
+                      (shape == 2'b01) ? 8 :
+                                          PHY_ROWS;
+        for (i = 0; i < PHY_ROWS; i = i + 1)
+            shape_row_ce_mask[i] = (i < active_rows);
+    end
+endfunction
+
+function [PHY_COLS-1:0] shape_col_ce_mask;
+    input [1:0] shape;
+    integer i;
+    integer active_cols;
+    begin
+        active_cols = (shape == 2'b00) ? 4 :
+                      (shape == 2'b01) ? 8 :
+                                          PHY_COLS;
+        for (i = 0; i < PHY_COLS; i = i + 1)
+            shape_col_ce_mask[i] = (i < active_cols);
+    end
+endfunction
+
 // ---------------------------------------------------------------------------
 // Wires: register file → controller
 // ---------------------------------------------------------------------------
@@ -276,6 +302,7 @@ npu_ctrl #(
     .DATA_W(DATA_W),
     .ACC_W (ACC_W),
     .PPB_DEPTH(PPB_DEPTH),
+    .INT8_SIMD_LANES(INT8_SIMD_LANES),
     .FP16_ENABLE(FP16_ENABLE)
 ) u_ctrl (
     .clk          (sys_clk),
@@ -674,6 +701,33 @@ wire [PHY_ROWS*PHY_COLS-1:0] pe_acc_init_mask;
 wire [MAX_TILE_RESULTS*ACC_W-1:0] pe_array_result;
 wire [MAX_TILE_RESULTS-1:0]       pe_array_valid;
 wire [PHY_ROWS*PHY_COLS-1:0] pe_active_dbg;
+wire pe_array_global_ce;
+wire [PHY_ROWS-1:0] pe_array_row_ce;
+wire [PHY_COLS-1:0] pe_array_col_ce;
+
+wire [PHY_ROWS-1:0] power_row_cg = cg_en_r ? ~shape_row_ce_mask(ctrl_cfg_shape)
+                                           : {PHY_ROWS{1'b0}};
+wire [PHY_COLS-1:0] power_col_cg = cg_en_r ? ~shape_col_ce_mask(ctrl_cfg_shape)
+                                           : {PHY_COLS{1'b0}};
+
+// CLK_DIV is intentionally held at 1x for the compute CE path until the
+// controller/DMA scheduler is made CE-aware. Row/column CE is safe today.
+npu_power #(
+    .ROWS(PHY_ROWS),
+    .COLS(PHY_COLS)
+) u_power (
+    .clk         (sys_clk),
+    .rst_n       (sys_rst_n),
+    .div_sel     (3'b000),
+    .row_cg_en   (power_row_cg),
+    .col_cg_en   (power_col_cg),
+    .global_ce   (pe_array_global_ce),
+    .row_ce      (pe_array_row_ce),
+    .col_ce      (pe_array_col_ce),
+    .npu_clk     (),
+    .row_clk_gated(),
+    .col_clk_gated()
+);
 
 // Data source from PPBuf
 wire [DATA_W-1:0] pe_w_data = w_ppb_rd_data;
@@ -859,6 +913,7 @@ op_counter #(
 pe_top #(
     .DATA_W(DATA_W),
     .ACC_W (ACC_W),
+    .INT8_SIMD_LANES(INT8_SIMD_LANES),
     .FP16_ENABLE(FP16_ENABLE)
 ) u_scalar_pe (
     .clk      (sys_clk),
@@ -993,6 +1048,7 @@ reconfig_pe_array #(
     .DATA_W  (DATA_W),
     .ACC_W   (ACC_W),
     .MAX_TILE_RESULTS(MAX_TILE_RESULTS),
+    .INT8_SIMD_LANES(INT8_SIMD_LANES),
     .FP16_ENABLE(FP16_ENABLE)
 ) u_pe_array (
     .clk            (sys_clk),
@@ -1007,6 +1063,9 @@ reconfig_pe_array #(
     .ws_direct      (tile_ws_direct),
     .acc_init_en    (1'b0),
     .half_en        (pe_half_en),
+    .array_ce       (pe_array_global_ce),
+    .row_ce         (pe_array_row_ce),
+    .col_ce         (pe_array_col_ce),
     .w_in           (pe_w_in),
     .act_in         (pe_a_in),
     .acc_in         (pe_acc_in),
@@ -1166,25 +1225,5 @@ always @(posedge sys_clk) begin
     end
 end
 `endif
-
-// ---------------------------------------------------------------------------
-// Power Management
-// ---------------------------------------------------------------------------
-wire [PHY_ROWS-1:0] row_cg = {PHY_ROWS{~pe_en}};
-wire [PHY_COLS-1:0] col_cg = {PHY_COLS{~pe_en}};
-
-npu_power #(
-    .ROWS(PHY_ROWS),
-    .COLS(PHY_COLS)
-) u_power (
-    .clk         (sys_clk),
-    .rst_n       (sys_rst_n),
-    .div_sel     (clk_div_r),
-    .row_cg_en   (row_cg),
-    .col_cg_en   (col_cg),
-    .npu_clk     (),
-    .row_clk_gated(),
-    .col_clk_gated()
-);
 
 endmodule

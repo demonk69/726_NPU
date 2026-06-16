@@ -19,6 +19,7 @@ module tb_reconfig_pe_8x32;
     reg load_w;
     reg swap_w;
     reg acc_init_en;
+    reg half_en;
     reg [PHY_COLS*DATA_W-1:0] w_in;
     reg [PHY_ROWS*DATA_W-1:0] act_in;
     reg [PHY_COLS*ACC_W-1:0] acc_in;
@@ -53,6 +54,10 @@ module tb_reconfig_pe_8x32;
         .swap_w         (swap_w),
         .ws_direct      (1'b0),
         .acc_init_en    (acc_init_en),
+        .half_en        (half_en),
+        .array_ce       (1'b1),
+        .row_ce         ({PHY_ROWS{1'b1}}),
+        .col_ce         ({PHY_COLS{1'b1}}),
         .w_in           (w_in),
         .act_in         (act_in),
         .acc_in         (acc_in),
@@ -94,6 +99,7 @@ module tb_reconfig_pe_8x32;
             load_w = 1'b0;
             swap_w = 1'b0;
             acc_init_en = 1'b0;
+            half_en = 1'b0;
             w_in = {PHY_COLS*DATA_W{1'b0}};
             act_in = {PHY_ROWS*DATA_W{1'b0}};
             acc_in = {PHY_COLS*ACC_W{1'b0}};
@@ -123,12 +129,22 @@ module tb_reconfig_pe_8x32;
         begin
             apply_reset();
 
+            half_en = 1'b0;
             for (col = 0; col < 16; col = col + 1) begin
-                idx = 7 * PHY_COLS + col;
+                idx = 0 * PHY_COLS + col;
                 acc_init[idx*ACC_W +: ACC_W] = 32'h0000_0100 + col[31:0];
                 acc_init_mask[idx] = 1'b1;
+            end
 
-                idx = 15 * PHY_COLS + col;
+            acc_init_en = 1'b1;
+            tick();
+            acc_init_en = 1'b0;
+            acc_init = {PHY_ROWS*PHY_COLS*ACC_W{1'b0}};
+            acc_init_mask = {PHY_ROWS*PHY_COLS{1'b0}};
+            tick();
+            half_en = 1'b1;
+            for (col = 0; col < 16; col = col + 1) begin
+                idx = 8 * PHY_COLS + col;
                 acc_init[idx*ACC_W +: ACC_W] = 32'h0000_0200 + col[31:0];
                 acc_init_mask[idx] = 1'b1;
             end
@@ -139,6 +155,8 @@ module tb_reconfig_pe_8x32;
             acc_init = {PHY_ROWS*PHY_COLS*ACC_W{1'b0}};
             acc_init_mask = {PHY_ROWS*PHY_COLS{1'b0}};
             tick();
+
+            half_en = 1'b0;
 
             pulse_flush();
 
@@ -172,10 +190,10 @@ module tb_reconfig_pe_8x32;
         integer cyc;
         begin
             apply_reset();
+            half_en = 1'b1;
 
-            // A pulse entering top physical row7 must reappear at lower physical
-            // row15 after the top 16-column horizontal path, producing logical
-            // output column16 when the lower-half weight stream is active.
+            // In current 8x32 OS mode the lower half reuses top-half activations
+            // directly when half_en selects logical columns 16..31.
             en = 1'b1;
             flush = 1'b0;
             for (cyc = 0; cyc < 40; cyc = cyc + 1) begin
@@ -183,7 +201,7 @@ module tb_reconfig_pe_8x32;
                 w_in[0*DATA_W +: DATA_W] = s8_lane(4);
                 act_in = {PHY_ROWS*DATA_W{1'b0}};
                 if (cyc == 0)
-                    act_in[7*DATA_W +: DATA_W] = s8_lane(3);
+                    act_in[0*DATA_W +: DATA_W] = s8_lane(3);
                 tick();
             end
             en = 1'b0;

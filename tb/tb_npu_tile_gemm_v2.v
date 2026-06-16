@@ -8,9 +8,18 @@ module tb_npu_tile_gemm_v2;
 `define OUTPUT_HEX "npu_output.hex"
 `endif
 
+`ifdef DATA_W_VAL
+localparam DATA_W  = `DATA_W_VAL;
+`else
 localparam DATA_W  = 32;
+`endif
 localparam ACC_W   = 32;
 localparam CLK_T   = 10;
+`ifdef INT8_SIMD_LANES_VAL
+localparam INT8_SIMD_LANES = `INT8_SIMD_LANES_VAL;
+`else
+localparam INT8_SIMD_LANES = 4;
+`endif
 
 localparam REG_CTRL      = 32'h00;
 localparam REG_STATUS    = 32'h04;
@@ -135,7 +144,8 @@ end
 
 npu_top #(
     .DATA_W(DATA_W),
-    .ACC_W (ACC_W)
+    .ACC_W (ACC_W),
+    .INT8_SIMD_LANES(INT8_SIMD_LANES)
 ) u_npu (
     .sys_clk       (clk),
     .sys_rst_n     (rst_n),
@@ -425,7 +435,7 @@ initial begin
 
     $display("");
     $display("################################################################");
-    $display("  4x4 Tile GEMM Test: %s", `TEST_NAME);
+    $display("  Tile GEMM Test: %s DATA_W=%0d INT8_SIMD_LANES=%0d", `TEST_NAME, DATA_W, INT8_SIMD_LANES);
     $display("################################################################");
 
     axi_write(REG_M_DIM, `M_DIM);

@@ -110,7 +110,6 @@ def pack_tile_a(A, M, K, grid_rows, min_words_per_k=1):
     """Pack A into tile-stream: A_TILE[m_tile][k][r]
        Pad to at least min_words_per_k per K so DMA load length matches PPBuf expectation.
        Also pad with zero words at end of each tile when K is not multiple of SIMD_LANES=4."""
-    SIMD_LANES = 4
     words_per_k = max(min_words_per_k, (grid_rows + 3) // 4)
     # packed_pad bytes per tile when K % SIMD_LANES != 0
     k_rem = K % SIMD_LANES
@@ -138,7 +137,6 @@ def pack_tile_w(W, K, N, grid_cols):
     """Pack W into tile-stream: W_TILE[n_tile][k][c]
        Full tile data (zero-padded for edge tiles) to match DMA load size.
        Also pad with zero words at end of each tile when K is not multiple of SIMD_LANES=4."""
-    SIMD_LANES = 4
     words_per_k = (grid_cols + 3) // 4
     k_rem = K % SIMD_LANES
     packed_pad_bytes = (grid_cols * 1) * (SIMD_LANES - k_rem) if k_rem != 0 else 0
@@ -283,11 +281,13 @@ def gen_expected(C, M, N):
     return flat
 
 def main():
+    global SIMD_LANES
     parser = argparse.ArgumentParser()
     parser.add_argument("--shape", required=True, choices=["4x4", "8x8", "16x16", "8x32"])
     parser.add_argument("--M", type=int, required=True)
     parser.add_argument("--K", type=int, required=True)
     parser.add_argument("--N", type=int, required=True)
+    parser.add_argument("--lanes", type=int, choices=[1, 2, 4], default=4)
     parser.add_argument("--out-dir", default=".")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--name", default=None)
@@ -299,6 +299,7 @@ def main():
     parser.add_argument("--quant-shift", type=int, default=3)
     parser.add_argument("--quant-round", action="store_true")
     args = parser.parse_args()
+    SIMD_LANES = args.lanes
 
     cfg = SHAPE_CONFIGS[args.shape]
     grid_rows = cfg["grid_rows"]
@@ -307,6 +308,7 @@ def main():
     M = args.M
     K = args.K
     N = args.N
+    data_w = 32 if SIMD_LANES == 4 else 16
 
     case_name = args.name or f"{args.shape}_M{M}_K{K}_N{N}"
     out_dir = Path(args.out_dir) / case_name
@@ -393,6 +395,8 @@ def main():
         f.write(f"`define DRAM_HEX \"{out_dir.as_posix()}/dram.hex\"\n")
         f.write(f"`define EXPECTED_HEX \"{out_dir.as_posix()}/expected.hex\"\n")
         f.write(f"`define DRAM_SIZE {DRAM_SIZE}\n")
+        f.write(f"`define DATA_W_VAL {data_w}\n")
+        f.write(f"`define INT8_SIMD_LANES_VAL {SIMD_LANES}\n")
         f.write(f"`define M_DIM {M}\n")
         f.write(f"`define N_DIM {N}\n")
         f.write(f"`define K_DIM {K}\n")
@@ -441,7 +445,7 @@ def main():
         for v in expected:
             f.write(f"{v & 0xFFFFFFFF:08X}\n")
 
-    print(f"Generated {case_name}: M={M} K={K} N={N} grid={args.shape}")
+    print(f"Generated {case_name}: M={M} K={K} N={N} grid={args.shape} lanes={SIMD_LANES} data_w={data_w}")
     print(f"  num_results = {M * N}")
     print(f"  tiles M x N = {num_tiles_m} x {num_tiles_n}")
     print(f"  dram.hex, expected.hex, test_params.vh -> {out_dir}")

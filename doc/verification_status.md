@@ -1,6 +1,6 @@
 # Verification Status
 
-Updated: 2026-06-02
+Updated: 2026-06-16
 
 This document is the current verification record. Older status files and worklogs in `doc/archive/` are historical and may describe superseded Windows/Icarus flows.
 
@@ -59,10 +59,16 @@ The prior `4x4` timeout was caused by the old 150M-cycle default limit, not by a
 | `iverilog -g2012 -o /tmp/opencode/tb_npu_ctrl_tile.vvp rtl/ctrl/npu_ctrl.v tb/tb_npu_ctrl_tile.v && vvp /tmp/opencode/tb_npu_ctrl_tile.vvp` | Tile controller edge writeback | PASS |
 | `iverilog -g2012 -o /tmp/opencode/tb_npu_ctrl_ksplit.vvp rtl/ctrl/npu_ctrl.v tb/tb_npu_ctrl_ksplit.v && vvp /tmp/opencode/tb_npu_ctrl_ksplit.vvp` | Tile K-split sequencing | PASS |
 | `iverilog -g2012 -o /tmp/opencode/tb_npu_ctrl_dataflow_modes.vvp rtl/ctrl/npu_ctrl.v tb/tb_npu_ctrl_dataflow_modes.v && vvp /tmp/opencode/tb_npu_ctrl_dataflow_modes.vvp` | Direct OS/WS controller branches | PASS |
+| `iverilog -g2012 -o /tmp/opencode/tb_reconfig_pe_acc_init.vvp rtl/pe/pe_top.v rtl/array/reconfig_pe_array.v tb/tb_reconfig_pe_acc_init.v && vvp /tmp/opencode/tb_reconfig_pe_acc_init.vvp` | PE-array accumulator init, continued MAC, and row CE gating | PASS |
+| `iverilog -g2012 -o /tmp/opencode/tb_reconfig_pe_8x32.vvp rtl/pe/pe_top.v rtl/array/reconfig_pe_array.v tb/tb_reconfig_pe_8x32.v && vvp /tmp/opencode/tb_reconfig_pe_8x32.vvp` | 8x32 folded PE-array mapping and WS row wrap with CE ports tied on | PASS |
 | `iverilog -g2012 -s npu_top -o /tmp/opencode/npu_top_elab.vvp rtl/pe/*.v rtl/common/*.v rtl/buf/*.v rtl/array/*.v rtl/axi/*.v rtl/ctrl/*.v rtl/power/*.v rtl/top/npu_top.v` | `npu_top` elaboration | PASS |
 | `iverilog -g2012 -s npu_pynq_wrapper -o /tmp/opencode/npu_pynq_wrapper_elab.vvp rtl/pe/*.v rtl/common/*.v rtl/buf/*.v rtl/array/*.v rtl/axi/*.v rtl/ctrl/*.v rtl/power/*.v rtl/top/*.v` | PYNQ wrapper elaboration | PASS |
 | `tb/tile4/run_verilator.sh --shape 16x16 --M 16 --K 4 --N 16 --bias` | 16x16 tile Icarus + Verilator smoke | PASS |
+| `tb/tile4/run_verilator.sh --all --icarus --lanes {1,2,4}` | Tile GEMM lanes 1/2/4 across 4x4, 8x8, 16x16, 8x32, bias, and K-split smokes | PASS |
+| `tb/tile4/run_verilator.sh --verilator --shape 16x16 --M 16 --K 5 --N 16 --lanes {1,2,4}` | Verilator cross-check for lanes 1/2/4 with non-multiple K | PASS |
 | `verilator --lint-only -Wall -Wno-fatal --top-module npu_pynq_wrapper rtl/pe/*.v rtl/common/*.v rtl/buf/*.v rtl/array/*.v rtl/axi/*.v rtl/ctrl/*.v rtl/power/*.v rtl/top/*.v` | PYNQ wrapper lint | Completes with existing width/unused warnings |
+
+CE integration was smoke-tested on 2026-06-16 with `CG_EN=0` default compatibility, PE-array CE ports tied on in direct tests, top/PYNQ elaboration, AXI-Lite/DMA/controller tests, and the 16x16 tile Icarus + Verilator flow. The long closed-loop sweep was not rerun for this CE-only change; the latest full closed-loop sweep remains the 2026-06-02 result above.
 
 ## Syntax Checks
 

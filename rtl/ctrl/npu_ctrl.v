@@ -53,6 +53,7 @@ module npu_ctrl #(
     parameter DATA_W = 16,
     parameter ACC_W  = 32,
     parameter PPB_DEPTH = 64,
+    parameter [3:0] INT8_SIMD_LANES = 4,
     parameter FP16_ENABLE = 0
 )(
     input  wire              clk,
@@ -192,6 +193,7 @@ localparam S_DONE            = 4'd8;
 
 reg [3:0] state;
 localparam [31:0] PPB_DEPTH_WORDS = PPB_DEPTH;
+localparam [31:0] INT8_SIMD_LANES_32 = {28'd0, INT8_SIMD_LANES};
 
 function [4:0] shape_tile_lanes;
     input [1:0] shape;
@@ -530,7 +532,9 @@ wire [31:0] bytes_per_k_a_32 = {16'd0, bytes_per_k_a};
 // Packed tile streams pad each N/M tile's K dimension to a full SIMD group.
 // Internal tile-to-tile address strides must include that pad; k_tile offsets
 // still use tile_k_base because full k_tile_elems is SIMD-aligned.
-wire [31:0] k_dim_padded = (lk_k_dim + 32'd3) & ~32'd3;
+wire [31:0] k_dim_padded = (INT8_SIMD_LANES_32 <= 32'd1)
+    ? lk_k_dim
+    : (((lk_k_dim + INT8_SIMD_LANES_32 - 32'd1) / INT8_SIMD_LANES_32) * INT8_SIMD_LANES_32);
 wire [31:0] w_addr_pass1_offset = is_8x32 ? (k_dim_padded * {16'd0, half_vector_elem_bytes_w}) : 32'd0;
 wire [31:0] w_tile_stride_n = is_8x32
     ? (k_dim_padded * {16'd0, half_vector_elem_bytes_w} * 32'd2)
@@ -634,7 +638,6 @@ wire is_last_tile = (tile_i == tile_iter_m_count - 1) &&
 
 // Result DMA: scalar mode writes one word; tile mode writes one row burst.
 localparam [15:0] TILE_R_LEN = 16'd4;
-localparam [3:0]  INT8_SIMD_LANES = 4;  // packed INT8 SIMD lanes
 
 wire [15:0] tile_k_cycles = tile_mode
     ? ((tile_k_len + {12'd0, INT8_SIMD_LANES} - 16'd1) / {12'd0, INT8_SIMD_LANES})

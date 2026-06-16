@@ -2,7 +2,7 @@
 // Module  : npu_power
 // Project : NPU_prj
 // Desc    : Power management control signal generation.
-//           Keeps fabric clocking on clk and emits DFS/clock-gate enables.
+//           Keeps fabric clocking on clk and emits clock-enable signals.
 // =============================================================================
 
 `timescale 1ns/1ps
@@ -18,7 +18,11 @@ module npu_power #(
     // Clock gating control
     input  wire [ROWS-1:0] row_cg_en,  // per-row clock gate (1=gated/OFF)
     input  wire [COLS-1:0] col_cg_en,  // per-col clock gate (1=gated/OFF)
-    // Historical port names: these are enables, not generated/gated clocks.
+    // These are enables, not generated/gated clocks.
+    output wire        global_ce,
+    output wire [ROWS-1:0] row_ce,
+    output wire [COLS-1:0] col_ce,
+    // Historical port names kept as aliases for older integrations.
     output wire        npu_clk,
     output wire [ROWS-1:0] row_clk_gated,
     output wire [COLS-1:0] col_clk_gated
@@ -60,16 +64,20 @@ always @(posedge clk) begin
     end
 end
 
-assign npu_clk = clk;
+assign npu_clk   = clk;
+assign global_ce = dfs_ce;
 
 // ---------------------------------------------------------------------------
 // Row enables
 // ---------------------------------------------------------------------------
-assign row_clk_gated = {ROWS{dfs_ce}} & ~row_cg_en;
+assign row_ce = {ROWS{global_ce}} & ~row_cg_en;
 
 // ---------------------------------------------------------------------------
 // Column enables
 // ---------------------------------------------------------------------------
-assign col_clk_gated = {COLS{dfs_ce}} & ~col_cg_en;
+assign col_ce = {COLS{global_ce}} & ~col_cg_en;
+
+assign row_clk_gated = row_ce;
+assign col_clk_gated = col_ce;
 
 endmodule

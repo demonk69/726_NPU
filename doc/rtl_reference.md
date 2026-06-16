@@ -113,9 +113,9 @@ When `FP16_ENABLE=0`, `npu_ctrl` forces hardware execution to INT8 and rejects F
 |---|---|---|---|---|
 | `axi_monitor` | `rtl/common/axi_monitor.v` | Counts AXI read/write bursts, beats, bytes, and optional derived utilization | AXI handshake signals, `clear` | raw and derived AXI performance counters |
 | `op_counter` | `rtl/common/op_counter.v` | Counts useful MAC/OPS, busy/compute/DMA cycles, peak ops per cycle | controller/PE activity, dimensions, shape context, SIMD lanes | MAC/OPS counters, utilization counters, derived TOPS when enabled |
-| `npu_power` | `rtl/power/npu_power.v` | Emits clock-enable style row/column enable signals and keeps `npu_clk=clk` | `clk`, `rst_n`, divider select, row/col gate requests | `npu_clk`, row enables, column enables |
+| `npu_power` | `rtl/power/npu_power.v` | Emits clock-enable style global/row/column CE signals and keeps `npu_clk=clk` | `clk`, `rst_n`, divider select, row/col gate requests | `global_ce`, row enables, column enables, legacy aliases |
 
-`npu_power` does not generate or gate fabric clocks. Its historical `row_clk_gated` and `col_clk_gated` port names now carry enable semantics.
+`npu_power` does not generate or gate fabric clocks. Its historical `row_clk_gated` and `col_clk_gated` port names now carry enable semantics. `npu_top` connects these CE signals into `reconfig_pe_array`, where they gate PE compute/control updates and OS shift-register updates through normal clock-enable logic. `CLK_DIV` is not yet applied to the compute CE path because the controller/DMA schedule is not CE-aware.
 
 ## Shape Modes
 

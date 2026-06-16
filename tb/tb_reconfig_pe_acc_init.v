@@ -21,6 +21,9 @@ module tb_reconfig_pe_acc_init;
     reg [PHY_COLS*ACC_W-1:0] acc_in;
     reg [PHY_ROWS*PHY_COLS*ACC_W-1:0] acc_init;
     reg [PHY_ROWS*PHY_COLS-1:0] acc_init_mask;
+    reg array_ce;
+    reg [PHY_ROWS-1:0] row_ce;
+    reg [PHY_COLS-1:0] col_ce;
 
     wire [32*ACC_W-1:0] acc_out;
     wire [31:0] valid_out;
@@ -54,6 +57,10 @@ module tb_reconfig_pe_acc_init;
         .swap_w         (swap_w),
         .ws_direct      (1'b0),
         .acc_init_en    (acc_init_en),
+        .half_en        (1'b0),
+        .array_ce       (array_ce),
+        .row_ce         (row_ce),
+        .col_ce         (col_ce),
         .w_in           (w_in),
         .act_in         (act_in),
         .acc_in         (acc_in),
@@ -147,6 +154,9 @@ module tb_reconfig_pe_acc_init;
         acc_in = {PHY_COLS*ACC_W{1'b0}};
         acc_init = {PHY_ROWS*PHY_COLS*ACC_W{1'b0}};
         acc_init_mask = {PHY_ROWS*PHY_COLS{1'b0}};
+        array_ce = 1'b1;
+        row_ce = {PHY_ROWS{1'b1}};
+        col_ce = {PHY_COLS{1'b1}};
 
         repeat (4) tick();
         rst_n = 1'b1;
@@ -207,8 +217,58 @@ module tb_reconfig_pe_acc_init;
             errors = errors + 1;
         end
 
+        rst_n = 1'b0;
+        en = 1'b0;
+        flush = 1'b0;
+        acc_init_en = 1'b0;
+        w_in = {PHY_COLS*DATA_W{1'b0}};
+        act_in = {PHY_ROWS*DATA_W{1'b0}};
+        acc_init = {PHY_ROWS*PHY_COLS*ACC_W{1'b0}};
+        acc_init_mask = {PHY_ROWS*PHY_COLS{1'b0}};
+        repeat (2) tick();
+        rst_n = 1'b1;
+        tick();
+
+        row_ce = {PHY_ROWS{1'b1}};
+        row_ce[1] = 1'b0;
+        col_ce = {PHY_COLS{1'b1}};
+        array_ce = 1'b1;
+
+        acc_init[0*PHY_COLS*ACC_W +: ACC_W] = 32'd10;
+        acc_init[(1*PHY_COLS + 0)*ACC_W +: ACC_W] = 32'd20;
+        acc_init_mask[0*PHY_COLS + 0] = 1'b1;
+        acc_init_mask[1*PHY_COLS + 0] = 1'b1;
+        acc_init_en = 1'b1;
+        tick();
+        acc_init_en = 1'b0;
+        acc_init = {PHY_ROWS*PHY_COLS*ACC_W{1'b0}};
+        acc_init_mask = {PHY_ROWS*PHY_COLS{1'b0}};
+
+        w_in = {PHY_COLS*DATA_W{1'b0}};
+        act_in = {PHY_ROWS*DATA_W{1'b0}};
+        w_in[0*DATA_W +: DATA_W] = s8_to_lane(2);
+        act_in[0*DATA_W +: DATA_W] = s8_to_lane(3);
+        act_in[1*DATA_W +: DATA_W] = s8_to_lane(4);
+        en = 1'b1;
+        tick();
+        en = 1'b0;
+        w_in = {PHY_COLS*DATA_W{1'b0}};
+        act_in = {PHY_ROWS*DATA_W{1'b0}};
+        repeat (3) tick();
+
+        if ($signed(dut.gen_row[0].gen_col[0].u_pe.os_acc) !== 32'sd16) begin
+            $display("[FAIL] CE active row PE(0,0) os_acc=%0d expected=16",
+                     $signed(dut.gen_row[0].gen_col[0].u_pe.os_acc));
+            errors = errors + 1;
+        end
+        if (dut.gen_row[1].gen_col[0].u_pe.os_acc !== 32'd0) begin
+            $display("[FAIL] CE disabled row PE(1,0) os_acc=%0d expected=0",
+                     $signed(dut.gen_row[1].gen_col[0].u_pe.os_acc));
+            errors = errors + 1;
+        end
+
         if (errors == 0) begin
-            $display("[PASS] tb_reconfig_pe_acc_init: 4x4 PE array accumulator init continued MAC passed");
+            $display("[PASS] tb_reconfig_pe_acc_init: acc_init, continued MAC, and row CE gating passed");
         end else begin
             $display("[FAIL] tb_reconfig_pe_acc_init errors=%0d", errors);
             $fatal;

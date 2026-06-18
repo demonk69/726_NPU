@@ -169,10 +169,15 @@ generate
     end
 endgenerate
 
-wire signed [15:0] int8_mul0_16 = $signed(int8_w0) * $signed(int8_a0);
-wire signed [15:0] int8_mul1_16 = $signed(int8_w1) * $signed(int8_a1);
-wire signed [15:0] int8_mul2_16 = $signed(int8_w2) * $signed(int8_a2);
-wire signed [15:0] int8_mul3_16 = $signed(int8_w3) * $signed(int8_a3);
+(* use_dsp = "yes" *) wire signed [15:0] int8_mul0_16;
+(* use_dsp = "yes" *) wire signed [15:0] int8_mul1_16;
+(* use_dsp = "yes" *) wire signed [15:0] int8_mul2_16;
+(* use_dsp = "yes" *) wire signed [15:0] int8_mul3_16;
+
+assign int8_mul0_16 = $signed(int8_w0) * $signed(int8_a0);
+assign int8_mul1_16 = $signed(int8_w1) * $signed(int8_a1);
+assign int8_mul2_16 = $signed(int8_w2) * $signed(int8_a2);
+assign int8_mul3_16 = $signed(int8_w3) * $signed(int8_a3);
 
 wire int8_lane1_cfg_en = (INT8_SIMD_LANES >= 2) && (DATA_W >= 16);
 wire int8_lane2_cfg_en = (INT8_SIMD_LANES >= 3) && (DATA_W >= 24);
@@ -188,10 +193,12 @@ wire signed [17:0] int8_mul0_ext = {{2{int8_mul0_16[15]}}, int8_mul0_16};
 wire signed [17:0] int8_mul1_ext = {{2{int8_mul1_16[15]}}, int8_mul1_16};
 wire signed [17:0] int8_mul2_ext = {{2{int8_mul2_16[15]}}, int8_mul2_16};
 wire signed [17:0] int8_mul3_ext = {{2{int8_mul3_16[15]}}, int8_mul3_16};
-wire signed [17:0] int8_sum_18   = int8_mul0_ext +
-                                   (int8_lane1_en ? int8_mul1_ext : 18'sd0) +
-                                   (int8_lane2_en ? int8_mul2_ext : 18'sd0) +
-                                   (int8_lane3_en ? int8_mul3_ext : 18'sd0);
+(* use_dsp = "yes" *) wire signed [17:0] int8_sum_18;
+
+assign int8_sum_18 = int8_mul0_ext +
+                     (int8_lane1_en ? int8_mul1_ext : 18'sd0) +
+                     (int8_lane2_en ? int8_mul2_ext : 18'sd0) +
+                     (int8_lane3_en ? int8_mul3_ext : 18'sd0);
 wire [ACC_W-1:0] int8_prod = {{(ACC_W-18){int8_sum_18[17]}}, int8_sum_18};
 
 // FP16: instantiated only when enabled so INT8-only builds can drop it.

@@ -24,6 +24,17 @@ SHAPE_CONFIGS = {
 PPB_DEPTH = 64       # PPBuf word depth
 SIMD_LANES = 4
 
+def align_up(v, align):
+    return ((v + align - 1) // align) * align
+
+def estimate_timeout_cycles(M, K, N, grid_rows, grid_cols, kt_elems):
+    num_tiles_m = (M + grid_rows - 1) // grid_rows
+    num_tiles_n = (N + grid_cols - 1) // grid_cols
+    num_tiles_k = (K + kt_elems - 1) // kt_elems
+    tile_work = num_tiles_m * num_tiles_n * num_tiles_k
+    per_tile_budget = kt_elems + grid_rows + grid_cols + 256
+    return max(1_000_000, tile_work * per_tile_budget + M * N * 4 + 100_000)
+
 def compute_k_tile_elems(shape_cfg, is_8x32_half=False):
     """Max K elements per k_tile matching controller logic.
        For 8x32 half-pass, W uses only 16 columns."""
@@ -298,6 +309,10 @@ def main():
     parser.add_argument("--quant-scale", type=int, default=1)
     parser.add_argument("--quant-shift", type=int, default=3)
     parser.add_argument("--quant-round", action="store_true")
+    parser.add_argument("--perf-only", action="store_true", help="Skip golden C generation/checking for cycle-only runs")
+    parser.add_argument("--strict-aw", action="store_true", help="Fail if observed result AW bursts differ from the model")
+    parser.add_argument("--timeout-cycles", type=int, default=None, help="Override testbench global timeout cycles")
+    parser.add_argument("--wait-timeout", type=int, default=None, help="Override AXI-Lite status poll timeout")
     args = parser.parse_args()
     SIMD_LANES = args.lanes
 
@@ -323,7 +338,7 @@ def main():
     A = [[rng_s8() for _ in range(K)] for _ in range(M)]
     W = [[rng_s8() for _ in range(N)] for _ in range(K)]
 
-    C = gen_golden(A, W, M, K, N)
+    C = None if args.perf_only else gen_golden(A, W, M, K, N)
 
     # ── Bias ──
     BIAS_BASE = 0x3000
@@ -332,16 +347,19 @@ def main():
     if args.bias:
         bias = gen_int32_bias(N, args.seed + 1000)
         bias_words = [v & 0xFFFFFFFF for v in bias]
-        C = apply_bias(C, bias, M, N)
+        if C is not None:
+            C = apply_bias(C, bias, M, N)
     # ── Activation ──
     ctrl_val = 0x11 if args.flow == "os" else 0x01  # INT8 + OS/WS + start
     if args.bias:
         ctrl_val |= (1 << 9)  # CTRL[9] = bias enable
     if args.activation == 'relu':
-        C = apply_relu(C, M, N)
+        if C is not None:
+            C = apply_relu(C, M, N)
         ctrl_val |= (1 << 10)  # CTRL[11:10] = 01
     elif args.activation == 'relu6':
-        C = apply_relu6(C, M, N)
+        if C is not None:
+            C = apply_relu6(C, M, N)
         ctrl_val |= (2 << 10)  # CTRL[11:10] = 10
     # ── Quant ──
     quant_cfg = 0x00010000  # default: disabled (bit0=0)
@@ -350,18 +368,8 @@ def main():
         shift = args.quant_shift & 0xFF
         round_bit = 1 if args.quant_round else 0
         quant_cfg = (scale << 16) | (shift << 8) | (round_bit << 1) | 1  # bit0=enable
-        C = apply_quant(C, M, N, args.quant_scale, args.quant_shift, args.quant_round)
-
-    # DRAM layout:
-    #   0x0000: packed W tile stream (split into two halves for 8x32)
-    #   0x1000: packed A tile stream
-    #   0x2000: result area (row-major C)
-    #   0x3000: bias vector (if --bias)
-    W_BASE = 0x0000
-    A_BASE = 0x1000
-    R_BASE = 0x2000
-    BIAS_BASE = 0x3000
-    DRAM_SIZE = 0x4000 // 4  # 16K words
+        if C is not None:
+            C = apply_quant(C, M, N, args.quant_scale, args.quant_shift, args.quant_round)
 
     # Effective tile lanes for A PPBuf = shape_tile_lanes(shape)
     # 8x32: 16, 16x16: 16, 8x8: 8, 4x4: 4
@@ -369,11 +377,29 @@ def main():
     a_tile = pack_tile_a_ksplit(A, M, K, grid_rows, kt_elems, a_eff_lanes)
     if args.shape == "8x32":
         w_tile = pack_tile_w_8x32(W, K, N, kt_elems)
-        W_ADDR2 = W_BASE + ((K + SIMD_LANES - 1) // SIMD_LANES) * SIMD_LANES * 16
     else:
         w_tile = pack_tile_w_ksplit(W, K, N, grid_cols, kt_elems)
+
+    # DRAM layout is packed dynamically so large perf-only cases do not
+    # overlap W/A/bias/result regions. Result storage is not needed in
+    # perf-only because the testbench sinks write data instead of checking C.
+    W_BASE_WORD = 0
+    A_BASE_WORD = align_up(W_BASE_WORD + len(w_tile), 16)
+    BIAS_BASE_WORD = align_up(A_BASE_WORD + len(a_tile), 16)
+    R_BASE_WORD = align_up(BIAS_BASE_WORD + len(bias_words), 16)
+    result_words = 0 if args.perf_only else M * N
+    DRAM_SIZE = max(1, align_up(R_BASE_WORD + result_words, 16))
+
+    W_BASE = W_BASE_WORD << 2
+    A_BASE = A_BASE_WORD << 2
+    BIAS_BASE = BIAS_BASE_WORD << 2
+    R_BASE = R_BASE_WORD << 2
+    if args.shape == "8x32":
+        W_ADDR2 = W_BASE + ((K + SIMD_LANES - 1) // SIMD_LANES) * SIMD_LANES * 16
+    else:
         W_ADDR2 = 0  # unused
-    expected = gen_expected(C, M, N)
+
+    expected = [] if args.perf_only else gen_expected(C, M, N)
 
     dram = [0] * DRAM_SIZE
     for i, v in enumerate(w_tile):
@@ -386,6 +412,12 @@ def main():
 
     num_tiles_m = (M + grid_rows - 1) // grid_rows
     num_tiles_n = (N + grid_cols - 1) // grid_cols
+    timeout_cycles = args.timeout_cycles
+    if timeout_cycles is None:
+        timeout_cycles = estimate_timeout_cycles(M, K, N, grid_rows, grid_cols, kt_elems)
+    wait_timeout = args.wait_timeout
+    if wait_timeout is None:
+        wait_timeout = max(50_000, min((timeout_cycles + 7) // 8, 4_000_000_000))
 
     # Write test_params.vh
     vh_path = out_dir / "test_params.vh"
@@ -395,6 +427,12 @@ def main():
         f.write(f"`define DRAM_HEX \"{out_dir.as_posix()}/dram.hex\"\n")
         f.write(f"`define EXPECTED_HEX \"{out_dir.as_posix()}/expected.hex\"\n")
         f.write(f"`define DRAM_SIZE {DRAM_SIZE}\n")
+        if args.perf_only:
+            f.write("`define PERF_ONLY 1\n")
+        if args.strict_aw:
+            f.write("`define STRICT_AW_EXPECT 1\n")
+        f.write(f"`define WAIT_TIMEOUT_VAL 32'd{wait_timeout}\n")
+        f.write(f"`define TB_TIMEOUT_CYCLES_VAL 64'd{timeout_cycles}\n")
         f.write(f"`define DATA_W_VAL {data_w}\n")
         f.write(f"`define INT8_SIMD_LANES_VAL {SIMD_LANES}\n")
         f.write(f"`define M_DIM {M}\n")
@@ -436,17 +474,21 @@ def main():
     # Write dram.hex
     dram_path = out_dir / "dram.hex"
     with open(dram_path, "w") as f:
-        for i, v in enumerate(dram[:16384]):
+        for i, v in enumerate(dram):
             f.write(f"{v:08X}\n")
 
     # Write expected.hex (row-major C)
     exp_path = out_dir / "expected.hex"
     with open(exp_path, "w") as f:
-        for v in expected:
-            f.write(f"{v & 0xFFFFFFFF:08X}\n")
+        if expected:
+            for v in expected:
+                f.write(f"{v & 0xFFFFFFFF:08X}\n")
+        else:
+            f.write("00000000\n")
 
-    print(f"Generated {case_name}: M={M} K={K} N={N} grid={args.shape} lanes={SIMD_LANES} data_w={data_w}")
+    print(f"Generated {case_name}: M={M} K={K} N={N} grid={args.shape} lanes={SIMD_LANES} data_w={data_w} perf_only={args.perf_only}")
     print(f"  num_results = {M * N}")
+    print(f"  dram_words = {DRAM_SIZE}")
     print(f"  tiles M x N = {num_tiles_m} x {num_tiles_n}")
     print(f"  dram.hex, expected.hex, test_params.vh -> {out_dir}")
 

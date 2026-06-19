@@ -213,7 +213,7 @@ reg [VEC_W-1:0] vec_build_b;
 // ---------------------------------------------------------------------------
 // Write logic
 // ---------------------------------------------------------------------------
-wire do_write = wr_en && !buf_full;
+wire do_write = rst_n && !clear && !swap && wr_en && !buf_full;
 wire [ADDR_W-1:0] wr_vec_group_idx = vec_group_idx(wr_ptr, vec_group_words);
 wire [5:0] wr_vec_word_in_group = vec_word_in_group(wr_ptr, vec_group_words);
 wire [2:0] wr_vec_k_idx = packed_int8 ? vec_k_idx(wr_vec_word_in_group, vec_words_per_k) : 3'd0;
@@ -228,13 +228,10 @@ wire [VEC_W-1:0] wr_vec_build_next = vec_line_update(wr_vec_build_base, wr_data,
 
 always @(posedge clk) begin
     if (do_write) begin
-        if (wr_sel == 1'b0) begin
-            vec_build_a <= wr_vec_build_next;
+        if (wr_sel == 1'b0)
             vec_mem_a[wr_vec_group_idx] <= wr_vec_build_next;
-        end else begin
-            vec_build_b <= wr_vec_build_next;
+        else
             vec_mem_b[wr_vec_group_idx] <= wr_vec_build_next;
-        end
     end
 end
 
@@ -273,9 +270,9 @@ generate
     end
 endgenerate
 
-// Update write pointers & fill counts. Bank contents are not reset here: fill
-// counts define validity, and keeping memory writes in one always block avoids
-// multi-driven RAM/register inference.
+// Update write pointers, fill counts, and vector build state. Bank contents are
+// not reset here: fill counts define validity, and keeping RAM writes separate
+// avoids multi-driven RAM inference.
 always @(posedge clk) begin
     if (!rst_n) begin
         wr_ptr_a   <= 0; wr_ptr_b   <= 0; wr_fill_a  <= 0; wr_fill_b  <= 0;
@@ -299,9 +296,11 @@ always @(posedge clk) begin
         if (wr_sel == 1'b0) begin
             wr_ptr_a  <= wr_ptr_a + 1'b1;
             wr_fill_a <= wr_fill_a + 1'b1;
+            vec_build_a <= wr_vec_build_next;
         end else begin
             wr_ptr_b  <= wr_ptr_b + 1'b1;
             wr_fill_b <= wr_fill_b + 1'b1;
+            vec_build_b <= wr_vec_build_next;
         end
     end
 end

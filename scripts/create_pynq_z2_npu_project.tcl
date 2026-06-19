@@ -166,6 +166,7 @@ proc create_npu_bd {bd_name} {
     set axi_lite [create_bd_cell -type ip -vlnv [first_ipdef xilinx.com:ip:axi_interconnect:*] axi_lite_interconnect]
     set axi_ddr [create_bd_cell -type ip -vlnv [first_ipdef xilinx.com:ip:axi_interconnect:*] axi_ddr_interconnect]
     set npu [create_bd_cell -type module -reference npu_pynq_wrapper npu_0]
+    set_property -dict [list CONFIG.PPB_SCALAR_READ_ENABLE {0}] $npu
 
     set_property -dict [list \
         CONFIG.PCW_USE_M_AXI_GP0 {1} \

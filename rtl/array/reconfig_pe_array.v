@@ -51,7 +51,8 @@ module reconfig_pe_array #(
     parameter ACC_W            = 32,
     parameter MAX_TILE_RESULTS = 256, // max results per tile (16x16 or 8x32)
     parameter INT8_SIMD_LANES  = (DATA_W >= 32) ? 4 : 2,
-    parameter FP16_ENABLE      = 0
+    parameter FP16_ENABLE      = 0,
+    parameter INT8_SCALAR_SIGNEXT_COMPAT = 1
 )(
     input  wire                          clk,
     input  wire                          rst_n,
@@ -316,7 +317,8 @@ generate
                 .DATA_W(DATA_W),
                 .ACC_W (ACC_W),
                 .INT8_SIMD_LANES(INT8_SIMD_LANES),
-                .FP16_ENABLE(FP16_ENABLE)
+                .FP16_ENABLE(FP16_ENABLE),
+                .INT8_SCALAR_SIGNEXT_COMPAT(INT8_SCALAR_SIGNEXT_COMPAT)
             ) u_pe (
                 .clk      (clk),
                 .rst_n    (rst_n),

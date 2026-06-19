@@ -1052,7 +1052,8 @@ reconfig_pe_array #(
     .ACC_W   (ACC_W),
     .MAX_TILE_RESULTS(MAX_TILE_RESULTS),
     .INT8_SIMD_LANES(INT8_SIMD_LANES),
-    .FP16_ENABLE(FP16_ENABLE)
+    .FP16_ENABLE(FP16_ENABLE),
+    .INT8_SCALAR_SIGNEXT_COMPAT(0)
 ) u_pe_array (
     .clk            (sys_clk),
     .rst_n          (sys_rst_n),

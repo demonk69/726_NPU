@@ -27,7 +27,8 @@ module pe_top #(
     parameter DATA_W = 16,   // max data width (FP16)
     parameter ACC_W  = 32,   // accumulator width
     parameter INT8_SIMD_LANES = (DATA_W >= 32) ? 4 : 2,
-    parameter FP16_ENABLE = 0
+    parameter FP16_ENABLE = 0,
+    parameter INT8_SCALAR_SIGNEXT_COMPAT = 1
 )(
     input  wire              clk,
     input  wire              rst_n,
@@ -140,8 +141,8 @@ reg               s1_stat;
 reg               s1_mode;
 
 // INT8: DATA_W carries up to four signed INT8 lanes in packed SIMD form.
-// Existing scalar feeders sign-extend one INT8 value to 16 bits; detect that
-// legacy encoding across DATA_W and keep it equivalent to a single-lane MAC.
+// Some legacy scalar feeders sign-extend one INT8 value across DATA_W; keep
+// that compatibility only where the caller explicitly leaves it enabled.
 wire signed [7:0] int8_w0 = s0_w[7:0];
 wire signed [7:0] int8_a0 = s0_a[7:0];
 wire signed [7:0] int8_w1 = s0_w[15:8];
@@ -185,9 +186,10 @@ wire int8_lane3_cfg_en = (INT8_SIMD_LANES >= 4) && (DATA_W >= 32);
 wire int8_w_scalar_se  = (s0_w[DATA_W-1:8] == {(DATA_W-8){s0_w[7]}});
 wire int8_a_scalar_se  = (s0_a[DATA_W-1:8] == {(DATA_W-8){s0_a[7]}});
 wire int8_scalar_se    = int8_w_scalar_se && int8_a_scalar_se;
-wire int8_lane1_en     = int8_lane1_cfg_en && !int8_scalar_se;
-wire int8_lane2_en     = int8_lane2_cfg_en && !int8_scalar_se;
-wire int8_lane3_en     = int8_lane3_cfg_en && !int8_scalar_se;
+wire int8_scalar_compat = (INT8_SCALAR_SIGNEXT_COMPAT != 0) && int8_scalar_se;
+wire int8_lane1_en     = int8_lane1_cfg_en && !int8_scalar_compat;
+wire int8_lane2_en     = int8_lane2_cfg_en && !int8_scalar_compat;
+wire int8_lane3_en     = int8_lane3_cfg_en && !int8_scalar_compat;
 
 wire signed [17:0] int8_mul0_ext = {{2{int8_mul0_16[15]}}, int8_mul0_16};
 wire signed [17:0] int8_mul1_ext = {{2{int8_mul1_16[15]}}, int8_mul1_16};

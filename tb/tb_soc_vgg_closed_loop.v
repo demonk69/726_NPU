@@ -2,6 +2,14 @@
 `timescale 1ns/1ps
 `include "soc_vgg_closed_loop_params.vh"
 
+`ifndef VGG_CLOSED_INT8_SIMD_LANES
+`define VGG_CLOSED_INT8_SIMD_LANES 4
+`endif
+
+`ifndef VGG_CLOSED_NPU_DATA_W
+`define VGG_CLOSED_NPU_DATA_W 32
+`endif
+
 module tb_soc_vgg_closed_loop;
     localparam CLK_T = 10;
     localparam TIMEOUT = `VGG_CLOSED_TIMEOUT_CYCLES;
@@ -20,8 +28,9 @@ module tb_soc_vgg_closed_loop;
 
     soc_top #(
         .MEM_WORDS(`VGG_CLOSED_MEM_WORDS), .DRAM_WORDS(DRAM_W),
-        .NPU_ROWS(4), .NPU_COLS(4), .NPU_DATA_W(32), .NPU_ACC_W(32),
-        .NPU_PPB_DEPTH(8192), .NPU_PPB_THRESH(16)
+        .NPU_ROWS(4), .NPU_COLS(4), .NPU_DATA_W(`VGG_CLOSED_NPU_DATA_W), .NPU_ACC_W(32),
+        .NPU_PPB_DEPTH(8192), .NPU_PPB_THRESH(16),
+        .NPU_INT8_SIMD_LANES(`VGG_CLOSED_INT8_SIMD_LANES)
     ) u_soc (.clk(clk), .rst_n(rst_n));
 
     initial clk = 0;

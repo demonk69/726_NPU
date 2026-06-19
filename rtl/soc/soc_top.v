@@ -42,7 +42,8 @@ module soc_top #(
     parameter NPU_DATA_W  = 32,
     parameter NPU_ACC_W   = 32,
     parameter NPU_PPB_DEPTH  = 64,
-    parameter NPU_PPB_THRESH = 16
+    parameter NPU_PPB_THRESH = 16,
+    parameter NPU_INT8_SIMD_LANES = 4
 )(
     input  wire        clk,
     input  wire        rst_n
@@ -262,7 +263,8 @@ npu_top #(
     .DATA_W    (NPU_DATA_W),
     .ACC_W     (NPU_ACC_W),
     .PPB_DEPTH (NPU_PPB_DEPTH),
-    .PPB_THRESH(NPU_PPB_THRESH)
+    .PPB_THRESH(NPU_PPB_THRESH),
+    .INT8_SIMD_LANES(NPU_INT8_SIMD_LANES)
 ) u_npu (
     .sys_clk       (clk),
     .sys_rst_n     (rst_n),

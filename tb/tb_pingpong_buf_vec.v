@@ -209,6 +209,48 @@ module tb_pingpong_buf_vec;
             $display("[FAIL] INT8_VEC16 consume: buffer not empty");
             errors = errors + 1;
         end
+
+        pulse_clear();
+
+        // Packed INT8 with OUT_WIDTH=16: two K bytes are packed per lane.
+        packed_int8 = 1'b1;
+        rd_vec_lanes = 5'd4;
+        write_word(32'h04030201); // k0 lanes 0..3
+        write_word(32'h08070605); // k1 lanes 0..3
+        pulse_swap();
+
+        expect_vec(16'h0501, 16'h0602, 16'h0703, 16'h0804, "PACKED_VEC4");
+        consume_vec();
+        if (!buf_empty) begin
+            $display("[FAIL] PACKED_VEC4 consume: buffer not empty");
+            errors = errors + 1;
+        end
+
+        pulse_clear();
+
+        rd_vec_lanes = 5'd8;
+        write_word(32'h04030201); // k0 lanes 0..3
+        write_word(32'h08070605); // k0 lanes 4..7
+        write_word(32'h0C0B0A09); // k1 lanes 0..3
+        write_word(32'h100F0E0D); // k1 lanes 4..7
+        pulse_swap();
+
+        expect_vec(16'h0901, 16'h0A02, 16'h0B03, 16'h0C04, "PACKED_VEC8A");
+        if (rd_vec[4*16 +: 16] !== 16'h0D05 || rd_vec[5*16 +: 16] !== 16'h0E06 ||
+            rd_vec[6*16 +: 16] !== 16'h0F07 || rd_vec[7*16 +: 16] !== 16'h1008) begin
+            $display("[FAIL] PACKED_VEC8B lanes 4..7 got %h_%h_%h_%h",
+                     rd_vec[7*16 +: 16], rd_vec[6*16 +: 16],
+                     rd_vec[5*16 +: 16], rd_vec[4*16 +: 16]);
+            errors = errors + 1;
+        end else begin
+            $display("[PASS] PACKED_VEC8B");
+        end
+        consume_vec();
+        if (!buf_empty) begin
+            $display("[FAIL] PACKED_VEC8 consume: buffer not empty");
+            errors = errors + 1;
+        end
+
         if (errors == 0) begin
             $display("[PASS] tb_pingpong_buf_vec");
         end else begin

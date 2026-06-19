@@ -642,7 +642,7 @@ localparam [15:0] TILE_R_LEN = 16'd4;
 wire [15:0] tile_k_cycles = tile_mode
     ? ((tile_k_len + {12'd0, INT8_SIMD_LANES} - 16'd1) / {12'd0, INT8_SIMD_LANES})
     : tile_k_len;
-wire tile_direct_ws = tile_mode && (INT8_SIMD_LANES > 1) && !pe_mode && !lk_stat[0];
+wire tile_direct_ws = tile_mode && !lk_fp16_mode && !lk_stat[0];
 // Direct WS has no array row-skew drain, but the PE's input/multiply stages
 // still need two enabled cycles before a pass transition or flush.
 wire [15:0] tile_compute_drain_cycles = tile_direct_ws ? 16'd2

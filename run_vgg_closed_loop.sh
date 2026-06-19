@@ -7,6 +7,7 @@
 #   ./run_vgg_closed_loop.sh --image cat.jpg
 #   ./run_vgg_closed_loop.sh --shape 8x8 --image cat.jpg
 #   ./run_vgg_closed_loop.sh --flow ws --shape 4x4 --image cat.jpg
+#   ./run_vgg_closed_loop.sh --shape 16x16 --flow os --lanes 2
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -18,6 +19,7 @@ IMG_IDX="0"
 IMAGE=""
 SHAPE="16x16"
 FLOW="os"
+LANES="${VGG_CLOSED_LANES:-4}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -33,8 +35,12 @@ while [[ $# -gt 0 ]]; do
             FLOW="${2:?missing flow}"
             shift 2
             ;;
+        --lanes)
+            LANES="${2:?missing lanes}"
+            shift 2
+            ;;
         --help|-h)
-            echo "Usage: $0 [img_idx] [--image <file>] [--shape 4x4|8x8|16x16|8x32] [--flow os|ws]"
+            echo "Usage: $0 [img_idx] [--image <file>] [--shape 4x4|8x8|16x16|8x32] [--flow os|ws] [--lanes 1|2|4]"
             exit 0
             ;;
         --*)
@@ -64,10 +70,19 @@ case "$FLOW" in
         ;;
 esac
 
+case "$LANES" in
+    1|2|4) ;;
+    *)
+        echo "Invalid lanes: $LANES (expected 1, 2, or 4)" >&2
+        exit 2
+        ;;
+esac
+
 GEN_ARGS=()
 GEN_ARGS+=(--timeout-cycles "$TIMEOUT_CYCLES")
 GEN_ARGS+=(--shape "$SHAPE")
 GEN_ARGS+=(--flow "$FLOW")
+GEN_ARGS+=(--lanes "$LANES")
 if [[ -n "$IMAGE" ]]; then
     GEN_ARGS+=(--image "$IMAGE")
 else

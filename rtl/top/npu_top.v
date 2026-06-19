@@ -32,7 +32,8 @@ module npu_top #(
     parameter PPB_THRESH   = 16,
     parameter INT8_SIMD_LANES = 4,
     parameter PERF_ENABLE_DERIVED = 0,
-    parameter FP16_ENABLE = 0
+    parameter FP16_ENABLE = 0,
+    parameter PPB_SCALAR_READ_ENABLE = 1
 )(
     // System
     input  wire              sys_clk,
@@ -286,7 +287,7 @@ wire [31:0] ctrl_post_quant_cfg;
 wire       ctrl_bias_en;
 wire ctrl_tile_mode, ctrl_vec_consume;
 wire ppb_packed_int8 = ctrl_tile_mode && !pe_mode_hw && (INT8_SIMD_LANES > 1);
-wire tile_ws_direct = ppb_packed_int8 && !pe_stat;
+wire tile_ws_direct = ctrl_tile_mode && !pe_mode_hw && !pe_stat;
 wire [31:0] ctrl_tile_m_base, ctrl_tile_n_base; // global C tile origin: m0/n0
 wire [15:0] ctrl_tile_row_valid, ctrl_tile_col_valid; // valid r/c lanes for edge tiles
 wire [4:0]  ctrl_tile_active_rows;
@@ -434,7 +435,8 @@ pingpong_buf #(
     .OUT_WIDTH (DATA_W),
     .THRESHOLD (PPB_THRESH),
     .SUBW      (4),
-    .VEC_LANES (MAX_TILE_LANES)
+    .VEC_LANES (MAX_TILE_LANES),
+    .SCALAR_READ_ENABLE(PPB_SCALAR_READ_ENABLE)
 ) u_w_ppb (
     .clk       (sys_clk),
     .rst_n     (sys_rst_n),
@@ -463,7 +465,8 @@ pingpong_buf #(
     .OUT_WIDTH (DATA_W),
     .THRESHOLD (PPB_THRESH),
     .SUBW      (4),
-    .VEC_LANES (MAX_TILE_LANES)
+    .VEC_LANES (MAX_TILE_LANES),
+    .SCALAR_READ_ENABLE(PPB_SCALAR_READ_ENABLE)
 ) u_a_ppb (
     .clk       (sys_clk),
     .rst_n     (sys_rst_n),

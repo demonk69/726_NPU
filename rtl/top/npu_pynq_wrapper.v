@@ -21,6 +21,7 @@ module npu_pynq_wrapper #(
     parameter INT8_SIMD_LANES = 4,
     parameter PERF_ENABLE_DERIVED = 0,
     parameter FP16_ENABLE = 0,
+    parameter PPB_SCALAR_READ_ENABLE = 0,
     parameter S_AXI_OFFSET_BITS = 16,
     parameter M_AXI_ID_WIDTH = 1
 )(
@@ -124,7 +125,8 @@ npu_top #(
     .PPB_THRESH(PPB_THRESH),
     .INT8_SIMD_LANES(INT8_SIMD_LANES),
     .PERF_ENABLE_DERIVED(PERF_ENABLE_DERIVED),
-    .FP16_ENABLE(FP16_ENABLE)
+    .FP16_ENABLE(FP16_ENABLE),
+    .PPB_SCALAR_READ_ENABLE(PPB_SCALAR_READ_ENABLE)
 ) u_npu_top (
     .sys_clk(aclk),
     .sys_rst_n(aresetn),

@@ -34,6 +34,7 @@ from run_repopt_vgg_host import (  # noqa: E402
 
 PPB_DEPTH = 8192
 SIMD = 4
+WORD_INT8_LANES = 4
 SHAPE_CONFIGS = {
     "4x4": {"cfg_shape": 0x0, "tile_rows": 4, "tile_cols": 4},
     "8x8": {"cfg_shape": 0x1, "tile_rows": 8, "tile_cols": 8},
@@ -146,7 +147,7 @@ def pack_weight_tile_8x32(qweight, n_base, n_count, k_dim):
     cout, _cin, kh, kw = [int(x) for x in w_int.shape]
     out = []
     half_cols = 16
-    words_per_k = half_cols // SIMD
+    words_per_k = half_cols // WORD_INT8_LANES
     for pass_base in (0, half_cols):
         kpos = 0
         while kpos < k_dim:
@@ -159,8 +160,8 @@ def pack_weight_tile_8x32(qweight, n_base, n_count, k_dim):
                 ker_w = rem % kw
                 for group in range(words_per_k):
                     vals = []
-                    for lane in range(SIMD):
-                        local_col = pass_base + group * SIMD + lane
+                    for lane in range(WORD_INT8_LANES):
+                        local_col = pass_base + group * WORD_INT8_LANES + lane
                         out_c = n_base + local_col
                         if local_col < n_count and out_c < cout:
                             vals.append(int(w_int[out_c, chan, ker_h, ker_w].item()))
@@ -190,17 +191,17 @@ def pack_weight_tile(qweight, n_base, n_count, k_dim):
             rem = k_index % (kh * kw)
             ker_h = rem // kw
             ker_w = rem % kw
-            for group in range((n_count + SIMD - 1) // SIMD):
+            for group in range((n_count + WORD_INT8_LANES - 1) // WORD_INT8_LANES):
                 vals = []
-                for lane in range(SIMD):
-                    out_c = n_base + group * SIMD + lane
-                    if group * SIMD + lane < n_count:
+                for lane in range(WORD_INT8_LANES):
+                    out_c = n_base + group * WORD_INT8_LANES + lane
+                    if group * WORD_INT8_LANES + lane < n_count:
                         vals.append(int(w_int[out_c, chan, ker_h, ker_w].item()))
                     else:
                         vals.append(0)
                 out.append(pack4(vals))
         padded_k = ((k_len + SIMD - 1) // SIMD) * SIMD
-        words_per_k = (n_count + SIMD - 1) // SIMD
+        words_per_k = (n_count + WORD_INT8_LANES - 1) // WORD_INT8_LANES
         for _ in range((padded_k - k_len) * words_per_k):
             out.append(0)
         kpos += k_len
@@ -405,7 +406,7 @@ def emit_load_u32_unaligned(a):
 
 
 def emit_pack_group_padded(a):
-    a.emit(SLLI("t1", "a5", 2))       # group * 4
+    a.emit(SLLI("t1", "a5", 2))       # group * 4 INT8 bytes per 32-bit word
     a.emit(ADD("t1", "t1", "s10"))    # m = m_base + group*4
     a.emit(SRL("t2", "t1", "a4"))     # oh = m >> ow_shift
     a.emit(ADD("t4", "t1", "zero"))
@@ -488,9 +489,9 @@ def emit_run_conv_layer(a):
     a.emit(SW("t0", "gp", 0))
     a.emit(ADDI("gp", "gp", 4))
     a.emit(ADDI("a5", "a5", 1))
-    a.li("t1", TR // SIMD)
+    a.li("t1", TR // WORD_INT8_LANES)
     a.branch("bne", "a5", "t1", "pack_group_loop")
-    for _ in range((A_PACK_LANES - TR) // SIMD):
+    for _ in range((A_PACK_LANES - TR) // WORD_INT8_LANES):
         a.emit(SW("zero", "gp", 0))
         a.emit(ADDI("gp", "gp", 4))
     a.emit(ADDI("t6", "t6", 1))
@@ -772,9 +773,10 @@ def emit_firmware(conv_descs, pool_descs, cls_w_base, cls_b_base, expected_label
 
 
 def generate(args):
-    global TR, TC, CFG_SHAPE, KT_ELEMS, A_PACK_LANES, CTRL_BIAS_TILE
+    global TR, TC, CFG_SHAPE, KT_ELEMS, A_PACK_LANES, CTRL_BIAS_TILE, SIMD
 
     shape = SHAPE_CONFIGS[args.shape]
+    SIMD = args.lanes
     TR = shape["tile_rows"]
     TC = shape["tile_cols"]
     CFG_SHAPE = shape["cfg_shape"]
@@ -986,6 +988,8 @@ def generate(args):
         f.write(f'`define VGG_CLOSED_FIXED_LABEL {fixed_pred}\n')
         f.write(f'`define VGG_CLOSED_SHAPE "{args.shape}"\n')
         f.write(f'`define VGG_CLOSED_FLOW "{args.flow}"\n')
+        f.write(f'`define VGG_CLOSED_INT8_SIMD_LANES {args.lanes}\n')
+        f.write(f'`define VGG_CLOSED_NPU_DATA_W {32 if args.lanes == 4 else 16}\n')
 
     meta = {
         "schema": "vgg_closed_loop_v1",
@@ -997,6 +1001,8 @@ def generate(args):
         "exact_scores": exact_scores,
         "shape": args.shape,
         "flow": args.flow,
+        "int8_simd_lanes": args.lanes,
+        "npu_data_w": 32 if args.lanes == 4 else 16,
         "tile_rows": TR,
         "tile_cols": TC,
         "a_pack_lanes": A_PACK_LANES,
@@ -1010,7 +1016,7 @@ def generate(args):
         json.dump(meta, f, indent=2)
 
     print(f"Generated closed-loop VGG case: {out}")
-    print(f"  shape: {args.shape} (TR={TR}, TC={TC}, A_PACK_LANES={A_PACK_LANES}, KT_ELEMS={KT_ELEMS}), flow={args.flow}")
+    print(f"  shape: {args.shape} (TR={TR}, TC={TC}, A_PACK_LANES={A_PACK_LANES}, KT_ELEMS={KT_ELEMS}), flow={args.flow}, lanes={args.lanes}")
     print(f"  firmware words: {len(fw)} / {MEM_WORDS}")
     print(f"  static end: 0x{next_static:08x}, desc end: 0x{desc_ptr:08x}, max: 0x{max_addr:08x}")
     print(f"  sparse dram words: {used_dram_words}")
@@ -1031,6 +1037,8 @@ def main():
                         help="NPU tile shape: 4x4, 8x8, 16x16, or 8x32")
     parser.add_argument("--flow", choices=("os", "ws"), default="os",
                         help="Tile dataflow mode for NPU conv GEMMs")
+    parser.add_argument("--lanes", type=int, choices=(1, 2, 4), default=4,
+                        help="INT8 SIMD lanes per PE: 1, 2, or 4")
     parser.add_argument("--timeout-cycles", type=int, default=500000000)
     generate(parser.parse_args())
 

@@ -26,7 +26,8 @@ module pingpong_buf #(
     parameter OUT_WIDTH = 16,       // PE data width (output)
     parameter THRESHOLD = 16,
     parameter SUBW      = 4,         // max sub-words per word (INT8 case)
-    parameter VEC_LANES = 4
+    parameter VEC_LANES = 4,
+    parameter SCALAR_READ_ENABLE = 1
 )(
     input  wire                      clk,
     input  wire                      rst_n,
@@ -63,6 +64,7 @@ localparam ADDR_W    = $clog2(DEPTH);
 localparam FILL_W    = ADDR_W + 1;
 localparam SUBW_W    = $clog2(SUBW);             // 2 bits for SUBW=4 index
 localparam RD_FILL_W = $clog2(DEPTH * SUBW) + 1; // max fill: DEPTH*4 sub-words
+localparam VEC_W      = VEC_LANES * OUT_WIDTH;
 localparam [4:0] VEC_LANES_5 = VEC_LANES;
 localparam [2:0] PACKED_LANES = (OUT_WIDTH + 7) / 8;  // 2 for 16b, 4 for 32b
 localparam [SUBW_W-1:0] SUBW_LAST = {SUBW_W{1'b1}};
@@ -72,6 +74,100 @@ wire [4:0] rd_vec_lanes_eff =
     (rd_vec_lanes > VEC_LANES_5) ? VEC_LANES_5 :
                                    rd_vec_lanes;
 wire [RD_FILL_W-1:0] rd_vec_lanes_fill = packed_int8 ? (rd_vec_lanes_eff * PACKED_LANES) : rd_vec_lanes_eff;
+wire [2:0] vec_words_per_k = (rd_vec_lanes_eff <= 5'd4)  ? 3'd1 :
+                             (rd_vec_lanes_eff <= 5'd8)  ? 3'd2 :
+                             (rd_vec_lanes_eff <= 5'd12) ? 3'd3 : 3'd4;
+wire [5:0] vec_group_words = packed_int8 ? ({3'd0, vec_words_per_k} * {3'd0, PACKED_LANES})
+                                         : {3'd0, vec_words_per_k};
+
+function [ADDR_W-1:0] vec_group_idx;
+    input [ADDR_W-1:0] ptr;
+    input [5:0] group_words;
+    begin
+        case (group_words)
+            6'd1:    vec_group_idx = ptr;
+            6'd2:    vec_group_idx = ptr >> 1;
+            6'd3:    vec_group_idx = ptr / 3;
+            6'd4:    vec_group_idx = ptr >> 2;
+            6'd6:    vec_group_idx = ptr / 6;
+            6'd8:    vec_group_idx = ptr >> 3;
+            6'd12:   vec_group_idx = ptr / 12;
+            6'd16:   vec_group_idx = ptr >> 4;
+            default: vec_group_idx = ptr;
+        endcase
+    end
+endfunction
+
+function [5:0] vec_word_in_group;
+    input [ADDR_W-1:0] ptr;
+    input [5:0] group_words;
+    begin
+        case (group_words)
+            6'd1:    vec_word_in_group = 6'd0;
+            6'd2:    vec_word_in_group = ptr - ((ptr >> 1) << 1);
+            6'd3:    vec_word_in_group = ptr - ((ptr / 3) * 3);
+            6'd4:    vec_word_in_group = ptr - ((ptr >> 2) << 2);
+            6'd6:    vec_word_in_group = ptr - ((ptr / 6) * 6);
+            6'd8:    vec_word_in_group = ptr - ((ptr >> 3) << 3);
+            6'd12:   vec_word_in_group = ptr - ((ptr / 12) * 12);
+            6'd16:   vec_word_in_group = ptr - ((ptr >> 4) << 4);
+            default: vec_word_in_group = 6'd0;
+        endcase
+    end
+endfunction
+
+function [2:0] vec_k_idx;
+    input [5:0] word_in_group;
+    input [2:0] words_per_k;
+    begin
+        case (words_per_k)
+            3'd1:    vec_k_idx = word_in_group[2:0];
+            3'd2:    vec_k_idx = word_in_group[3:1];
+            3'd3:    vec_k_idx = word_in_group / 3;
+            3'd4:    vec_k_idx = word_in_group[4:2];
+            default: vec_k_idx = 3'd0;
+        endcase
+    end
+endfunction
+
+function [2:0] vec_lane_word;
+    input [5:0] word_in_group;
+    input [2:0] words_per_k;
+    begin
+        case (words_per_k)
+            3'd1:    vec_lane_word = 3'd0;
+            3'd2:    vec_lane_word = {2'd0, word_in_group[0]};
+            3'd3:    vec_lane_word = word_in_group - ((word_in_group / 3) * 3);
+            3'd4:    vec_lane_word = {1'd0, word_in_group[1:0]};
+            default: vec_lane_word = 3'd0;
+        endcase
+    end
+endfunction
+
+function [VEC_W-1:0] vec_line_update;
+    input [VEC_W-1:0] line_in;
+    input [DATA_W-1:0] data_in;
+    input [2:0] lane_word;
+    input [2:0] k_idx;
+    input [4:0] lane_limit;
+    input       is_packed;
+    integer byte_i;
+    integer lane_i_local;
+    reg [7:0] byte_val;
+    begin
+        vec_line_update = line_in;
+        for (byte_i = 0; byte_i < SUBW; byte_i = byte_i + 1) begin
+            lane_i_local = lane_word * SUBW + byte_i;
+            byte_val = data_in[byte_i*8 +: 8];
+            if (lane_i_local < VEC_LANES && lane_i_local < lane_limit) begin
+                if (is_packed)
+                    vec_line_update[lane_i_local*OUT_WIDTH + k_idx*8 +: 8] = byte_val;
+                else
+                    vec_line_update[lane_i_local*OUT_WIDTH +: OUT_WIDTH] = {{(OUT_WIDTH-8){byte_val[7]}}, byte_val};
+            end
+        end
+    end
+endfunction
 
 // ---------------------------------------------------------------------------
 // Bank select: 0 = BufA, 1 = BufB
@@ -105,24 +201,77 @@ wire [SUBW_W-1:0] rd_sub = rd_sel ? rd_sub_b : rd_sub_a;
 wire [RD_FILL_W-1:0] cur_rd_fill = rd_sel ? rd_fill_b : rd_fill_a;
 
 // ---------------------------------------------------------------------------
-// Bank storage
+// Vector cache storage
 // ---------------------------------------------------------------------------
-reg [DATA_W-1:0] mem_a [0:DEPTH-1];
-reg [DATA_W-1:0] mem_b [0:DEPTH-1];
+// Vector cache: built while DMA writes sequential packed tile words.  This
+// removes the old rd_vec path's many combinational reads from mem_a/mem_b.
+reg [VEC_W-1:0] vec_mem_a [0:DEPTH-1];
+reg [VEC_W-1:0] vec_mem_b [0:DEPTH-1];
+reg [VEC_W-1:0] vec_build_a;
+reg [VEC_W-1:0] vec_build_b;
 
 // ---------------------------------------------------------------------------
 // Write logic
 // ---------------------------------------------------------------------------
 wire do_write = wr_en && !buf_full;
+wire [ADDR_W-1:0] wr_vec_group_idx = vec_group_idx(wr_ptr, vec_group_words);
+wire [5:0] wr_vec_word_in_group = vec_word_in_group(wr_ptr, vec_group_words);
+wire [2:0] wr_vec_k_idx = packed_int8 ? vec_k_idx(wr_vec_word_in_group, vec_words_per_k) : 3'd0;
+wire [2:0] wr_vec_lane_word = packed_int8 ? vec_lane_word(wr_vec_word_in_group, vec_words_per_k)
+                                          : wr_vec_word_in_group[2:0];
+wire [VEC_W-1:0] wr_vec_build_cur = wr_sel ? vec_build_b : vec_build_a;
+wire [VEC_W-1:0] wr_vec_build_base = (wr_vec_word_in_group == 6'd0) ? {VEC_W{1'b0}}
+                                                                    : wr_vec_build_cur;
+wire [VEC_W-1:0] wr_vec_build_next = vec_line_update(wr_vec_build_base, wr_data,
+                                                     wr_vec_lane_word, wr_vec_k_idx,
+                                                     rd_vec_lanes_eff, packed_int8);
 
 always @(posedge clk) begin
     if (do_write) begin
-        if (wr_sel == 1'b0)
-            mem_a[wr_ptr] <= wr_data;
-        else
-            mem_b[wr_ptr] <= wr_data;
+        if (wr_sel == 1'b0) begin
+            vec_build_a <= wr_vec_build_next;
+            vec_mem_a[wr_vec_group_idx] <= wr_vec_build_next;
+        end else begin
+            vec_build_b <= wr_vec_build_next;
+            vec_mem_b[wr_vec_group_idx] <= wr_vec_build_next;
+        end
     end
 end
+
+// Optional scalar read storage. Tile-mode board builds can disable this path
+// because rd_vec is the only PPBuf read interface used by the PE array.
+generate
+    if (SCALAR_READ_ENABLE != 0) begin : gen_scalar_mem
+        reg [DATA_W-1:0] mem_a [0:DEPTH-1];
+        reg [DATA_W-1:0] mem_b [0:DEPTH-1];
+
+        always @(posedge clk) begin
+            if (do_write) begin
+                if (wr_sel == 1'b0)
+                    mem_a[wr_ptr] <= wr_data;
+                else
+                    mem_b[wr_ptr] <= wr_data;
+            end
+        end
+
+        // Current memory word
+        wire [DATA_W-1:0] rd_mem = (rd_sel == 1'b0)
+            ? mem_a[rd_ptr]
+            : mem_b[rd_ptr];
+
+        // ---- INT8 path: read one byte, sign-extend to OUT_WIDTH ----
+        wire [7:0] rd_byte = (rd_sub == 0) ? rd_mem[ 7: 0] :
+                             (rd_sub == 1) ? rd_mem[15: 8] :
+                             (rd_sub == 2) ? rd_mem[23:16] :
+                                             rd_mem[31:24];
+        wire [OUT_WIDTH-1:0] rd_int8 = {{(OUT_WIDTH-8){rd_byte[7]}}, rd_byte};
+
+        // When buffer is empty, output 0 to avoid PE latching stale data.
+        assign rd_data = buf_empty ? {OUT_WIDTH{1'b0}} : rd_int8;
+    end else begin : gen_no_scalar_mem
+        assign rd_data = {OUT_WIDTH{1'b0}};
+    end
+endgenerate
 
 // Update write pointers & fill counts. Bank contents are not reset here: fill
 // counts define validity, and keeping memory writes in one always block avoids
@@ -130,17 +279,21 @@ end
 always @(posedge clk) begin
     if (!rst_n) begin
         wr_ptr_a   <= 0; wr_ptr_b   <= 0; wr_fill_a  <= 0; wr_fill_b  <= 0;
+        vec_build_a <= {VEC_W{1'b0}}; vec_build_b <= {VEC_W{1'b0}};
     end else if (clear) begin
         wr_ptr_a   <= 0; wr_ptr_b   <= 0; wr_fill_a  <= 0; wr_fill_b  <= 0;
+        vec_build_a <= {VEC_W{1'b0}}; vec_build_b <= {VEC_W{1'b0}};
     end else if (swap) begin
         // Reset the NEW writer's bank (it was just drained by PE)
         // New writer's bank = next_wr_sel (after swap)
         if (next_wr_sel == 1'b0) begin
             wr_ptr_a  <= 0;
             wr_fill_a <= 0;  // Reset fill count for new writer's bank
+            vec_build_a <= {VEC_W{1'b0}};
         end else begin
             wr_ptr_b  <= 0;
             wr_fill_b <= 0;  // Reset fill count for new writer's bank
+            vec_build_b <= {VEC_W{1'b0}};
         end
     end else if (do_write) begin
         if (wr_sel == 1'b0) begin
@@ -159,80 +312,11 @@ end
 wire do_vec_read = rd_vec_en && rd_vec_valid;
 wire do_read = rd_en && !buf_empty && !do_vec_read;
 
-// Current memory word
-wire [DATA_W-1:0] rd_mem = (rd_sel == 1'b0)
-    ? mem_a[rd_ptr]
-    : mem_b[rd_ptr];
-
-// ---- INT8 path: read one byte, sign-extend to OUT_WIDTH ----
-wire [7:0] rd_byte = (rd_sub == 0) ? rd_mem[ 7: 0] :
-                     (rd_sub == 1) ? rd_mem[15: 8] :
-                     (rd_sub == 2) ? rd_mem[23:16] :
-                                     rd_mem[31:24];
-wire [OUT_WIDTH-1:0] rd_int8 = {{(OUT_WIDTH-8){rd_byte[7]}}, rd_byte};
-
-// When buffer is empty, output 0 to avoid PE latching stale data
-assign rd_data = buf_empty ? {OUT_WIDTH{1'b0}} : rd_int8;
-
-// ---- Vector preview path ----
-// rd_vec starts at the same rd_ptr/rd_sub as rd_data.  The port exposes up to
-// VEC_LANES lanes; rd_vec_lanes selects how many lanes a read consumes.
-genvar lane_i;
-generate
-    for (lane_i = 0; lane_i < VEC_LANES; lane_i = lane_i + 1) begin : gen_rd_vec
-        // Packed INT8 reads each lane's byte at the same sub_idx from two
-        // consecutive words (even/odd K).  Using rd_sub + lane_i (same as
-        // unpacked) is correct because packed mode advances rd_sub by
-        // 2*VEC_LANES per K step, naturally stepping over word pairs.
-        wire [5:0] lane_abs = ({4'b0000, rd_sub} + lane_i[5:0]);
-        wire [ADDR_W-1:0] int_word_addr = rd_ptr + lane_abs[5:2];
-        wire [1:0] sub_idx      = lane_abs[1:0];
-
-        wire [DATA_W-1:0] int_word = (rd_sel == 1'b0) ? mem_a[int_word_addr] : mem_b[int_word_addr];
-
-        wire [7:0] vec_byte = (sub_idx == 2'd0) ? int_word[ 7: 0] :
-                              (sub_idx == 2'd1) ? int_word[15: 8] :
-                              (sub_idx == 2'd2) ? int_word[23:16] :
-                                                   int_word[31:24];
-        // Packed INT8: read additional K bytes from K-layers ahead.
-        // word offset = j * int_words_per_k where j runs from 1 to PACKED_LANES-1.
-        wire [ADDR_W-1:0] int_words_per_k = (rd_vec_lanes_eff + 3) >> 2;
-        wire [DATA_W-1:0] int_word2 = packed_int8 && (PACKED_LANES >= 2)
-            ? ((rd_sel == 1'b0) ? mem_a[int_word_addr + 1 * int_words_per_k]
-                                 : mem_b[int_word_addr + 1 * int_words_per_k])
-            : {DATA_W{1'b0}};
-        wire [DATA_W-1:0] int_word3 = packed_int8 && (PACKED_LANES >= 3)
-            ? ((rd_sel == 1'b0) ? mem_a[int_word_addr + 2 * int_words_per_k]
-                                 : mem_b[int_word_addr + 2 * int_words_per_k])
-            : {DATA_W{1'b0}};
-        wire [DATA_W-1:0] int_word4 = packed_int8 && (PACKED_LANES >= 4)
-            ? ((rd_sel == 1'b0) ? mem_a[int_word_addr + 3 * int_words_per_k]
-                                 : mem_b[int_word_addr + 3 * int_words_per_k])
-            : {DATA_W{1'b0}};
-        wire [7:0] vec_byte2 = (sub_idx == 2'd0) ? int_word2[ 7: 0] :
-                               (sub_idx == 2'd1) ? int_word2[15: 8] :
-                               (sub_idx == 2'd2) ? int_word2[23:16] :
-                                                    int_word2[31:24];
-        wire [7:0] vec_byte3 = (sub_idx == 2'd0) ? int_word3[ 7: 0] :
-                               (sub_idx == 2'd1) ? int_word3[15: 8] :
-                               (sub_idx == 2'd2) ? int_word3[23:16] :
-                                                    int_word3[31:24];
-        wire [7:0] vec_byte4 = (sub_idx == 2'd0) ? int_word4[ 7: 0] :
-                               (sub_idx == 2'd1) ? int_word4[15: 8] :
-                               (sub_idx == 2'd2) ? int_word4[23:16] :
-                                                    int_word4[31:24];
-
-        wire [OUT_WIDTH-1:0] vec_lane =
-            packed_int8 ? (PACKED_LANES == 4 ? {vec_byte4, vec_byte3, vec_byte2, vec_byte}
-                                            : {vec_byte2, vec_byte})
-                        : {{(OUT_WIDTH-8){vec_byte[7]}}, vec_byte};
-
-            assign rd_vec[lane_i*OUT_WIDTH +: OUT_WIDTH] =
-                rd_vec_valid ? vec_lane : {OUT_WIDTH{1'b0}};
-    end
-endgenerate
-
 assign rd_vec_valid = (rd_vec_lanes_eff != 5'd0) && (cur_rd_fill >= rd_vec_lanes_fill);
+wire [ADDR_W-1:0] rd_vec_group_idx = vec_group_idx(rd_ptr, vec_group_words);
+wire [VEC_W-1:0] rd_vec_cached = (rd_sel == 1'b0) ? vec_mem_a[rd_vec_group_idx]
+                                                   : vec_mem_b[rd_vec_group_idx];
+assign rd_vec = rd_vec_valid ? rd_vec_cached : {VEC_W{1'b0}};
 
 wire [7:0] vec_abs_next = packed_int8
     ? ({4'b0000, rd_sub} + (rd_vec_lanes_eff * PACKED_LANES))

@@ -38,6 +38,7 @@ __pycache__/
 /sim/vgg_e2e/
 /sim/vgg_closed_loop/
 /sim/vgg_closed_loop_sweep_*/
+/sim/vgg_closed_loop_full_sweep_*/
 
 # Generated CIFAR-10 sample images
 /pic/test_cifar10_*.jpg

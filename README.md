@@ -57,11 +57,11 @@ which verilator iverilog vvp
 Files that are **not** tracked in git and must be obtained or generated:
 
 | File | Why missing | How to get it |
-|---|---|---|
-| `RepOpt/06_RepOpt_VGG/runs/…/qat_int8_quantized.pth` | Large model checkpoint, gitignored | Download from shared storage or re‑train |
-| `sim/pth_repopt_probe/model_plan.json` | Generated from the checkpoint | Run `pth_to_npu_assets.py` (see below) |
+|---|---|---|---|
+| `RepOpt/06_RepOpt_VGG/runs/…/qat_int8_quantized.pth` | Model checkpoint (~5 MB), gitignored | Download from GitHub Releases (see step 3) |
+| `sim/pth_repopt_probe/model_plan.json` | Generated from the checkpoint | Run `pth_to_npu_assets.py` (see step 3) |
 
-The repo does **not** ship the trained RepOpt VGG checkpoint because it is ~50–100 MB of binary weight data. The tiny‑conv smoke test (`tb_soc_pth_tiny_conv.v`) generates its own small checkpoint on the fly and does **not** require an external `.pth` file — use that for a first smoke after cloning.
+The repo does **not** ship the trained RepOpt VGG checkpoint because it is a ~5 MB binary file hosted via GitHub Releases. The tiny‑conv smoke test (`tb_soc_pth_tiny_conv.v`) generates its own small checkpoint on the fly and does **not** require an external `.pth` file — use that for a first smoke after cloning.
 
 ## Full Setup (First Clone)
 
@@ -90,10 +90,19 @@ Expected output: `PASS` with classification result.
 
 ### 3. Run the main VGG flows (requires model checkpoint)
 
-First obtain the model checkpoint. Place it at the expected default path:
+The model checkpoint is hosted as a GitHub Release asset. Download it:
 
-```text
-RepOpt/06_RepOpt_VGG/runs/cifar10_repopt_vgglike_qat/qat_int8_quantized.pth
+```bash
+mkdir -p RepOpt/06_RepOpt_VGG/runs/cifar10_repopt_vgglike_qat
+curl -L -o RepOpt/06_RepOpt_VGG/runs/cifar10_repopt_vgglike_qat/qat_int8_quantized.pth \
+  https://github.com/demonk69/726_NPU/releases/download/model-v4.1.0/qat_int8_quantized.pth
+```
+
+If you have the `gh` CLI:
+
+```bash
+gh release download model-v4.1.0 -R demonk69/726_NPU \
+  -D RepOpt/06_RepOpt_VGG/runs/cifar10_repopt_vgglike_qat
 ```
 
 Alternatively pass `--pth <path>` to the runner scripts.
@@ -102,7 +111,7 @@ Generate the model plan from the checkpoint:
 
 ```bash
 python3 tools/pth/pth_to_npu_assets.py \
-    --pth RepOpt/06_RepOpt_VGG/runs/.../qat_int8_quantized.pth \
+    --pth RepOpt/06_RepOpt_VGG/runs/cifar10_repopt_vgglike_qat/qat_int8_quantized.pth \
     --out-dir sim/pth_repopt_probe
 ```
 

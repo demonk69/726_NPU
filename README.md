@@ -81,7 +81,9 @@ cd 726_NPU
 bash setup.sh --install
 ```
 
-This installs missing system packages (Icarus, Verilator from source), Python packages (PyTorch CPU, Pillow), downloads the model checkpoint from GitHub Releases, and generates `model_plan.json` — all in one step.  Run `bash setup.sh` (without `--install`) first to see what needs to be done.
+This installs missing system packages (Icarus, Verilator from source), Python packages (PyTorch CPU, Pillow), downloads the model checkpoint from GitHub Releases, and generates `model_plan.json` — all in one step.
+
+Run `bash setup.sh` without `--install` to check prerequisites only — it prints a status table showing which items are present and which are missing, without modifying anything.
 
 ### 2. Run a self‑contained smoke (no external model needed)
 

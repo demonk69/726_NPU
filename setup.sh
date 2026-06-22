@@ -203,6 +203,7 @@ else
         if [[ $INSTALL -eq 1 ]]; then
             python3 "$ROOT/tools/pth/pth_to_npu_assets.py" \
                 --pth "$PTH_FILE" \
+                --spec "$ROOT/tools/pth/examples/repopt_vgg_int8_spec.json" \
                 --out-dir "$ROOT/sim/pth_repopt_probe"
             if [[ -f "$PLAN_FILE" ]]; then
                 ok "model_plan.json generated"

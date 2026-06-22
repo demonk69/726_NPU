@@ -160,47 +160,38 @@ echo "=== Model Files ==="
 PTH_DIR="$ROOT/RepOpt/06_RepOpt_VGG/runs/cifar10_repopt_vgglike_qat"
 PTH_FILE="$PTH_DIR/qat_int8_quantized.pth"
 PTH_URL="https://github.com/demonk69/726_NPU/releases/download/model-v4.1.0/qat_int8_quantized.pth"
+PLAN_FILE="$ROOT/sim/pth_repopt_probe/model_plan.json"
 
-if [[ -f "$PTH_FILE" ]]; then
-    ok "checkpoint  qat_int8_quantized.pth ($(du -h "$PTH_FILE" | cut -f1))"
-    PASS=$((PASS + 1))
-else
-    warn "checkpoint  $PTH_FILE"
+ensure_pth() {
+    if [[ -f "$PTH_FILE" ]]; then
+        return 0
+    fi
     if [[ $INSTALL -eq 1 ]]; then
+        info "downloading checkpoint ..."
         mkdir -p "$PTH_DIR"
-
         if command -v curl &>/dev/null; then
-            DL="curl -L -o"
+            curl -L -o "$PTH_FILE" "$PTH_URL"
         elif command -v wget &>/dev/null; then
-            DL="wget -O"
+            wget -O "$PTH_FILE" "$PTH_URL"
         else
             install_apt curl
-            DL="curl -L -o"
+            curl -L -o "$PTH_FILE" "$PTH_URL"
         fi
-
-        $DL "$PTH_FILE" "$PTH_URL"
         if [[ -f "$PTH_FILE" ]]; then
-            ok "checkpoint downloaded"
-            PASS=$((PASS + 1))
-            ((MISS--))
-        else
-            err "checkpoint download failed"
+            return 0
         fi
     fi
-    MISS=$((MISS + 1))
-fi
-
-# ── model_plan.json ──
-
-PLAN_FILE="$ROOT/sim/pth_repopt_probe/model_plan.json"
+    return 1
+}
 
 if [[ -f "$PLAN_FILE" ]]; then
     ok "model_plan  $PLAN_FILE"
     PASS=$((PASS + 1))
 else
-    if [[ -f "$PTH_FILE" ]]; then
-        warn "model_plan  (checkpoint present, needs generation)"
+    warn "model_plan  $PLAN_FILE"
+    if ensure_pth; then
         if [[ $INSTALL -eq 1 ]]; then
+            info "generating model plan ..."
             python3 "$ROOT/tools/pth/pth_to_npu_assets.py" \
                 --pth "$PTH_FILE" \
                 --spec "$ROOT/tools/pth/examples/repopt_vgg_int8_spec.json" \
@@ -208,16 +199,13 @@ else
             if [[ -f "$PLAN_FILE" ]]; then
                 ok "model_plan.json generated"
                 PASS=$((PASS + 1))
-                ((MISS--))
+                MISS=$((MISS - 1))
             else
                 err "model_plan generation failed"
             fi
         fi
-        MISS=$((MISS + 1))
-    else
-        warn "model_plan  (needs checkpoint first)"
-        MISS=$((MISS + 1))
     fi
+    MISS=$((MISS + 1))
 fi
 
 # ── summary ──

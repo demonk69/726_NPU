@@ -38,6 +38,13 @@ Ensure Verilator and Icarus are on `$PATH`:
 which verilator iverilog vvp
 ```
 
+Or run the setup script to check and auto-install everything:
+
+```bash
+bash setup.sh          # check mode: prints which items are missing
+bash setup.sh --install # auto-installs missing Python, Icarus, Verilator, and model files
+```
+
 ## Repository Layout
 
 ```
@@ -65,12 +72,16 @@ The repo does **not** ship the trained RepOpt VGG checkpoint because it is a ~5 
 
 ## Full Setup (First Clone)
 
-### 1. Clone the repo
+### 1. Clone and install prerequisites
 
 ```bash
 git clone git@github.com:demonk69/726_NPU.git
 cd 726_NPU
+
+bash setup.sh --install
 ```
+
+This installs missing system packages (Icarus, Verilator from source), Python packages (PyTorch CPU, Pillow), downloads the model checkpoint from GitHub Releases, and generates `model_plan.json` — all in one step.  Run `bash setup.sh` (without `--install`) first to see what needs to be done.
 
 ### 2. Run a self‑contained smoke (no external model needed)
 
@@ -88,38 +99,7 @@ vvp -M. -I sim/pth_tiny_conv /tmp/tb_tiny.vvp
 
 Expected output: `PASS` with classification result.
 
-### 3. Run the main VGG flows (requires model checkpoint)
-
-The model checkpoint is hosted as a GitHub Release asset. Download it:
-
-```bash
-mkdir -p RepOpt/06_RepOpt_VGG/runs/cifar10_repopt_vgglike_qat
-curl -L -o RepOpt/06_RepOpt_VGG/runs/cifar10_repopt_vgglike_qat/qat_int8_quantized.pth \
-  https://github.com/demonk69/726_NPU/releases/download/model-v4.1.0/qat_int8_quantized.pth
-```
-
-If you have the `gh` CLI:
-
-```bash
-gh release download model-v4.1.0 -R demonk69/726_NPU \
-  -D RepOpt/06_RepOpt_VGG/runs/cifar10_repopt_vgglike_qat
-```
-
-Alternatively pass `--pth <path>` to the runner scripts.
-
-Generate the model plan from the checkpoint:
-
-```bash
-python3 tools/pth/pth_to_npu_assets.py \
-    --pth RepOpt/06_RepOpt_VGG/runs/cifar10_repopt_vgglike_qat/qat_int8_quantized.pth \
-    --out-dir sim/pth_repopt_probe
-```
-
-This creates `sim/pth_repopt_probe/model_plan.json` and model asset hex files.
-
-### 4. Quick Start
-
-Run the verified fast baseline:
+### 3. Run the main VGG flows
 
 ```bash
 ./run_vgg_e2e.sh

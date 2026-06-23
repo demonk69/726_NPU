@@ -1,158 +1,168 @@
 # Multi-Core NPU Architecture
 
-## 1. Current Single-Core Architecture (Baseline)
+## 1. Baseline
 
-```
-SoC (soc_top)
-├── PicoRV32 CPU (RV32IMC)
-│   ├── IRQ[7] ← NPU done
-│   └── Memory bus → SRAM / DRAM / NPU MMIO
-├── SRAM (4KB) — firmware code + data
-├── DRAM model (60KB) — weights, activations, results
-├── AXI-Lite bridge — CPU mem bus → NPU AXI4-Lite
+The working baseline is:
+
+```text
+soc_top style system
+├── PicoRV32 reference/control CPU
+│   ├── firmware instruction/data SRAM
+│   ├── packs runtime A tiles
+│   ├── programs NPU MMIO registers
+│   ├── polls NPU STATUS
+│   └── runs CPU-side requant/scatter/pool/classifier code
+├── shared memory model in simulation
 └── 1x npu_top
-    ├── npu_axi_lite — MMIO register file @ 0x02000000
-    ├── npu_ctrl   — ping-pong overlap FSM
-    ├── npu_dma    — AXI4 master DMA (dual FSM: load + writeback)
-    ├── W/A pingpong_buf (64-word depth each)
-    ├── 16x16 reconfigurable PE array
-    └── Result FIFO + tile serializer + post-process
+    ├── AXI-Lite register slave
+    ├── AXI master DMA
+    ├── W/A ping-pong buffers
+    ├── reconfigurable 16x16 PE array
+    └── result FIFO and writeback path
 ```
 
-Single NPU has:
-- 1x AXI4-Lite slave (CPU config)
-- 1x AXI4 master (DMA to DRAM)
-- 1x IRQ output
+This plan keeps PicoRV32 as the reference/control CPU. ZCU102 is the FPGA
+carrier for the PL design and resource target.
 
-## 2. Target Multi-Core Architecture
+## 2. Target Multi-Core Structure
 
-```
-SoC (soc_mc_top)
-├── PicoRV32 CPU
-│   ├── IRQ[7]   ← Core0 done
-│   ├── IRQ[8]   ← Core1 done
-│   └── IRQ[9+]  ← Core2+ done (if NUM_CORES > 2)
-├── SRAM (4KB)
-├── AXI-Lite bridge (multi-core address decode)
-├── DRAM model (multi-port: 1 CPU + NUM_CORES NPU ports)
-└── npu_mc_top (parameter NUM_CORES=N)
-    ├── npu_top #0 (complete instance)
-    │   ├── AXI-Lite slave ← bridge (addr matched)
-    │   ├── AXI4 master → DRAM port 0
-    │   └── IRQ → CPU IRQ[7]
-    ├── npu_top #1 (complete instance)
-    │   ├── AXI-Lite slave ← bridge (addr matched)
-    │   ├── AXI4 master → DRAM port 1
-    │   └── IRQ → CPU IRQ[8]
-    └── npu_top #N ... (generate)
+```text
+PicoRV32 multi-core NPU system
+├── PicoRV32 reference/control CPU
+│   ├── firmware SRAM/BRAM
+│   ├── simple memory bus
+│   └── multi-core MMIO bridge
+├── shared memory path
+│   ├── simulation: shared DRAM model / multi-port model
+│   └── implementation: board memory fabric or shared memory controller
+└── npu_mc_top(NUM_CORES)
+    ├── npu_top #0
+    │   ├── AXI-Lite register window
+    │   ├── AXI master memory port
+    │   └── IRQ/status output
+    ├── npu_top #1
+    │   ├── AXI-Lite register window
+    │   ├── AXI master memory port
+    │   └── IRQ/status output
+    └── ...
 ```
 
-**Key property: each `npu_top` instance is UNMODIFIED from the single-core design.**
+Each `npu_top` is kept unchanged in the first version. The multi-core logic is
+outside the core: address decode, replicated ports, memory routing, and firmware
+scheduling.
 
-## 3. Work Partitioning Strategy
+## 3. ZCU102 Boundary
 
-### Why partition by N (output channel)
+ZCU102-specific board validation is not a planning checkpoint here. The RTL
+should still be written so it can map to ZCU102 resources cleanly:
 
-VGG Conv2D → GEMM mapping:
+- Use a synthesizable top-level boundary around PicoRV32, `npu_mc_top`, and memory/interconnect ports.
+- Keep simulation-only `dram_model` out of the synthesis boundary.
+- Keep clock/reset assumptions simple: one system clock and one active-low reset for the first version.
+- Avoid assumptions from any previous board-specific runtime path.
 
-```
-C[M, N] = A_im2col[M, K] × W_col[K, N] + bias[N]
-M = OH × OW       (output spatial positions)
-K = Cin × KH × KW (convolution window)
-N = Cout           (output channels)
-```
+## 4. Work Partitioning
 
-The tiled decomposition:
+Conv2D is mapped to GEMM:
 
-```
-for m in [0..M step 16]:        ← spatial tile loop
-    pack A_tile from dense IFM
-    for n in [0..N step 16]:    ← channel tile loop
-        C_tile[m][n] = Σ_k A[k] × W[k]
-```
-
-Within a layer:
-- **Different (M,N) tiles write to DISJOINT OFM regions** — no RAW/WAR/WAW hazard
-- **K accumulation is fully internal to PE accumulators** — firmware sees only complete results
-- **The OFM is zero-cleared before each layer** — no read-modify-write between tiles
-
-Therefore: **partition the N loop across cores. Zero intra-layer dependency.**
-
-```
-Layer L: Cout=128, TR=16, TC=16
-
-Core0: N ∈ [0, 63]   — responsible for output channels 0..63
-       Iterates all M tiles, iterates all K (hardware), writes OFM[0..63]
-
-Core1: N ∈ [64, 127] — responsible for output channels 64..127
-       Iterates all M tiles, iterates all K (hardware), writes OFM[64..127]
-
-Weights:   read-only, shared, no conflict (each core reads different N slice)
-Input:     read-only, shared, no conflict (each core needs full spatial range)
-Output:    disjoint N slices, no conflict
+```text
+C[M, N] = A[M, K] x W[K, N] + bias[N]
+M = OH x OW
+K = Cin x KH x KW
+N = Cout
 ```
 
-### Layer barrier
+For a fixed `M` tile:
 
-Between layers, cores must synchronize:
+- `A[M,K]` is identical for all output-channel slices.
+- Each core reads a different `W[K,N_tile]`.
+- Each core writes a disjoint output-channel slice.
+- K accumulation stays inside each NPU core.
 
-```
-Layer L complete → all cores done → firmware swaps IFM/OFM buffers
-→ Clears new OFM → launches all cores for Layer L+1
-```
+Therefore the first multi-core partition is by `N` tile.
 
-This barrier is implemented by firmware polling each core's STATUS register.
+## 5. First-Pass Scheduling Model
 
-## 4. Why NOT Partition by K or M
+Use a conservative one-N-tile-per-core-per-round scheduler:
 
-### Partition by K — REQUIRES inter-core dependency
+```text
+for each layer:
+  clear OFM
+  for each M tile:
+    PicoRV32 packs A_WORK_SHARED once
 
-```
-Core0: partial_sum[m][n] = A[k=0..7] × W[k=0..7]
-Core1: partial_sum[m][n] = A[k=8..15] × W[k=8..15]
-                    ↓
-Need reduction: full[m][n] = partial_sum_0 + partial_sum_1
-```
+    for n_round in N tiles grouped by NUM_CORES:
+      launch core0 on N tile n_round*NUM_CORES + 0
+      launch core1 on N tile n_round*NUM_CORES + 1
+      ...
+      poll all launched cores
+      postprocess each core's R_WORK into dense OFM
 
-This requires either:
-- Hardware reduction tree (complex, not in current design)
-- Firmware read-modify-write accumulation (slow, breaks the DRAM write-back model)
-- Changing PE accumulators to support inter-core partial-sum injection
-
-**Not viable without major hardware changes.**
-
-### Partition by M — works, but worse load balance
-
-For many VGG layers, M is small (e.g., OH×OW=4 for early layers with pooling).
-Partitioning 4 rows across 2+ cores leaves some cores idle.
-N is generally larger (Cout=64..256) and divides better across cores.
-
-## 5. MMIO Address Map
-
-```
-0x02000000 - 0x020000FF : Core 0 register file  (256B)
-0x02000100 - 0x020001FF : Core 1 register file  (256B)
-0x02000200 - 0x020002FF : Core 2 register file  (256B)
-...
+  layer barrier is complete when all M/N tiles are done
 ```
 
-Core selection via `addr[11:8]` in the AXI-Lite bridge.
-Lower bits `addr[7:0]` pass through unchanged to the selected core's register file.
+This keeps the current static weight layout valid because each core still runs
+one existing N tile at a time.
 
-## 6. IRQ Mapping
+## 6. Later Optimized Scheduling
 
+After the conservative scheduler is correct, a later optimization can assign a
+contiguous N range to each core:
+
+```text
+core0: N tiles [0 .. k)
+core1: N tiles [k .. 2k)
 ```
-npu_irq_core0 → cpu_irq[7]
-npu_irq_core1 → cpu_irq[8]
-npu_irq_core2 → cpu_irq[9]
-npu_irq_core3 → cpu_irq[10]
+
+This requires a matching contiguous weight stream layout. The current generator
+aligns every N tile independently, while the RTL's internal multi-N-tile stride
+does not include that per-tile alignment. Do not enable multi-N-tile-per-core
+launches until the weight repack is changed and tested.
+
+## 7. MMIO Map
+
+Use a 256-byte register window per core:
+
+```text
+0x02000000 - 0x020000FF : Core 0 registers
+0x02000100 - 0x020001FF : Core 1 registers
+0x02000200 - 0x020002FF : Core 2 registers
+0x02000300 - 0x020003FF : Core 3 registers
 ```
 
-PicoRV32 IRQ handler polls STATUS registers of all cores to determine which
-core(s) completed.
+Decode rule:
 
-## 7. Clock and Reset
+```text
+offset = addr - NPU_BASE
+valid  = offset < NUM_CORES * 0x100
+core   = offset[11:8]
+local  = offset[7:0]
+```
 
-All cores share the same `sys_clk` and `sys_rst_n`.
-No per-core clock gating at the top level (each core has its own `npu_power`
-module internally for PE array row/column CE).
+Do not allow high addresses to alias to a valid core.
+
+## 8. Synchronization
+
+The first version uses polling:
+
+- PicoRV32 writes all registers for each launched core.
+- PicoRV32 starts the cores.
+- PicoRV32 polls each launched core's `STATUS` register.
+- If any core reports error, firmware writes the failure marker and halts.
+
+IRQ wiring can exist as an optional debug/status signal, but firmware should not
+depend on IRQ delivery for the first multi-core version.
+
+## 9. Resource Notes
+
+The incremental cost of each extra core is dominated by:
+
+- One 16x16 PE array.
+- Two ping-pong buffers.
+- One DMA engine.
+- One AXI-Lite register block and controller.
+- One result FIFO/writeback path.
+
+PicoRV32 and the multi-core bridge are small compared with the NPU replicas.
+Before moving beyond 2 cores, confirm that buffer storage maps to BRAM or another
+intended memory resource rather than registers.

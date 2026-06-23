@@ -1,47 +1,77 @@
 # Multi-Core NPU Extension Plan
 
 Branch: `feat/multi_core_npu`
-Created: 2026-06-22
+Updated: 2026-06-23
 
-## Overview
+## Scope
 
-Extend the current single-core NPU to a multi-core architecture, targeting 2-4
-cores (parameterizable), to accelerate RepOpt VGG-like CIFAR-10 inference.
+The current working baseline is one `npu_top` controlled by PicoRV32. This plan
+extends that baseline to multiple NPU cores while keeping PicoRV32 as the
+reference/control CPU.
+
+ZCU102 is treated as the carrier FPGA platform only. Board bring-up and board
+validation are out of scope for this plan. The plan focuses on RTL structure,
+resource-aware implementation choices, memory layout, and generated firmware.
+
+## Non-Goals
+
+- Do not replace PicoRV32 as the reference/control CPU.
+- Do not require board validation as a planning checkpoint.
+- Do not change `npu_top` internals for the first multi-core version.
 
 ## Document Index
 
 | Document | Contents |
 |----------|----------|
-| [architecture.md](architecture.md) | Top-level architecture, data dependency analysis, work partitioning strategy |
-| [rtl_changes.md](rtl_changes.md) | All RTL file changes with module-level specifications |
-| [firmware_changes.md](firmware_changes.md) | CPU firmware modifications for multi-core scheduling |
-| [dram_layout.md](dram_layout.md) | DRAM address map and per-core buffer layout |
-| [implementation_order.md](implementation_order.md) | Step-by-step execution order with verification checkpoints |
+| [architecture.md](architecture.md) | PicoRV32 plus multi-NPU architecture, partitioning, synchronization |
+| [rtl_changes.md](rtl_changes.md) | RTL modules to add or adapt, with resource notes |
+| [firmware_changes.md](firmware_changes.md) | Generated PicoRV32 firmware scheduling plan |
+| [dram_layout.md](dram_layout.md) | Shared activation/result/static buffer layout |
+| [implementation_order.md](implementation_order.md) | Step-by-step implementation and regression checkpoints |
 
-## Key Design Decisions
+## Key Decisions
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Core architecture | Full replication of `npu_top` | Each core is an independent black box; zero changes to `npu_top.v` |
-| Core count | Parameter `NUM_CORES` (default 2) | Scalable via generate, start at 2 for validation |
-| Work partitioning | By N (output channel) dimension | Zero inter-core data dependency within a layer |
-| DRAM interface | Per-core dedicated AXI4 slave port | No memory contention between cores |
-| Scheduling | Firmware (CPU) pre-partitions by N, launches all cores | Simple barrier sync between layers |
-| MMIO addressing | Stride `0x100` per core | `Core N` at `0x02000000 + N * 0x100` |
+| Reference CPU | PicoRV32 | Existing single-NPU flow already runs with PicoRV32 |
+| Platform | ZCU102 carrier | Resource target only; board runtime is outside this plan |
+| Core architecture | Replicate `npu_top` | Keeps each NPU core as a known-good black box |
+| First target | `NUM_CORES=2` | Smallest useful multi-core target, lower debug risk |
+| Later target | `NUM_CORES=4` | Only after resource/timing and 2-core firmware are stable |
+| Partition axis | Output-channel `N` tiles | Independent writes, no cross-core reduction |
+| A workspace | Shared `A_WORK` | A depends on M/K only, not N; pack once per M tile |
+| Result workspace | Per-core `R_WORK[i]` | Each NPU writes its own raw INT32 results |
+| Weight layout first pass | Existing per-N-tile layout | Avoids changing static asset generation at the same time |
+| Scheduling first pass | One N tile per core per round | Conservative and matches current weight stride |
+| Optimized scheduling | Multi-N-tile range per core | Later only after contiguous weight repack is defined |
+| Completion sync | PicoRV32 polls STATUS | Simpler and does not depend on IRQ behavior |
 
-## Workload Analysis: VGG on CIFAR-10
+## Workload Summary
 
-9 Conv layers, 1024 total GEMM tiles. Within each layer:
+For each Conv2D layer, the NPU executes GEMM:
 
-- **M (spatial) and N (channel) tiles are independent** — write to disjoint OFM regions
-- **K accumulation is fully internal to the NPU** — firmware never sees partial K results
-- Therefore: partition tiles by N across cores; zero intra-layer dependency
-- Per-layer barrier: all cores must finish before next layer's IFM is ready
+```text
+C[M, N] = A[M, K] x W[K, N] + bias[N]
+```
 
-## Effort Distribution
+When partitioning by `N`, all cores share the same packed `A[M,K]` for a given
+spatial tile. Each core reads a different `W[K,N_tile]`, writes a different
+output-channel slice, and uses different bias/Q24 multiplier entries.
 
-| Area | Effort | Complexity |
-|------|--------|------------|
-| RTL hardware | ~30% | Low — mostly replication and wiring |
-| CPU firmware | ~50% | High — new RISC-V multi-core scheduling logic |
-| Python tools | ~20% | Medium — per-core buffer allocation and codegen |
+## Resource Policy
+
+- Keep `FP16_ENABLE=0` for the first multi-core implementation.
+- Keep derived performance counter logic disabled unless explicitly needed.
+- Start with 2 cores; do not assume 4 cores until synthesis resource/timing data exists.
+- Ensure `pingpong_buf` infers BRAM or banked memory before scaling core count.
+- Treat per-core `PPB_DEPTH` as a major BRAM knob.
+- Keep PicoRV32 firmware and data memory sizing explicit; current closed-loop uses `MEM_WORDS=8192`.
+
+## Expected Effort Split
+
+| Area | Complexity | Notes |
+|------|------------|-------|
+| RTL wrapper and interconnect | Medium | Mostly replication, but bridge and shared memory routing need care |
+| Firmware generator | High | Multi-core launch, polling, postprocess, and edge handling live here |
+| Memory layout | Medium | Shared A buffer, per-core R buffers, moved static/descriptor regions |
+| Resource cleanup | Medium | Buffer inference and timing become more important as cores scale |

@@ -1,117 +1,101 @@
 # Implementation Order
 
-## Phase 1: RTL Infrastructure (est. 1-2 days)
+## Phase 0: Lock The Correct Plan
 
-### Step 1.1: `rtl/top/npu_mc_top.v`
-- [ ] Create `npu_mc_top.v` with parameter `NUM_CORES`
-- [ ] `generate for` loop instantiating `NUM_CORES` `npu_top` instances
-- [ ] Connect all replicated ports (AXI4-Lite × N, AXI4 Master × N, IRQ × N)
-- **Verify**: Elaboration with Verilator (lint-only, no testbench yet)
+- [x] Treat PicoRV32 as the reference/control CPU.
+- [x] Treat ZCU102 as the carrier/resource target only.
+- [x] Remove previous board-runtime assumptions from the multi-core plan.
+- [x] Use shared `A_WORK` and per-core `R_WORK`.
+- [x] Start with conservative one-N-tile-per-core scheduling.
 
-### Step 1.2: `rtl/soc/dram_multi_port.v`
-- [ ] Create `dram_multi_port.v` with parameter `NUM_PORTS`
-- [ ] Instantiate backing store array
-- [ ] Implement round-robin write arbiter
-- [ ] Concurrent read ports
-- **Verify**: Standalone testbench with CPU read/write + NPU DMA read/write
+## Phase 1: RTL Infrastructure
 
-### Step 1.3: Modify `rtl/soc/axi_lite_bridge.v`
-- [ ] Add `NUM_CORES` and `NPU_CORE_STRIDE` parameters
-- [ ] Add address decode: `core_sel = addr[11:8]`
-- [ ] Replicate AXI4-Lite output ports to `NUM_CORES` channels
-- [ ] Only drive the selected core's channel
-- **Verify**: Existing single-core tests still pass (NUM_CORES=1)
+### Step 1.1: `npu_mc_top.v`
 
-### Step 1.4: `rtl/soc/soc_mc_top.v`
-- [ ] Create `soc_mc_top.v` with parameter `NUM_CORES`
-- [ ] Integrate: PicoRV32 + SRAM + multi-port DRAM + multi-core AXI-Lite bridge + `npu_mc_top`
-- [ ] IRQ mapping: `cpu_irq[7+i] <= npu_irq[i]`
-- **Verify**: Elaboration with Verilator (lint-only)
+- [ ] Add `NUM_CORES` parameter.
+- [ ] Replicate `npu_top` instances with generate.
+- [ ] Use flattened AXI-Lite and AXI master buses.
+- [ ] Expose `npu_irq[NUM_CORES-1:0]` for optional status/debug.
+- Verify: lint/elaborate `NUM_CORES=1` and `NUM_CORES=2`.
 
-## Phase 2: Single-Core Regression Gate (est. 0.5 day)
+### Step 1.2: `axi_lite_mc_bridge.v`
 
-Before proceeding to multi-core firmware, verify that the new infrastructure
-works with the existing single-core VGG flow:
+- [ ] Decode `NPU_BASE + core*0x100 + local_offset`.
+- [ ] Reject or safely handle offsets outside `NUM_CORES * 0x100`.
+- [ ] Forward only one PicoRV32 transaction to the selected core.
+- [ ] Keep the existing single-core `axi_lite_bridge.v` unchanged.
+- Verify: unit test writes and reads different registers in core0/core1.
 
-- [ ] Create `tb/tb_soc_mc_smoke.v` — instantiates `soc_mc_top` with `NUM_CORES=1`
-- [ ] Run existing VGG E2E test through the new SoC (firmware only uses Core 0)
-- [ ] Run existing VGG closed-loop test through the new SoC
-- **Gate**: Both tests pass identically to baseline `soc_top` version
+### Step 1.3: Simulation Shared Memory
 
-## Phase 3: Multi-Core Firmware (est. 2-3 days)
+- [ ] Add `dram_multi_port.v` with one CPU simple port and `NUM_CORES` NPU AXI ports.
+- [ ] Use one shared backing store.
+- [ ] Serialize simultaneous writes deterministically.
+- Verify: CPU writes can be read by all NPU ports; NPU writes are visible to CPU.
 
-### Step 3.1: Python generator changes
-- [ ] Add `NUM_CORES` config to `gen_vgg_closed_loop.py`
-- [ ] Update DRAM layout constants (per-core A_WORK, R_WORK)
-- [ ] Update `emit_conv_layer_loop()`:
-  - [ ] Inner loop: per-core launch (config N_DIM = N_PER_CORE, W_ADDR offset, etc.)
-  - [ ] Poll loop: check all cores' STATUS registers
-  - [ ] Post-process: per-core result read + scatter
-- [ ] Update `emit_pack_a_tile()` for per-core A_WORK buffers
-- [ ] Update `emit_wait_npu_done()` for multi-STATUS polling
+### Step 1.4: `soc_mc_top.v`
 
-### Step 3.2: Firmware verification (offline)
-- [ ] Generate firmware for NUM_CORES=2, image index 0
-- [ ] Inspect generated assembly for correctness (register reuse, branch targets, DRAM address offsets)
-- [ ] Compare generated per-core A_WORK contents with single-core A_WORK (should be identical for N ranges)
+- [ ] Integrate PicoRV32, SRAM, `dram_multi_port`, `axi_lite_mc_bridge`, and `npu_mc_top`.
+- [ ] Build CPU IRQ vector with a single assignment or keep IRQ unused.
+- Verify: `NUM_CORES=1` runs existing closed-loop firmware unchanged or with only base-name changes.
 
-## Phase 4: End-to-End Multi-Core VGG Test (est. 1-2 days)
+## Phase 2: Firmware Generator
 
-### Step 4.1: Testbench
-- [ ] Create `tb/tb_soc_mc_vgg_closed_loop.v` or adapt existing testbench
-  - Load multi-core firmware into SRAM
-  - Load multi-core DRAM image into multi-port DRAM
-  - Route per-core AXI4 master ports to corresponding DRAM ports
-  - Monitor MARKER_ADDR for PASS/FAIL
+### Step 2.1: Layout Constants
 
-### Step 4.2: Run and debug
-- [ ] Run test with NUM_CORES=2, image index 0
-- [ ] Compare output classification with single-core (must be identical)
-- [ ] Verify per-core STATUS polling works (no missed IRQs, no deadlocks)
-- [ ] Verify layer barrier synchronization
-- [ ] Run full regression (all 10 CIFAR-10 test images)
+- [ ] Move `FEAT_BASE`, `SCORE_BASE`, `MARKER_ADDR`, `DESC_BASE`, and `STATIC_BASE` per `dram_layout.md`.
+- [ ] Emit `A_WORK_SHARED`.
+- [ ] Emit `R_WORK_BASE[core]` and `R_WORK_STRIDE`.
+- [ ] Emit `NUM_CORES` and `NPU_CORE_STRIDE`.
 
-### Step 4.3: Performance validation
-- [ ] Measure cycle count for 2-core vs 1-core
-- [ ] Verify speedup ratio (target: ~1.6-1.9x for 2 cores on VGG)
-- [ ] Measure per-core utilization via op_counter performance registers
+### Step 2.2: Multi-Core Conv Scheduler
 
-## Phase 5: Scaling to 4 Cores (est. 1 day)
+- [ ] Pack `A_WORK_SHARED` once per M tile.
+- [ ] Launch up to `NUM_CORES` cores per N-tile round.
+- [ ] Save each launched core's `n_tile` or `n_base` for postprocess.
+- [ ] Poll only launched cores.
+- [ ] Postprocess from per-core `R_WORK` into disjoint OFM channels.
 
-- [ ] Update DRAM layout for 4-core buffers
-- [ ] Bump DRAM_WORDS if needed
-- [ ] Test with NUM_CORES=4
-- [ ] Verify no new issues from wider IRQ vector or address decode
+### Step 2.3: Error Path
 
-## Phase 6: Documentation and Cleanup (est. 0.5 day)
+- [ ] Check `STATUS.error` for every launched core.
+- [ ] Optionally read `ERR_STATUS` for debug marker/log support.
+- [ ] Write fail marker and halt on any core error.
 
-- [ ] Update `doc/architecture.md` with multi-core diagrams
-- [ ] Update `doc/user_manual.md` with multi-core run commands
-- [ ] Add `run_vgg_mc_closed_loop.sh` convenience script
-- [ ] Ensure all existing single-core tests still pass
+## Phase 3: Multi-Core Simulation Tests
 
----
+- [ ] 2-core MMIO smoke: start core0 and core1 on tiny independent GEMMs.
+- [ ] 2-core shared-A smoke: both cores use the same A buffer and different W/R buffers.
+- [ ] 2-core single Conv layer: compare dense OFM against single-core output.
+- [ ] 2-core full closed-loop VGG: compare final class and optional feature buffer.
+- [ ] Run `NUM_CORES=1` regression through the new infrastructure.
 
-## Total Estimated Effort
+## Phase 4: Resource-Oriented Carrier Top
 
-| Phase | Description | Est. Time |
-|-------|-------------|-----------|
-| 1 | RTL infrastructure | 1-2 days |
-| 2 | Single-core regression gate | 0.5 day |
-| 3 | Multi-core firmware | 2-3 days |
-| 4 | E2E multi-core VGG test | 1-2 days |
-| 5 | Scaling to 4 cores | 1 day |
-| 6 | Documentation | 0.5 day |
-| **Total** | | **6-9 days** |
+This phase prepares code for the ZCU102 carrier but does not require board
+validation in this plan.
 
----
+- [ ] Add or define `pico_npu_mc_top.v` as the synthesizable boundary.
+- [ ] Keep simulation-only memory models out of this top.
+- [ ] Expose clean memory/interconnect ports for board integration.
+- [ ] Keep `FP16_ENABLE=0` by default.
+- [ ] Confirm source file lists separate simulation and synthesis modules.
+- [ ] Inspect synthesis resource estimates when available, especially buffers.
 
-## Risk Items
+## Phase 5: Optional Optimization
 
-| Risk | Likelihood | Mitigation |
-|------|-----------|------------|
-| Firmware exceeds SRAM (4KB) with multi-core loops | Medium | Compress loops, share common prologue, increase SRAM |
-| DRAM multi-port write conflicts cause data corruption | Low | Round-robin arbiter ensures serialized writes |
-| N_PER_CORE not divisible by TC (16) for some layers | Low | Pad last tile with zeros (same as single-core edge handling) |
-| IRQ coalescing: both cores finish same cycle, CPU misses one | Low | Firmware polls STATUS, not IRQ edge-sensitive; robust to coalescing |
-| Weight DMA contention: both cores read same static data | Low | Multi-port DRAM allows concurrent reads |
+- [ ] Define contiguous multi-N-tile weight stream format.
+- [ ] Update generator to repack weights for multi-tile ranges.
+- [ ] Change firmware to launch each core on an N range instead of one N tile.
+- [ ] Compare against conservative scheduler before accepting speedup numbers.
+- [ ] Scale from 2 cores to 4 cores only after resource and timing data justify it.
+
+## Risks
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Repacking A per core | CPU work scales with core count | Use shared `A_WORK` |
+| Current weight layout used with multi-N launch | Wrong weights read | Start with one N tile per core; optimize later with new repack |
+| Ping-pong buffers infer registers | Area/timing failure as cores scale | Confirm BRAM inference or redesign buffer storage |
+| Firmware grows beyond SRAM | Boot/runtime failure | Keep looped helpers; increase `MEM_WORDS` if needed |
+| Shared memory model overestimates bandwidth | Unrealistic speedup | Treat simulation speedup as functional only until carrier resource data exists |

@@ -20,19 +20,31 @@ firmware is attempted.
 - Do not trust speedup numbers until correctness and resource checks are stable.
 - Treat simulation multi-port memory as a functional model, not a bandwidth model.
 
+## Verification Status Summary (Updated 2026-06-23)
+
+| Stage | Tests | Status |
+|-------|-------|--------|
+| 0: Static RTL | lint/elab npu_mc_top, soc_mc_top | PASS |
+| 1: RTL Unit | bridge, DRAM, NPU wrapper smoke | PASS (25 checks total) |
+| 2: SoC Integration | MMIO, shared-A | PASS (2 testbenches) |
+| 3: Firmware Generator | Layout, scheduler, error path | PASS (verified through SoC tests) |
+| 4: Single Conv Layer | stage1_0_conv K=27 | NOT RUN |
+| 4: Full VGG 2-core | 9-layer closed loop | Functionally running (both cores busy), but 42x simulation slowdown prevents completion |
+| 5: Performance | cps, speedup, resources | NOT RUN |
+
 ## Pass Criteria Summary
 
-| Level | Required pass condition |
-|-------|-------------------------|
-| RTL lint/elab | No new errors; known legacy warnings only |
-| Bridge unit tests | Correct core selection, local offset, invalid-window behavior |
-| DRAM unit tests | CPU/NPU visibility through one shared backing store |
-| NPU wrapper smoke | Both cores can run independent jobs without cross-talk |
-| `NUM_CORES=1` SoC | Same final result as existing single-core path |
-| 2-core shared-A smoke | Same A buffer feeds both cores; independent R outputs match golden |
-| 2-core Conv layer | Dense OFM matches single-core/Python golden |
-| 2-core full VGG | Final class and optional feature buffer match exact Python target |
-| Resource check | No unexpected register explosion in buffers; timing/resource risk recorded |
+| Level | Required pass condition | Current |
+|-------|-------------------------|---------|
+| RTL lint/elab | No new errors; known legacy warnings only | DONE |
+| Bridge unit tests | Correct core selection, local offset, invalid-window behavior | DONE (8 checks PASS) |
+| DRAM unit tests | CPU/NPU visibility through one shared backing store | DONE (9 checks PASS) |
+| NPU wrapper smoke | Both cores can run independent jobs without cross-talk | DONE (8 checks PASS) |
+| `NUM_CORES=1` SoC | Same final result as existing single-core path | NOT RUN |
+| 2-core shared-A smoke | Same A buffer feeds both cores; independent R outputs match golden | DONE (1109 cycles PASS) |
+| 2-core Conv layer | Dense OFM matches single-core/Python golden | NOT RUN |
+| 2-core full VGG | Final class and optional feature buffer match exact Python target | IN PROGRESS (cores launch, functionally running) |
+| Resource check | No unexpected register explosion in buffers; timing/resource risk recorded | NOT RUN |
 
 ## Stage 0: Static RTL Checks
 

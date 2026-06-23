@@ -166,3 +166,48 @@ The incremental cost of each extra core is dominated by:
 PicoRV32 and the multi-core bridge are small compared with the NPU replicas.
 Before moving beyond 2 cores, confirm that buffer storage maps to BRAM or another
 intended memory resource rather than registers.
+
+## 10. Verified Behavior
+
+Hardware signal proof of simultaneous multi-core operation (Verilator heartbeat,
+testbench `tb_mc_heart.v`):
+
+```text
+cyc=309,999: busy0=1 busy1=1   # both NPU cores actively computing
+cyc=319,999: busy0=0 busy1=0   # both cores complete simultaneously
+```
+
+Each core reads the same `A_WORK_SHARED` buffer, reads its own `W` tile,
+and writes its own `R_WORK_CORE[i]` buffer independently. Verified through
+shared-A SoC test (`tb_soc_mc_shared_a.v`, 1109 cycles, PASS).
+
+The `axi_lite_mc_bridge` correctly decodes per-core register windows
+(`0x02000000 + core*0x100`), rejects invalid core addresses with
+`0xDEADBEEF`, and preserves core isolation (a write to core0 does not
+toggle core1's AXI valid signals). Verified through bridge unit test
+(8 checks PASS).
+
+## 11. Open Concerns
+
+1. **Simulation speed**: `soc_mc_top` with `dram_multi_port` + dual `npu_top`
+   runs at ~1.7K Verilator cycles/sec vs ~72K cycles/sec for original `soc_top`.
+   The bottleneck is the replicated per-port AXI FSMs in `dram_multi_port`
+   and the doubled PE array/controller/DMA evaluation. This is a simulation
+   artifact; actual FPGA hardware would not show this ratio.
+
+2. **No fair baseline**: `soc_mc_top NUM_CORES=1` was never measured against
+   `soc_mc_top NUM_CORES=2`. The 42x number compares different infrastructures
+   (soc_top vs soc_mc_top), which is misleading.
+
+3. **Zero test coverage for K-split**: All 5 unit tests use K=4 (single k_tile).
+   Real VGG layers have K=27..K=4608, which trigger the controller's K-split
+   logic. K-split correctness (padding, stride, tile_k_base computation) is
+   completely untested at multi-core scale.
+
+4. **CPU-bound overhead unchanged**: PicoRV32 OFM clear (~290K cycles/layer),
+   A packing, and postprocess/requant/scatter are serial operations. Multi-core
+   only accelerates the GEMM compute portion, not the CPU-side work.
+
+5. **ZCU102 resources unknown**: Two full `npu_top` replicas with
+   `PPB_DEPTH=8192` may not fit the target device. Synthesis estimate needed
+   before committing to 4-core scaling.

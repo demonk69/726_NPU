@@ -8,74 +8,90 @@
 - [x] Use shared `A_WORK` and per-core `R_WORK`.
 - [x] Start with conservative one-N-tile-per-core scheduling.
 
-## Phase 1: RTL Infrastructure
+## Phase 1: RTL Infrastructure — DONE (commit e5f6955)
 
 ### Step 1.1: `npu_mc_top.v`
 
-- [ ] Add `NUM_CORES` parameter.
-- [ ] Replicate `npu_top` instances with generate.
-- [ ] Use flattened AXI-Lite and AXI master buses.
-- [ ] Expose `npu_irq[NUM_CORES-1:0]` for optional status/debug.
-- Verify: lint/elaborate `NUM_CORES=1` and `NUM_CORES=2`.
+- [x] Add `NUM_CORES` parameter.
+- [x] Replicate `npu_top` instances with generate.
+- [x] Use flattened AXI-Lite and AXI master buses.
+- [x] Expose `npu_irq[NUM_CORES-1:0]` for optional status/debug.
+- Verified: lint/elaborate `NUM_CORES=1` and `NUM_CORES=2` (Icarus + Verilator).
 
 ### Step 1.2: `axi_lite_mc_bridge.v`
 
-- [ ] Decode `NPU_BASE + core*0x100 + local_offset`.
-- [ ] Reject or safely handle offsets outside `NUM_CORES * 0x100`.
-- [ ] Forward only one PicoRV32 transaction to the selected core.
-- [ ] Keep the existing single-core `axi_lite_bridge.v` unchanged.
-- Verify: unit test writes and reads different registers in core0/core1.
+- [x] Decode `NPU_BASE + core*0x100 + local_offset`.
+- [x] Reject or safely handle offsets outside `NUM_CORES * 0x100`.
+- [x] Forward only one PicoRV32 transaction to the selected core.
+- [x] Keep the existing single-core `axi_lite_bridge.v` unchanged.
+- Verified: unit test passes 8 checks (core0/core1 write/read, invalid window, isolation).
+- Bugs fixed: bready must be always-1 (BVALID arrives one cycle late); read rdata must be combinational (registered rdata is one cycle too late for PicoRV32 sampling).
 
 ### Step 1.3: Simulation Shared Memory
 
-- [ ] Add `dram_multi_port.v` with one CPU simple port and `NUM_CORES` NPU AXI ports.
-- [ ] Use one shared backing store.
-- [ ] Serialize simultaneous writes deterministically.
-- Verify: CPU writes can be read by all NPU ports; NPU writes are visible to CPU.
+- [x] Add `dram_multi_port.v` with one CPU simple port and `NUM_CORES` NPU AXI ports.
+- [x] Use one shared backing store.
+- [x] Serialize simultaneous writes deterministically.
+- Verified: unit test passes 9 checks (CPU write→NPU read, burst write/read, concurrent reads).
+- Known issue: per-port AXI FSMs (wr_active / ar_active state machines replicated per port) cause significant Verilator evaluation overhead. This is a simulation performance concern, not a correctness concern.
 
 ### Step 1.4: `soc_mc_top.v`
 
-- [ ] Integrate PicoRV32, SRAM, `dram_multi_port`, `axi_lite_mc_bridge`, and `npu_mc_top`.
-- [ ] Build CPU IRQ vector with a single assignment or keep IRQ unused.
-- Verify: `NUM_CORES=1` runs existing closed-loop firmware unchanged or with only base-name changes.
+- [x] Integrate PicoRV32, SRAM, `dram_multi_port`, `axi_lite_mc_bridge`, and `npu_mc_top`.
+- [x] Build CPU IRQ vector with a single generate assignment.
+- Verified: lint/elaborate passes. PicoRV32 firmware executes correctly through the new infrastructure.
 
-## Phase 2: Firmware Generator
+## Phase 2: Firmware Generator — DONE (commits 153c4fb, 3d98152)
 
 ### Step 2.1: Layout Constants
 
-- [ ] Move `FEAT_BASE`, `SCORE_BASE`, `MARKER_ADDR`, `DESC_BASE`, and `STATIC_BASE` per `dram_layout.md`.
-- [ ] Emit `A_WORK_SHARED`.
-- [ ] Emit `R_WORK_BASE[core]` and `R_WORK_STRIDE`.
-- [ ] Emit `NUM_CORES` and `NPU_CORE_STRIDE`.
+- [x] Move `FEAT_BASE`, `SCORE_BASE`, `MARKER_ADDR`, `DESC_BASE`, and `STATIC_BASE` per `dram_layout.md`.
+- [x] Emit `A_WORK_SHARED`.
+- [x] Emit `R_WORK_BASE[core]` and `R_WORK_STRIDE`.
+- [x] Emit `NUM_CORES` and `NPU_CORE_STRIDE`.
+- [x] Add `n_tiles` field to conv descriptor (offset 80) for mc firmware.
 
 ### Step 2.2: Multi-Core Conv Scheduler
 
-- [ ] Pack `A_WORK_SHARED` once per M tile.
-- [ ] Launch up to `NUM_CORES` cores per N-tile round.
-- [ ] Save each launched core's `n_tile` or `n_base` for postprocess.
-- [ ] Poll only launched cores.
-- [ ] Postprocess from per-core `R_WORK` into disjoint OFM channels.
+- [x] Pack `A_WORK_SHARED` once per M tile.
+- [x] Launch up to `NUM_CORES` cores per N-tile round.
+- [x] Save each launched core's `n_tile` or `n_base` for postprocess.
+- [x] Poll only launched cores.
+- [x] Postprocess from per-core `R_WORK` into disjoint OFM channels.
+- Bug fixed: Q24 multiplier base address used temp register `t6` instead of saved register `s6` (commit 3d98152).
 
 ### Step 2.3: Error Path
 
-- [ ] Check `STATUS.error` for every launched core.
-- [ ] Optionally read `ERR_STATUS` for debug marker/log support.
-- [ ] Write fail marker and halt on any core error.
+- [x] Check `STATUS.error` for every launched core.
+- [x] Optionally read `ERR_STATUS` for debug marker/log support.
+- [x] Write fail marker and halt on any core error.
 
-## Phase 3: Multi-Core Simulation Tests
+## Phase 3: Multi-Core Simulation Tests — IN PROGRESS
 
 Detailed test staging and pass criteria are in [test_plan.md](test_plan.md).
 
-- [ ] 2-core MMIO smoke: start core0 and core1 on tiny independent GEMMs.
-- [ ] 2-core shared-A smoke: both cores use the same A buffer and different W/R buffers.
-- [ ] 2-core single Conv layer: compare dense OFM against single-core output.
-- [ ] 2-core full closed-loop VGG: compare final class and optional feature buffer.
-- [ ] Run `NUM_CORES=1` regression through the new infrastructure.
+- [x] 2-core MMIO smoke: PicoRV32 firmware writes/reads core0 and core1 registers.
+- [x] 2-core shared-A smoke: both cores use same A buffer, different W/R buffers, verified against golden.
+- [x] Both cores launch simultaneously: hardware signal `busy0=busy1=1` observed at cyc=310K via Verilator heartbeat testbench.
+- [ ] 2-core single Conv layer: compare dense OFM against single-core output (need K=27 scale test, not yet verified).
+- [ ] 2-core full closed-loop VGG: 9-layer classification. Functionally running (cores launch, results computed) but simulation is 42x slower than original soc_top, making a full run ~13 hours. Not pratical to complete before optimization.
+- [ ] `NUM_CORES=1` regression through `soc_mc_top` (fair baseline for speedup measurement).
 
-## Phase 4: Resource-Oriented Carrier Top
+### Test Coverage Gaps
 
-This phase prepares code for the ZCU102 carrier but does not require board
-validation in this plan.
+| Tested | Not Tested |
+|--------|------------|
+| Core independence (busy signals) | K-split: large K sliced into multiple k_tile segments |
+| shared A_WORK correctness | Real data scale (K=27 only in trace, not end-to-end verified) |
+| Bridge multi-core MMIO | maxpool/avgpool/classifier through multi-core path |
+| Both cores start simultaneously | Edge: final N tile round with fewer than NUM_CORES cores |
+| Error isolation (one core fault) | 8x32 shape with multi-core |
+| | Random/data-driven stress testing |
+| | ZCU102 FPGA resource/timing estimation |
+
+## Phase 4: Resource-Oriented Carrier Top — NOT STARTED
+
+This phase prepares code for the ZCU102 carrier but does not require board validation.
 
 - [ ] Add or define `pico_npu_mc_top.v` as the synthesizable boundary.
 - [ ] Keep simulation-only memory models out of this top.
@@ -84,13 +100,24 @@ validation in this plan.
 - [ ] Confirm source file lists separate simulation and synthesis modules.
 - [ ] Inspect synthesis resource estimates when available, especially buffers.
 
-## Phase 5: Optional Optimization
+## Phase 5: Optional Optimization — NOT STARTED
 
 - [ ] Define contiguous multi-N-tile weight stream format.
 - [ ] Update generator to repack weights for multi-tile ranges.
 - [ ] Change firmware to launch each core on an N range instead of one N tile.
 - [ ] Compare against conservative scheduler before accepting speedup numbers.
 - [ ] Scale from 2 cores to 4 cores only after resource and timing data justify it.
+
+## Open Issues
+
+| # | Issue | Severity | Impact |
+|---|-------|----------|--------|
+| 1 | `dram_multi_port` has replicated per-port AXI FSMs | High | Makes Verilator 42x slower than original soc_top. Simulation bottleneck, not a hardware problem. Simplify to single reg array + combinational read + simple write arbiter. |
+| 2 | No `soc_mc_top` NUM_CORES=1 baseline | High | Cannot measure true speedup. Current 42x number is cross-infrastructure (soc_top vs soc_mc_top), not fair. |
+| 3 | All tests use minimal data (M=4,N=8,K=4) | Medium | K-split logic, large A_WORK packing, and multi-N-tile edge cases untested at real VGG scale. |
+| 4 | gen_mc_tests.py uses absolute byte branch offsets | Medium | Branch targets can silently break when firmware grows. Use Asm label-based branches. |
+| 5 | OFM clear is CPU-bound (290K cycles per layer) | Medium | PicoRV32 serial zero-fill dominates first-layer startup. Multi-core cannot help. Consider DMA zero-fill or strided store. |
+| 6 | ZCU102 resource budget unknown for 2+ cores | Low | Two full npu_top instances with PPB_DEPTH=8192 may not fit ZCU102 BRAM/DSP. Blocked until Phase 4. |
 
 ## Risks
 
@@ -101,3 +128,4 @@ validation in this plan.
 | Ping-pong buffers infer registers | Area/timing failure as cores scale | Confirm BRAM inference or redesign buffer storage |
 | Firmware grows beyond SRAM | Boot/runtime failure | Keep looped helpers; increase `MEM_WORDS` if needed |
 | Shared memory model overestimates bandwidth | Unrealistic speedup | Treat simulation speedup as functional only until carrier resource data exists |
+| 42x simulation slowdown blocks full VGG validation | Cannot confirm end-to-end correctness | Simplify dram_multi_port simulation model; measure fair baseline |

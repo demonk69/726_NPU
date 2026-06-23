@@ -47,6 +47,21 @@ resource-aware implementation choices, memory layout, and generated firmware.
 | Optimized scheduling | Multi-N-tile range per core | Later only after contiguous weight repack is defined |
 | Completion sync | PicoRV32 polls STATUS | Simpler and does not depend on IRQ behavior |
 
+## Implementation Status (Updated 2026-06-23)
+
+| Phase | Status | Key Evidence |
+|-------|--------|-------------|
+| 0: Plan Lock | DONE | PicoRV32+ZCU102, shared A_WORK, per-core R_WORK |
+| 1: RTL Infrastructure | DONE | 4 modules lint+elab, committed e5f6955 |
+| 2: Firmware Generator | DONE | --num-cores support, mc scheduler, committed 153c4fb+3d98152 |
+| 3: Simulation Tests | IN PROGRESS | 5 unit tests PASS; hardware signal confirms both cores busy simultaneously (cyc=310K); full VGG blocked by 42x simulation slowdown |
+| 4: ZCU102 Carrier Top | NOT STARTED | |
+| 5: Optimization | NOT STARTED | |
+
+**Open issues**: 42x simulation slowdown, zero K-split test coverage, no fair
+1-core vs 2-core baseline, ZCU102 resources unknown. See
+[implementation_order.md](implementation_order.md) for complete list.
+
 ## Workload Summary
 
 For each Conv2D layer, the NPU executes GEMM:

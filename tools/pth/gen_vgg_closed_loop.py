@@ -766,7 +766,7 @@ def emit_run_conv_layer_mc(a):
     a.emit(SLLI("t2", "a7", 2)); a.emit(ADD("t0", "t0", "t2"))
     a.emit(ADD("t0", "t1", "t0")); a.emit(LW("t4", "t0", 0))
     a.emit(ADD("t0", "a2", "a7")); a.emit(SLLI("t0", "t0", 2))
-    a.emit(ADD("t0", "t6", "t0")); a.emit(LW("t5", "t0", 0))
+    a.emit(ADD("t0", "s6", "t0")); a.emit(LW("t5", "t0", 0))
     a.emit(ADD("t1", "t4", "zero")); emit_requant_nonnegative(a)
     a.emit(ADD("t0", "s10", "a4"))
     a.emit(SRL("t2", "t0", "s2")); a.emit(MUL("t2", "t2", "tp"))

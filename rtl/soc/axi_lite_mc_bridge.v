@@ -103,10 +103,12 @@ wire read_complete  = (state == S_READ_DATA) && r_fire_sel;
 // ---------------------------------------------------------------------------
 assign iomem_ready = addr_valid && (write_complete || read_complete);
 
-reg [31:0] iomem_rdata_r;
+// Combinational read data (like original single-core bridge)
+reg [31:0] rdata_hold;
 assign iomem_rdata = (iomem_addr >= npu_base_addr && !valid_core) ? 32'hDEADBEEF
                    : (iomem_addr >= npu_base_addr && !core_sel_ok) ? 32'hDEADBEEF
-                   : iomem_rdata_r;
+                   : read_complete ? m_axi_rdata[active_core*32 +: 32]
+                   : rdata_hold;
 
 // ---------------------------------------------------------------------------
 // Per-core AXI-Lite output
@@ -123,7 +125,7 @@ generate
 
         assign m_axi_awvalid[g] = core_active && (state == S_WRITE)      && !aw_done;
         assign m_axi_wvalid[g]  = core_active && (state == S_WRITE)      && !w_done;
-        assign m_axi_bready[g]  = core_active && (state == S_WRITE);     // accept B when in write
+        assign m_axi_bready[g]  = 1'b1;     // always accept B response
         assign m_axi_arvalid[g] = core_active && (state == S_READ_ADDR);
         assign m_axi_rready[g]  = core_active && (state == S_READ_DATA);
     end
@@ -141,7 +143,7 @@ always @(posedge clk) begin
         aw_done     <= 1'b0;
         w_done      <= 1'b0;
         active_core <= 4'd0;
-        iomem_rdata_r <= 32'd0;
+        rdata_hold  <= 32'd0;
     end else begin
         case (state)
             S_IDLE: begin
@@ -174,8 +176,8 @@ always @(posedge clk) begin
 
             S_READ_DATA: begin
                 if (read_complete) begin
-                    iomem_rdata_r <= m_axi_rdata[active_core*32 +: 32];
-                    state         <= S_IDLE;
+                    rdata_hold <= m_axi_rdata[active_core*32 +: 32];
+                    state      <= S_IDLE;
                 end
             end
 

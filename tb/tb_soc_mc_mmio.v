@@ -1,0 +1,50 @@
+// =============================================================================
+// tb_soc_mc_mmio - SoC integration test: multi-core MMIO register access
+// =============================================================================
+`timescale 1ns/1ps
+
+module tb_soc_mc_mmio;
+    localparam CLK_T = 10, TIMEOUT = 5000, MEM_WORDS = 1024, DRAM_WORDS = 4096;
+    localparam PASS_MARKER = 32'hAA, FAIL_MARKER = 32'hFF, MARKER_ADDR = 32'h1000;
+
+    reg clk, rst_n; integer cyc; reg pass_seen, fail_seen;
+
+    soc_mc_top #(.MEM_WORDS(MEM_WORDS),.DRAM_WORDS(DRAM_WORDS),.NUM_CORES(2),
+                 .NPU_PPB_DEPTH(8192),.NPU_PPB_THRESH(16)) u_soc (.clk(clk),.rst_n(rst_n));
+
+    initial clk = 0; always #(CLK_T/2) clk = ~clk;
+
+    initial begin
+        rst_n = 0; cyc = 0; pass_seen = 0; fail_seen = 0;
+        $display("[INIT] loading firmware"); $fflush();
+        $readmemh("sim/mc_tests/mc_mmio_fw.hex", u_soc.u_sram.mem);
+        $display("[INIT] fw[0]=0x%08h fw[1]=0x%08h", u_soc.u_sram.mem[0], u_soc.u_sram.mem[1]); $fflush();
+        repeat(5) @(posedge clk);
+        rst_n = 1;
+    end
+
+    always @(posedge clk) if (rst_n) cyc <= cyc + 1;
+
+    always @(posedge clk)
+        if (rst_n) begin
+            if (u_soc.u_dram.mem[MARKER_ADDR >> 2] == PASS_MARKER) pass_seen <= 1;
+            if (u_soc.u_dram.mem[MARKER_ADDR >> 2] == FAIL_MARKER) fail_seen <= 1;
+        end
+
+    initial begin
+        wait(rst_n);
+        forever begin
+            #(CLK_T);
+            if (pass_seen) begin
+                $display("[PASS] tb_soc_mc_mmio: multi-core MMIO register access works  cycles=%0d", cyc);
+                $finish;
+            end
+            if (fail_seen) begin
+                $display("[FAIL] tb_soc_mc_mmio: firmware reported failure");
+                $finish;
+            end
+        end
+    end
+
+    initial begin #(CLK_T * TIMEOUT); $display("[FAIL] tb_soc_mc_mmio timeout at cycle %0d", cyc); $finish; end
+endmodule

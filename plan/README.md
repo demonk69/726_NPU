@@ -28,6 +28,7 @@ resource-aware implementation choices, memory layout, and generated firmware.
 | [firmware_changes.md](firmware_changes.md) | Generated PicoRV32 firmware scheduling plan |
 | [dram_layout.md](dram_layout.md) | Shared activation/result/static buffer layout |
 | [implementation_order.md](implementation_order.md) | Step-by-step implementation and regression checkpoints |
+| [test_plan.md](test_plan.md) | Multi-core RTL, firmware, model, and resource verification plan |
 
 ## Key Decisions
 

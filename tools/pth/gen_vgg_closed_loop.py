@@ -80,18 +80,22 @@ QUANT_DISABLED = 0x00010000
 
 ACT_A = 0x00010000
 ACT_B = 0x00030000
-A_WORK = 0x00050000
-R_WORK = 0x00068000
-FEAT_BASE = 0x00069000
-SCORE_BASE = 0x0006A000
-MARKER_ADDR = 0x0006B000
-DESC_BASE = 0x0006C000
-STATIC_BASE = 0x00070000
+A_WORK_SHARED = 0x00050000
+R_WORK_BASE = [0x00070000, 0x00074000, 0x00078000, 0x0007C000]
+R_WORK_STRIDE = 0x00004000
+FEAT_BASE = 0x00080000
+SCORE_BASE = 0x00081000
+MARKER_ADDR = 0x00082000
+DESC_BASE = 0x00083000
+STATIC_BASE = 0x00090000
 
 REQUANT_SHIFT = 24
 REQUANT_ROUND = 1 << (REQUANT_SHIFT - 1)
 PASS_BASE = 0x100
 FAIL_MARKER = 0xFF
+
+NUM_CORES = 1
+NPU_CORE_STRIDE = 0x100
 
 
 def align(value, alignment):
@@ -469,8 +473,8 @@ def emit_run_conv_layer(a):
     a.li("s10", 0)                 # m_base
 
     a.label("conv_m_loop")
-    a.emit(LW("s2", "s1", 0))      # ifm base (s2 is reused in postprocess)
-    a.li("gp", A_WORK)             # A pack dst
+    a.emit(LW("s2", "s1", 0))      # ifm base
+    a.li("gp", A_WORK_SHARED)       # A pack dst
     a.emit(LW("s11", "s1", 60))    # input padded spatial bytes/channel
     a.emit(LW("tp", "s1", 68))     # input padded width
     a.emit(LW("a4", "s1", 52))     # ow shift
@@ -512,9 +516,9 @@ def emit_run_conv_layer(a):
     emit_write_reg_imm(a, REG_N_DIM, TC)
     emit_write_reg_reg(a, REG_K_DIM, "s9")
     emit_write_reg_reg(a, REG_W_ADDR, "s4")
-    a.li("t1", A_WORK)
+    a.li("t1", A_WORK_SHARED)
     a.emit(SW("t1", "s0", REG_A_ADDR))
-    a.li("t1", R_WORK)
+    a.li("t1", R_WORK_BASE[0])
     a.emit(SW("t1", "s0", REG_R_ADDR))
     a.emit(SLLI("t1", "s11", 2))
     a.emit(ADD("t1", "s5", "t1"))
@@ -538,7 +542,7 @@ def emit_run_conv_layer(a):
     post_row_full = a.unique("post_row_full")
     post_no_wrap = a.unique("post_no_wrap")
     a.label("post_col_loop")
-    a.li("a3", R_WORK)
+    a.li("a3", R_WORK_BASE[0])
     a.emit(SLLI("t1", "a2", 2))
     a.emit(ADD("a3", "a3", "t1"))
     a.emit(ADD("t1", "s11", "a2"))
@@ -588,6 +592,209 @@ def emit_run_conv_layer(a):
     a.branch("bne", "s11", "s8", "conv_n_loop")
     a.emit(ADDI("s10", "s10", TR))
     a.branch("bne", "s10", "s7", "conv_m_loop")
+    a.ret()
+
+
+def emit_run_conv_layer_mc(a):
+    """Multi-core conv layer: shared A_WORK_SHARED, per-core R_WORK."""
+    nc = NUM_CORES
+    a.label("run_conv_layer_mc")
+    a.emit(LW("s2", "s1", 0))     # ifm base
+    a.emit(LW("s3", "s1", 4))     # ofm base
+    a.emit(LW("s4", "s1", 8))     # w base
+    a.emit(LW("s5", "s1", 12))    # bias base
+    a.emit(LW("s6", "s1", 16))    # Q24 multiplier base
+    a.emit(LW("s7", "s1", 20))    # M
+    a.emit(LW("s8", "s1", 24))    # N
+    a.emit(LW("s9", "s1", 28))    # K
+
+    # clear OFM
+    a.emit(LW("t0", "s1", 72))
+    a.emit(MUL("t0", "t0", "s8"))
+    a.emit(ADDI("t0", "t0", 3))
+    a.emit(SRLI("t0", "t0", 2))
+    a.emit(ADD("t1", "s3", "zero"))
+    a.label("mc_clear_ofm")
+    a.emit(SW("zero", "t1", 0))
+    a.emit(ADDI("t1", "t1", 4))
+    a.emit(ADDI("t0", "t0", -1))
+    a.branch("bne", "t0", "zero", "mc_clear_ofm")
+
+    a.li("s10", 0)  # m_base
+
+    a.label("mc_m_loop")
+
+    # --- Pack A_WORK_SHARED once per M tile ---
+    a.emit(LW("s2", "s1", 0))
+    a.li("gp", A_WORK_SHARED)
+    a.emit(LW("s11", "s1", 60))
+    a.emit(LW("tp", "s1", 68))
+    a.emit(LW("a4", "s1", 52))
+    a.emit(LW("t3", "s1", 56))
+    a.emit(LW("a6", "s1", 32))
+    a.emit(ADD("a2", "s2", "zero"))
+
+    a.label("mc_pack_c_loop")
+    a.li("a7", 0)
+    a.label("mc_pack_kh_loop")
+    a.li("t6", 0)
+    a.label("mc_pack_kw_loop")
+    a.li("a5", 0)
+    a.label("mc_pack_group_loop")
+    emit_pack_group_padded(a)
+    a.emit(SW("t0", "gp", 0))
+    a.emit(ADDI("gp", "gp", 4))
+    a.emit(ADDI("a5", "a5", 1))
+    a.li("t1", TR // WORD_INT8_LANES)
+    a.branch("bne", "a5", "t1", "mc_pack_group_loop")
+    for _ in range((A_PACK_LANES - TR) // WORD_INT8_LANES):
+        a.emit(SW("zero", "gp", 0))
+        a.emit(ADDI("gp", "gp", 4))
+    a.emit(ADDI("t6", "t6", 1))
+    a.li("t1", 3)
+    a.branch("bne", "t6", "t1", "mc_pack_kw_loop")
+    a.emit(ADDI("a7", "a7", 1))
+    a.li("t1", 3)
+    a.branch("bne", "a7", "t1", "mc_pack_kh_loop")
+    a.emit(ADD("a2", "a2", "s11"))
+    a.emit(ADDI("a6", "a6", -1))
+    a.branch("bne", "a6", "zero", "mc_pack_c_loop")
+
+    a.emit(LW("s4", "s1", 8))
+    a.li("s11", 0)  # n_tile index
+
+    a.label("mc_n_round")
+    a.li("a6", 0)   # launched_mask
+    a.li("a5", 0)   # core index for launch
+
+    a.label("mc_launch_loop")
+    a.li("t1", nc)
+    a.emit(SLT("t0", "a5", "t1"))     # core < nc?
+    a.emit(LW("t2", "s1", 80))        # t2 = n_tiles (pre-computed)
+    a.emit(SLT("t2", "s11", "t2"))    # n_tile < n_tiles?
+    a.emit(AND("t0", "t0", "t2"))
+    a.branch("beq", "t0", "zero", "mc_launch_done")
+
+    a.li("t0", NPU_CORE_STRIDE)
+    a.emit(MUL("t0", "t0", "a5"))
+    a.emit(ADD("t0", "s0", "t0"))     # core_base = NPU_BASE + core*256
+
+    a.emit(SW("zero", "t0", REG_CTRL))
+    a.li("t1", TR);         a.emit(SW("t1", "t0", REG_M_DIM))
+    a.li("t1", TC);         a.emit(SW("t1", "t0", REG_N_DIM))
+    a.emit(SW("s9", "t0", REG_K_DIM))
+    a.li("t1", A_WORK_SHARED); a.emit(SW("t1", "t0", REG_A_ADDR))
+    a.li("t1", QUANT_DISABLED); a.emit(SW("t1", "t0", REG_QUANT_CFG))
+    a.li("t1", ARR_TILE);  a.emit(SW("t1", "t0", REG_ARR_CFG))
+    a.li("t1", CFG_SHAPE); a.emit(SW("t1", "t0", REG_CFG_SHAPE))
+
+    a.emit(LW("t1", "s1", 64)); a.emit(MUL("t1", "t1", "s11"))
+    a.emit(ADD("t1", "s4", "t1"));   a.emit(SW("t1", "t0", REG_W_ADDR))
+
+    a.li("t1", R_WORK_STRIDE); a.emit(MUL("t1", "t1", "a5"))
+    a.li("t2", R_WORK_BASE[0]); a.emit(ADD("t1", "t1", "t2"))
+    a.emit(SW("t1", "t0", REG_R_ADDR))
+
+    a.li("t1", TC * 4); a.emit(MUL("t1", "t1", "s11"))
+    a.emit(ADD("t1", "s5", "t1"));   a.emit(SW("t1", "t0", REG_BIAS_ADDR))
+
+    a.li("t1", CTRL_BIAS_TILE); a.emit(SW("t1", "t0", REG_CTRL))
+
+    a.li("t1", 1); a.emit(SLL("t1", "t1", "a5"))
+    a.emit(OR("a6", "a6", "t1"))
+    a.emit(ADDI("s11", "s11", 1))
+    a.emit(ADDI("a5", "a5", 1))
+    a.jump("mc_launch_loop")
+
+    a.label("mc_launch_done")
+    a.branch("beq", "a6", "zero", "mc_m_advance")
+
+    # Poll launched cores
+    a.li("a7", 0)  # done_mask
+    a.label("mc_poll_loop")
+    a.li("a5", 0)
+    a.label("mc_poll_core")
+    a.li("t1", 1); a.emit(SLL("t1", "t1", "a5"))
+    a.emit(AND("t0", "t1", "a6"))
+    a.branch("beq", "t0", "zero", "mc_poll_next")
+    a.emit(AND("t0", "t1", "a7"))
+    a.branch("bne", "t0", "zero", "mc_poll_next")
+    a.li("t0", NPU_CORE_STRIDE); a.emit(MUL("t0", "t0", "a5"))
+    a.emit(ADD("t0", "s0", "t0"))
+    a.emit(LW("t2", "t0", REG_STATUS))
+    a.emit(ANDI("t0", "t2", 4))
+    err_seen = a.unique("mc_err")
+    a.branch("bne", "t0", "zero", err_seen)
+    a.emit(ANDI("t0", "t2", 2))
+    a.branch("beq", "t0", "zero", "mc_poll_next")
+    # Core done
+    a.li("t0", NPU_CORE_STRIDE); a.emit(MUL("t0", "t0", "a5"))
+    a.emit(ADD("t0", "s0", "t0"))
+    a.emit(SW("zero", "t0", REG_CTRL))
+    a.emit(OR("a7", "a7", "t1"))
+    a.label("mc_poll_next")
+    a.emit(ADDI("a5", "a5", 1))
+    a.li("t1", nc)
+    a.branch("bne", "a5", "t1", "mc_poll_core")
+    a.emit(ADDI("t0", "a7", 0))
+    a.emit(ADDI("t1", "a6", 0))
+    a.branch("bne", "t0", "t1", "mc_poll_loop")
+
+    # Postprocess
+    a.emit(LW("s2", "s1", 52))   # ow_shift
+    a.emit(LW("t3", "s1", 56))   # ow_mask
+    a.emit(LW("gp", "s1", 72))   # out padded spatial
+    a.emit(LW("tp", "s1", 76))   # out padded width
+
+    a.li("a3", 0)  # n_tile tracker
+    a.li("a5", 0)  # core index
+    a.label("mc_post_core")
+    a.li("t1", 1); a.emit(SLL("t1", "t1", "a5"))
+    a.emit(AND("t0", "t1", "a6"))
+    a.branch("beq", "t0", "zero", "mc_post_skip")
+    a.li("t1", TC); a.emit(MUL("t1", "t1", "a3"))
+    a.emit(ADD("a2", "t1", "zero"))  # a2 = global n_base
+
+    a.li("t1", R_WORK_STRIDE); a.emit(MUL("t1", "t1", "a5"))
+    a.li("t2", R_WORK_BASE[0]); a.emit(ADD("t1", "t1", "t2"))  # R_WORK_BASE[core]
+
+    a.li("a4", 0)
+    a.label("mc_post_row")
+    a.li("a7", 0)  # col
+    a.label("mc_post_col")
+    a.li("t0", TC * 4); a.emit(MUL("t0", "t0", "a4"))
+    a.emit(SLLI("t2", "a7", 2)); a.emit(ADD("t0", "t0", "t2"))
+    a.emit(ADD("t0", "t1", "t0")); a.emit(LW("t4", "t0", 0))
+    a.emit(ADD("t0", "a2", "a7")); a.emit(SLLI("t0", "t0", 2))
+    a.emit(ADD("t0", "t6", "t0")); a.emit(LW("t5", "t0", 0))
+    a.emit(ADD("t1", "t4", "zero")); emit_requant_nonnegative(a)
+    a.emit(ADD("t0", "s10", "a4"))
+    a.emit(SRL("t2", "t0", "s2")); a.emit(MUL("t2", "t2", "tp"))
+    a.emit(AND("t4", "t0", "t3")); a.emit(ADD("t2", "t2", "t4"))
+    a.emit(ADD("t2", "t2", "tp")); a.emit(ADDI("t2", "t2", 1))
+    a.emit(ADD("t0", "a2", "a7")); a.emit(MUL("t0", "t0", "gp"))
+    a.emit(ADD("t0", "t0", "s3")); a.emit(ADD("t0", "t0", "t2"))
+    a.emit(SB("t1", "t0", 0))
+    a.emit(ADDI("a7", "a7", 1)); a.li("t0", TC)
+    a.branch("bne", "a7", "t0", "mc_post_col")
+    a.emit(ADDI("a4", "a4", 1)); a.li("t0", TR)
+    a.branch("bne", "a4", "t0", "mc_post_row")
+    a.emit(ADDI("a3", "a3", 1))
+    a.label("mc_post_skip")
+    a.emit(ADDI("a5", "a5", 1)); a.li("t1", nc)
+    a.branch("bne", "a5", "t1", "mc_post_core")
+    a.jump("mc_n_round")
+
+    a.label(err_seen)
+    a.li("t0", MARKER_ADDR); a.li("t1", FAIL_MARKER)
+    a.emit(SW("t1", "t0", 0))
+    a.jump("mc_halt_inner")
+    a.label("mc_halt_inner")
+    a.jump("mc_halt_inner")
+
+    a.label("mc_m_advance")
+    a.emit(ADDI("s10", "s10", TR))
+    a.branch("bne", "s10", "s7", "mc_m_loop")
     a.ret()
 
 
@@ -753,7 +960,10 @@ def emit_top(a, conv_descs, pool_descs, cls_w_base, cls_b_base, expected_label):
     for step, (kind, idx) in enumerate(sequence, start=1):
         if kind == "conv":
             a.li("s1", conv_descs[idx])
-            a.call("run_conv_layer")
+            if NUM_CORES > 1:
+                a.call("run_conv_layer_mc")
+            else:
+                a.call("run_conv_layer")
         else:
             a.li("s1", pool_descs[idx])
             a.call("maxpool2x2")
@@ -761,7 +971,10 @@ def emit_top(a, conv_descs, pool_descs, cls_w_base, cls_b_base, expected_label):
     a.call("avgpool_classifier")
     a.label("end")
     a.jump("end")
-    emit_run_conv_layer(a)
+    if NUM_CORES > 1:
+        emit_run_conv_layer_mc(a)
+    else:
+        emit_run_conv_layer(a)
     emit_maxpool(a)
     emit_classifier(a, cls_w_base, cls_b_base, expected_label)
 
@@ -773,7 +986,9 @@ def emit_firmware(conv_descs, pool_descs, cls_w_base, cls_b_base, expected_label
 
 
 def generate(args):
-    global TR, TC, CFG_SHAPE, KT_ELEMS, A_PACK_LANES, CTRL_BIAS_TILE, SIMD
+    global TR, TC, CFG_SHAPE, KT_ELEMS, A_PACK_LANES, CTRL_BIAS_TILE, SIMD, NUM_CORES
+
+    NUM_CORES = args.num_cores
 
     shape = SHAPE_CONFIGS[args.shape]
     SIMD = args.lanes
@@ -941,6 +1156,7 @@ def generate(args):
             m_dim, n_dim, k_dim, cin, ih, iw, oh, ow, ow_shift, ow - 1,
             in_padded_spatial, item["w_stride"], in_padded_w,
             out_padded_spatial, out_padded_w,
+            n_dim // TC,  # n_tiles at offset 80
         ]
         conv_desc_addrs.append(desc_ptr)
         for i, value in enumerate(fields):
@@ -990,6 +1206,7 @@ def generate(args):
         f.write(f'`define VGG_CLOSED_FLOW "{args.flow}"\n')
         f.write(f'`define VGG_CLOSED_INT8_SIMD_LANES {args.lanes}\n')
         f.write(f'`define VGG_CLOSED_NPU_DATA_W {32 if args.lanes == 4 else 16}\n')
+        f.write(f'`define VGG_CLOSED_NUM_CORES {NUM_CORES}\n')
 
     meta = {
         "schema": "vgg_closed_loop_v1",
@@ -1040,6 +1257,8 @@ def main():
     parser.add_argument("--lanes", type=int, choices=(1, 2, 4), default=4,
                         help="INT8 SIMD lanes per PE: 1, 2, or 4")
     parser.add_argument("--timeout-cycles", type=int, default=500000000)
+    parser.add_argument("--num-cores", type=int, default=1, choices=(1, 2, 4),
+                        help="Number of NPU cores: 1, 2, or 4")
     generate(parser.parse_args())
 
 

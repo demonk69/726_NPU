@@ -64,6 +64,8 @@
 
 ## Phase 3: Multi-Core Simulation Tests
 
+Detailed test staging and pass criteria are in [test_plan.md](test_plan.md).
+
 - [ ] 2-core MMIO smoke: start core0 and core1 on tiny independent GEMMs.
 - [ ] 2-core shared-A smoke: both cores use the same A buffer and different W/R buffers.
 - [ ] 2-core single Conv layer: compare dense OFM against single-core output.

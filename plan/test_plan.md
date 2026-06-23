@@ -27,10 +27,10 @@ firmware is attempted.
 | 0: Static RTL | lint/elab npu_mc_top, soc_mc_top | PASS |
 | 1: RTL Unit | bridge, DRAM, NPU wrapper smoke | PASS (25 checks total) |
 | 2: SoC Integration | MMIO, shared-A | PASS (2 testbenches) |
-| 3: Firmware Generator | Layout, scheduler, error path | PASS (verified through SoC tests) |
+| 3: Firmware Generator | Layout, scheduler, error path | PASS for smoke tests and image2 full VGG; global `n_tile` postprocess bug fixed |
 | 4: Single Conv Layer | stage1_0_conv K=27 | NOT RUN |
-| 4: Full VGG 2-core | 9-layer closed loop | Functionally running (both cores busy), but 42x simulation slowdown prevents completion |
-| 5: Performance | cps, speedup, resources | NOT RUN |
+| 4: Full VGG 2-core | 9-layer closed loop | PASS for image2; broader image/shape coverage not run |
+| 5: Performance | cps, speedup, resources | Image2 full cycles measured; 2-core is slower than `NUM_CORES=1` |
 
 ## Pass Criteria Summary
 
@@ -40,10 +40,10 @@ firmware is attempted.
 | Bridge unit tests | Correct core selection, local offset, invalid-window behavior | DONE (8 checks PASS) |
 | DRAM unit tests | CPU/NPU visibility through one shared backing store | DONE (9 checks PASS) |
 | NPU wrapper smoke | Both cores can run independent jobs without cross-talk | DONE (8 checks PASS) |
-| `NUM_CORES=1` SoC | Same final result as existing single-core path | NOT RUN |
+| `NUM_CORES=1` SoC | Same final result as existing single-core path | DONE for image2, 114,014,769 cycles |
 | 2-core shared-A smoke | Same A buffer feeds both cores; independent R outputs match golden | DONE (1109 cycles PASS) |
 | 2-core Conv layer | Dense OFM matches single-core/Python golden | NOT RUN |
-| 2-core full VGG | Final class and optional feature buffer match exact Python target | IN PROGRESS (cores launch, functionally running) |
+| 2-core full VGG | Final class and optional feature buffer match exact Python target | DONE for image2, 151,892,523 cycles |
 | Resource check | No unexpected register explosion in buffers; timing/resource risk recorded | NOT RUN |
 
 ## Stage 0: Static RTL Checks
@@ -281,6 +281,21 @@ Performance metrics:
 - Total cycles for `soc_mc_top NUM_CORES=1`.
 - Total cycles for `soc_mc_top NUM_CORES=2`.
 - Per-core raw counters: busy cycles, compute cycles, read/write beats, read/write bytes.
+
+Current short-run observations, for diagnostics only:
+
+| Case | Observation |
+|------|-------------|
+| `soc_top` single-core diagnostic heartbeat | about 222K cycles/sec on current host |
+| `soc_mc_top NUM_CORES=1` heartbeat | about 222K cycles/sec on current host |
+| `soc_mc_top NUM_CORES=2` low-output heartbeat | about 89K cycles/sec on current host |
+| `soc_mc_top NUM_CORES=1` full image2 VGG | 114,014,769 cycles |
+| `soc_mc_top NUM_CORES=2` full image2 VGG | 151,892,523 cycles |
+
+The heartbeat entries are not acceptance numbers. The full image2 entries show
+that the multi-core SoC wrapper itself does not slow down `NUM_CORES=1`, while
+the current 2-core firmware path is slower because only NPU tile compute is
+parallelized and PicoRV32 scheduling/postprocess remains serial.
 
 Resource checks for carrier preparation:
 

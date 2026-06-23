@@ -55,10 +55,11 @@
 
 - [x] Pack `A_WORK_SHARED` once per M tile.
 - [x] Launch up to `NUM_CORES` cores per N-tile round.
-- [x] Save each launched core's `n_tile` or `n_base` for postprocess.
+- [x] Save each launched core's global `n_tile` or `n_base` for postprocess.
 - [x] Poll only launched cores.
 - [x] Postprocess from per-core `R_WORK` into disjoint OFM channels.
 - Bug fixed: Q24 multiplier base address used temp register `t6` instead of saved register `s6` (commit 3d98152).
+- Bug fixed: multi-core postprocess restarted `n_tile` at 0 for every launch round, so second and later N-tile rounds scattered into the wrong output channels. The generator now derives the round-start global `n_tile` as `next_n_tile - launched_count` before postprocess.
 
 ### Step 2.3: Error Path
 
@@ -73,20 +74,23 @@ Detailed test staging and pass criteria are in [test_plan.md](test_plan.md).
 - [x] 2-core MMIO smoke: PicoRV32 firmware writes/reads core0 and core1 registers.
 - [x] 2-core shared-A smoke: both cores use same A buffer, different W/R buffers, verified against golden.
 - [x] Both cores launch simultaneously: hardware signal `busy0=busy1=1` observed at cyc=310K via Verilator heartbeat testbench.
+- [x] Short `soc_mc_top NUM_CORES=1` heartbeat baseline: about 222K cycles/sec on the current host.
+- [x] Short `soc_mc_top NUM_CORES=2` heartbeat sample: about 89K cycles/sec on the current host with low-output heartbeat, about 2.5x slower than `NUM_CORES=1` in Verilator.
+- [x] Full `NUM_CORES=1` regression through `soc_mc_top`: image2 PASS, frog/class 6, 114,014,769 cycles.
+- [x] 2-core full closed-loop VGG: image2 PASS, frog/class 6, 151,892,523 cycles.
 - [ ] 2-core single Conv layer: compare dense OFM against single-core output (need K=27 scale test, not yet verified).
-- [ ] 2-core full closed-loop VGG: 9-layer classification. Functionally running (cores launch, results computed) but simulation is 42x slower than original soc_top, making a full run ~13 hours. Not pratical to complete before optimization.
-- [ ] `NUM_CORES=1` regression through `soc_mc_top` (fair baseline for speedup measurement).
 
 ### Test Coverage Gaps
 
 | Tested | Not Tested |
 |--------|------------|
-| Core independence (busy signals) | K-split: large K sliced into multiple k_tile segments |
+| Core independence (busy signals) | Real data scale layer-level golden comparisons |
 | shared A_WORK correctness | Real data scale (K=27 only in trace, not end-to-end verified) |
-| Bridge multi-core MMIO | maxpool/avgpool/classifier through multi-core path |
+| Bridge multi-core MMIO | Broader maxpool/avgpool/classifier image/shape coverage |
 | Both cores start simultaneously | Edge: final N tile round with fewer than NUM_CORES cores |
-| Error isolation (one core fault) | 8x32 shape with multi-core |
-| | Random/data-driven stress testing |
+| Error isolation (one core fault) | K-split: large K sliced into multiple k_tile segments |
+| Short 1-core/2-core heartbeat cps samples | 8x32 shape with multi-core |
+| Fixed global `n_tile` postprocess bug | Random/data-driven stress testing |
 | | ZCU102 FPGA resource/timing estimation |
 
 ## Phase 4: Resource-Oriented Carrier Top — NOT STARTED
@@ -112,12 +116,13 @@ This phase prepares code for the ZCU102 carrier but does not require board valid
 
 | # | Issue | Severity | Impact |
 |---|-------|----------|--------|
-| 1 | `dram_multi_port` has replicated per-port AXI FSMs | High | Makes Verilator 42x slower than original soc_top. Simulation bottleneck, not a hardware problem. Simplify to single reg array + combinational read + simple write arbiter. |
-| 2 | No `soc_mc_top` NUM_CORES=1 baseline | High | Cannot measure true speedup. Current 42x number is cross-infrastructure (soc_top vs soc_mc_top), not fair. |
-| 3 | All tests use minimal data (M=4,N=8,K=4) | Medium | K-split logic, large A_WORK packing, and multi-N-tile edge cases untested at real VGG scale. |
-| 4 | gen_mc_tests.py uses absolute byte branch offsets | Medium | Branch targets can silently break when firmware grows. Use Asm label-based branches. |
-| 5 | OFM clear is CPU-bound (290K cycles per layer) | Medium | PicoRV32 serial zero-fill dominates first-layer startup. Multi-core cannot help. Consider DMA zero-fill or strided store. |
-| 6 | ZCU102 resource budget unknown for 2+ cores | Low | Two full npu_top instances with PPB_DEPTH=8192 may not fit ZCU102 BRAM/DSP. Blocked until Phase 4. |
+| 1 | 2-core full closed-loop VGG is slower than `NUM_CORES=1` | High | Image2 PASS at 151,892,523 cycles for `NUM_CORES=2` vs 114,014,769 cycles for `NUM_CORES=1`. Current multi-core firmware is dominated by serial CPU scheduling/postprocess. |
+| 2 | Broader fair performance numbers are still missing | High | Image2 now has full-cycle `NUM_CORES=1` and `NUM_CORES=2` results. Other images/shapes and per-core NPU performance counters are still needed. |
+| 3 | `dram_multi_port` has replicated per-port AXI FSMs | Medium | Adds Verilator evaluation overhead when `NUM_CORES>1`, along with the duplicated `npu_top` instances. Consider simplifying the simulation model only after correctness tests pass. |
+| 4 | All tests use minimal data (M=4,N=8,K=4) | Medium | K-split logic, large A_WORK packing, and multi-N-tile edge cases remain weakly tested at real VGG scale. |
+| 5 | gen_mc_tests.py uses absolute byte branch offsets | Medium | Branch targets can silently break when firmware grows. Use Asm label-based branches. |
+| 6 | OFM clear is CPU-bound (290K cycles per layer) | Medium | PicoRV32 serial zero-fill dominates first-layer startup. Multi-core cannot help. Consider DMA zero-fill or strided store. |
+| 7 | ZCU102 resource budget unknown for 2+ cores | Low | Two full npu_top instances with PPB_DEPTH=8192 may not fit ZCU102 BRAM/DSP. Blocked until Phase 4. |
 
 ## Risks
 
@@ -128,4 +133,4 @@ This phase prepares code for the ZCU102 carrier but does not require board valid
 | Ping-pong buffers infer registers | Area/timing failure as cores scale | Confirm BRAM inference or redesign buffer storage |
 | Firmware grows beyond SRAM | Boot/runtime failure | Keep looped helpers; increase `MEM_WORDS` if needed |
 | Shared memory model overestimates bandwidth | Unrealistic speedup | Treat simulation speedup as functional only until carrier resource data exists |
-| 42x simulation slowdown blocks full VGG validation | Cannot confirm end-to-end correctness | Simplify dram_multi_port simulation model; measure fair baseline |
+| Slow 2-core Verilator simulation slows optimization loops | Functional PASS exists for image2, but profiling/tuning runs are expensive | Use targeted layer tests and per-core counters before broad sweeps |

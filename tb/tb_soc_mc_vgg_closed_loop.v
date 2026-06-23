@@ -17,6 +17,9 @@
 module tb_soc_mc_vgg_closed_loop;
     localparam CLK_T = 10;
     localparam TIMEOUT = `VGG_CLOSED_TIMEOUT_CYCLES;
+    localparam [63:0] CLK_T_TICKS = CLK_T;
+    localparam [63:0] TIMEOUT_CYCLES = TIMEOUT;
+    localparam [63:0] TIMEOUT_TICKS = TIMEOUT_CYCLES * CLK_T_TICKS;
     localparam DRAM_W = `VGG_CLOSED_DRAM_WORDS;
     localparam FW_LAST = `VGG_CLOSED_FW_WORDS - 1;
     localparam MARKER_OK = `VGG_CLOSED_LABEL + 32'h100;
@@ -80,6 +83,41 @@ module tb_soc_mc_vgg_closed_loop;
         end
     end
 
+`ifdef DIAG_VGG_HEARTBEAT
+    `ifndef DIAG_VGG_HEARTBEAT_INTERVAL
+    `define DIAG_VGG_HEARTBEAT_INTERVAL 10000000
+    `endif
+    reg [31:0] heartbeat_cnt;
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            heartbeat_cnt <= 32'd0;
+        end else if (heartbeat_cnt == (`DIAG_VGG_HEARTBEAT_INTERVAL - 1)) begin
+            heartbeat_cnt <= 32'd0;
+            if (NUM_CORES == 1) begin
+                $display("[HB] cyc=%0d pc=0x%08h marker=0x%08h busy0=%b a4=%0d a7=%0d",
+                         cyc,
+                         u_soc.u_cpu.reg_pc,
+                         u_soc.u_dram.mem[`VGG_CLOSED_MARKER_ADDR >> 2],
+                         u_soc.u_npu_mc.gen_cores[0].u_npu_core.u_ctrl.busy,
+                         u_soc.u_cpu.cpuregs[14],
+                         u_soc.u_cpu.cpuregs[17]);
+            end else begin
+                $display("[HB] cyc=%0d pc=0x%08h marker=0x%08h busy0=%b busy1=%b a4=%0d a7=%0d",
+                         cyc,
+                         u_soc.u_cpu.reg_pc,
+                         u_soc.u_dram.mem[`VGG_CLOSED_MARKER_ADDR >> 2],
+                         u_soc.u_npu_mc.gen_cores[0].u_npu_core.u_ctrl.busy,
+                         u_soc.u_npu_mc.gen_cores[1].u_npu_core.u_ctrl.busy,
+                         u_soc.u_cpu.cpuregs[14],
+                         u_soc.u_cpu.cpuregs[17]);
+            end
+            $fflush();
+        end else begin
+            heartbeat_cnt <= heartbeat_cnt + 32'd1;
+        end
+    end
+`endif
+
     initial begin
         wait(rst_n);
         #100;
@@ -104,7 +142,7 @@ module tb_soc_mc_vgg_closed_loop;
     end
 
     initial begin
-        #(CLK_T * TIMEOUT);
+        #(TIMEOUT_TICKS);
         $display("[FAIL] Multi-core closed-loop timeout at %0d cycles", TIMEOUT);
         $finish;
     end

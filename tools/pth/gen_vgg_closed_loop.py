@@ -708,6 +708,7 @@ def emit_run_conv_layer_mc(a):
 
     a.label("mc_launch_done")
     a.branch("beq", "a6", "zero", "mc_m_advance")
+    a.emit(SUB("a3", "s11", "a5"))  # first global n_tile launched this round
 
     # Poll launched cores
     a.li("a7", 0)  # done_mask
@@ -746,7 +747,7 @@ def emit_run_conv_layer_mc(a):
     a.emit(LW("gp", "s1", 72))   # out padded spatial
     a.emit(LW("tp", "s1", 76))   # out padded width
 
-    a.li("a3", 0)  # n_tile tracker
+    # a3 tracks the global n_tile for each launched core in this round.
     a.li("a5", 0)  # core index
     a.label("mc_post_core")
     a.li("t1", 1); a.emit(SLL("t1", "t1", "a5"))
@@ -755,8 +756,8 @@ def emit_run_conv_layer_mc(a):
     a.li("t1", TC); a.emit(MUL("t1", "t1", "a3"))
     a.emit(ADD("a2", "t1", "zero"))  # a2 = global n_base
 
-    a.li("t1", R_WORK_STRIDE); a.emit(MUL("t1", "t1", "a5"))
-    a.li("t2", R_WORK_BASE[0]); a.emit(ADD("t1", "t1", "t2"))  # R_WORK_BASE[core]
+    a.li("a1", R_WORK_STRIDE); a.emit(MUL("a1", "a1", "a5"))
+    a.li("t2", R_WORK_BASE[0]); a.emit(ADD("a1", "a1", "t2"))  # R_WORK_BASE[core]
 
     a.li("a4", 0)
     a.label("mc_post_row")
@@ -764,10 +765,13 @@ def emit_run_conv_layer_mc(a):
     a.label("mc_post_col")
     a.li("t0", TC * 4); a.emit(MUL("t0", "t0", "a4"))
     a.emit(SLLI("t2", "a7", 2)); a.emit(ADD("t0", "t0", "t2"))
-    a.emit(ADD("t0", "t1", "t0")); a.emit(LW("t4", "t0", 0))
+    a.emit(ADD("t0", "a1", "t0")); a.emit(LW("t4", "t0", 0))
     a.emit(ADD("t0", "a2", "a7")); a.emit(SLLI("t0", "t0", 2))
-    a.emit(ADD("t0", "s6", "t0")); a.emit(LW("t5", "t0", 0))
+    a.emit(ADD("t0", "s6", "t0"))
+    a.emit(ADD("a0", "a7", "zero"))
+    a.emit(LW("a7", "t0", 0))      # Q24 multiplier for this output channel
     a.emit(ADD("t1", "t4", "zero")); emit_requant_nonnegative(a)
+    a.emit(ADD("a7", "a0", "zero"))
     a.emit(ADD("t0", "s10", "a4"))
     a.emit(SRL("t2", "t0", "s2")); a.emit(MUL("t2", "t2", "tp"))
     a.emit(AND("t4", "t0", "t3")); a.emit(ADD("t2", "t2", "t4"))

@@ -1,6 +1,6 @@
 # Verification Status
 
-Updated: 2026-06-16
+Updated: 2026-06-23
 
 This document is the current verification record. Older status files and worklogs in `doc/archive/` are historical and may describe superseded Windows/Icarus flows.
 
@@ -24,6 +24,8 @@ This document is the current verification record. Older status files and worklog
 | Fast VGG e2e baseline | `./run_vgg_e2e.sh` | PASS on 2026-05-31 | cat/class 3 | 10,768,727 |
 | Runtime closed-loop image2 | `./run_all.sh closed_loop --image ./pic/test_cifar10_2.jpg` | PASS | frog/class 6 | 114,014,769 |
 | Runtime closed-loop image4 | `./run_all.sh closed_loop --image ./pic/test_cifar10_4.jpg` | PASS | dog/class 5 | 114,013,544 |
+| Multi-core closed-loop image2, `NUM_CORES=1` | `./run_vgg_mc_closed_loop.sh --num-cores 1 --image pic/test_cifar10_2.jpg` | PASS | frog/class 6 | 114,014,769 |
+| Multi-core closed-loop image2, `NUM_CORES=2` | `./run_vgg_mc_closed_loop.sh --num-cores 2 --image pic/test_cifar10_2.jpg` | PASS | frog/class 6 | 151,892,523 |
 | Runtime closed-loop local image, 4x4 OS | `./run_vgg_closed_loop.sh --image <local-image> --shape 4x4 --flow os` | PASS on 2026-06-01 | automobile/class 1 | 160,809,527 |
 | Runtime closed-loop local image, 4x4 WS | `./run_vgg_closed_loop.sh --image <local-image> --shape 4x4 --flow ws` | PASS on 2026-06-01 | automobile/class 1 | 160,809,527 |
 | Runtime closed-loop full shape/dataflow sweep | `./run_vgg_closed_loop_sweep.sh --image <local-image>` | PASS on 2026-06-02, 8/8 cases | ship/class 8 | see sweep table below |
@@ -69,6 +71,38 @@ The prior `4x4` timeout was caused by the old 150M-cycle default limit, not by a
 | `verilator --lint-only -Wall -Wno-fatal --top-module npu_pynq_wrapper rtl/pe/*.v rtl/common/*.v rtl/buf/*.v rtl/array/*.v rtl/axi/*.v rtl/ctrl/*.v rtl/power/*.v rtl/top/*.v` | PYNQ wrapper lint | Completes with existing width/unused warnings |
 
 CE integration was smoke-tested on 2026-06-16 with `CG_EN=0` default compatibility, PE-array CE ports tied on in direct tests, top/PYNQ elaboration, AXI-Lite/DMA/controller tests, and the 16x16 tile Icarus + Verilator flow. The long closed-loop sweep was not rerun for this CE-only change; the latest full closed-loop sweep remains the 2026-06-02 result above.
+
+## Multi-Core NPU Plan Checks
+
+These checks apply to the multi-core planning work under `plan/`. They do not
+replace the maintained single-core VGG entry points above.
+
+| Command | Coverage | Result |
+|---|---|---|
+| `python3 -B -m py_compile tools/pth/gen_vgg_closed_loop.py` | Generator syntax after global `n_tile` postprocess fix | PASS |
+| `python3 -B tools/pth/gen_vgg_closed_loop.py --out-dir /tmp/opencode/vgg_mc_fixed --image pic/test_cifar10_2.jpg --shape 16x16 --flow os --lanes 4 --timeout-cycles 500000000 --num-cores 2` | 2-core closed-loop asset generation | PASS generation; exact-python pred 6 |
+| `iverilog -g2012 -o /tmp/opencode/tb_axi_lite_mc_bridge.vvp rtl/soc/axi_lite_mc_bridge.v tb/tb_axi_lite_mc_bridge.v && vvp /tmp/opencode/tb_axi_lite_mc_bridge.vvp` | Multi-core AXI-Lite decode and invalid window | PASS, 8 checks |
+| `iverilog -g2012 -o /tmp/opencode/tb_dram_multi_port.vvp rtl/soc/dram_multi_port.v tb/tb_dram_multi_port.v && vvp /tmp/opencode/tb_dram_multi_port.vvp` | Shared multi-port DRAM model | PASS, 9 checks |
+| `iverilog -g2012 -o /tmp/opencode/tb_npu_mc_top_smoke.vvp rtl/pe/*.v rtl/common/*.v rtl/buf/*.v rtl/array/*.v rtl/axi/*.v rtl/ctrl/*.v rtl/power/*.v rtl/top/*.v tb/tb_npu_mc_top_smoke.v && vvp /tmp/opencode/tb_npu_mc_top_smoke.vvp` | NPU wrapper independence and error isolation | PASS, 8 checks |
+| `iverilog -g2012 -o /tmp/opencode/tb_soc_mc_mmio.vvp sim/picorv32.v rtl/pe/*.v rtl/common/*.v rtl/buf/*.v rtl/array/*.v rtl/axi/*.v rtl/ctrl/*.v rtl/power/*.v rtl/soc/*.v rtl/top/*.v tb/tb_soc_mc_mmio.v && vvp /tmp/opencode/tb_soc_mc_mmio.vvp` | PicoRV32 multi-core MMIO access | PASS, 52 cycles |
+| `iverilog -g2012 -o /tmp/opencode/tb_soc_mc_shared_a.vvp sim/picorv32.v rtl/pe/*.v rtl/common/*.v rtl/buf/*.v rtl/array/*.v rtl/axi/*.v rtl/ctrl/*.v rtl/power/*.v rtl/soc/*.v rtl/top/*.v tb/tb_soc_mc_shared_a.v && vvp /tmp/opencode/tb_soc_mc_shared_a.vvp` | Shared `A_WORK`, per-core `R_WORK` smoke | PASS, 1109 cycles |
+| `verilator --lint-only --timing -DMC_HEARTBEAT_INTERVAL=1000000 -I/tmp/opencode/vgg_mc_fixed --top-module tb_mc_heart ... tb/tb_mc_heart.v` | 2-core heartbeat testbench lint after `NUM_CORES=1` compatibility update | PASS with existing warning suppressions |
+| `./run_vgg_mc_closed_loop.sh --num-cores 1 --image pic/test_cifar10_2.jpg` | Multi-core SoC wrapper, single-core VGG baseline | PASS, frog/class 6, 114,014,769 cycles |
+| `./run_vgg_mc_closed_loop.sh --num-cores 2 --image pic/test_cifar10_2.jpg` | Full 2-core closed-loop VGG | PASS, frog/class 6, 151,892,523 cycles |
+
+Short-run diagnostic throughput samples on this host:
+
+| Case | Observation |
+|---|---:|
+| `soc_top` single-core diagnostic heartbeat | about 222K cycles/sec |
+| `soc_mc_top NUM_CORES=1` low-output heartbeat | about 222K cycles/sec |
+| `soc_mc_top NUM_CORES=2` low-output heartbeat | about 89K cycles/sec |
+
+These samples are not full-run performance results. They show that the older 42x
+slowdown claim is not reproduced by the current short-run setup. Full image2 VGG
+classification now passes with `NUM_CORES=2`, but it is slower than the
+`NUM_CORES=1` baseline because the current multi-core firmware is still dominated
+by serial PicoRV32 scheduling, packing, requant, and scatter work.
 
 ## Syntax Checks
 

@@ -187,17 +187,23 @@ The `axi_lite_mc_bridge` correctly decodes per-core register windows
 toggle core1's AXI valid signals). Verified through bridge unit test
 (8 checks PASS).
 
+Short heartbeat measurements on the current host show roughly 222K cycles/sec
+for `soc_mc_top NUM_CORES=1` and roughly 89K cycles/sec for `NUM_CORES=2` with
+low-output heartbeat. These are diagnostic samples only, not full VGG speedup
+numbers. Full image2 VGG now passes at 114,014,769 cycles for `NUM_CORES=1` and
+151,892,523 cycles for `NUM_CORES=2`.
+
 ## 11. Open Concerns
 
-1. **Simulation speed**: `soc_mc_top` with `dram_multi_port` + dual `npu_top`
-   runs at ~1.7K Verilator cycles/sec vs ~72K cycles/sec for original `soc_top`.
-   The bottleneck is the replicated per-port AXI FSMs in `dram_multi_port`
-   and the doubled PE array/controller/DMA evaluation. This is a simulation
-   artifact; actual FPGA hardware would not show this ratio.
+1. **2-core performance is not yet a speedup**: full image2 VGG passes with
+   `NUM_CORES=2`, but takes 151,892,523 cycles vs 114,014,769 cycles for
+   `NUM_CORES=1`. The current multi-core path is correctness-first and remains
+   dominated by serial PicoRV32 scheduling, packing, requant, and scatter work.
 
-2. **No fair baseline**: `soc_mc_top NUM_CORES=1` was never measured against
-   `soc_mc_top NUM_CORES=2`. The 42x number compares different infrastructures
-   (soc_top vs soc_mc_top), which is misleading.
+2. **Simulation speed**: current short-run measurements show about 2.5x lower
+   Verilator cycles/sec for `soc_mc_top NUM_CORES=2` than `NUM_CORES=1` on this
+   host. The older 42x number is not trusted. The main cost is evaluating a
+   second full `npu_top`, plus the replicated AXI state in `dram_multi_port`.
 
 3. **Zero test coverage for K-split**: All 5 unit tests use K=4 (single k_tile).
    Real VGG layers have K=27..K=4608, which trigger the controller's K-split

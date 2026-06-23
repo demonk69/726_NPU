@@ -54,12 +54,16 @@ resource-aware implementation choices, memory layout, and generated firmware.
 | 0: Plan Lock | DONE | PicoRV32+ZCU102, shared A_WORK, per-core R_WORK |
 | 1: RTL Infrastructure | DONE | 4 modules lint+elab, committed e5f6955 |
 | 2: Firmware Generator | DONE | --num-cores support, mc scheduler, committed 153c4fb+3d98152 |
-| 3: Simulation Tests | IN PROGRESS | 5 unit tests PASS; hardware signal confirms both cores busy simultaneously (cyc=310K); full VGG blocked by 42x simulation slowdown |
+| 3: Simulation Tests | IN PROGRESS | 5 unit tests PASS; hardware signal confirms both cores busy simultaneously (cyc=310K); image2 full VGG PASS for `NUM_CORES=1` and `NUM_CORES=2`; 2-core performance is slower than single-core |
 | 4: ZCU102 Carrier Top | NOT STARTED | |
 | 5: Optimization | NOT STARTED | |
 
-**Open issues**: 42x simulation slowdown, zero K-split test coverage, no fair
-1-core vs 2-core baseline, ZCU102 resources unknown. See
+**Open issues**: 2-core VGG performance is slower than the `NUM_CORES=1`
+baseline, K-split/real-scale layer coverage gaps remain, broader shape/image
+coverage is still missing, and ZCU102 resources are unknown. Current short
+heartbeat samples show about 222K cycles/sec for `soc_mc_top NUM_CORES=1` and
+about 89K cycles/sec for `NUM_CORES=2` on this host; the older 42x slowdown
+number is not trusted. See
 [implementation_order.md](implementation_order.md) for complete list.
 
 ## Workload Summary

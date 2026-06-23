@@ -66,6 +66,7 @@ wire [31:0] ram_rdata;
 // =========================================================================
 wire        dram_cpu_valid;
 wire        dram_cpu_ready;
+wire        dram_cpu_ready_raw;
 wire        dram_cpu_we;
 wire [3:0]  dram_cpu_wstrb;
 wire [31:0] dram_cpu_addr;
@@ -165,7 +166,7 @@ assign dram_cpu_we    = |mem_wstrb;
 assign dram_cpu_wstrb = mem_wstrb;
 assign dram_cpu_addr  = mem_addr;
 assign dram_cpu_wdata = mem_wdata;
-assign dram_cpu_ready = addr_is_dram;
+assign dram_cpu_ready = addr_is_dram && dram_cpu_ready_raw;
 
 // =========================================================================
 // AXI-Lite Multi-Core Bridge (iomem -> per-core AXI4-Lite)
@@ -214,7 +215,7 @@ dram_multi_port #(
     .rst_n        (rst_n),
     // CPU side
     .cpu_valid    (dram_cpu_valid),
-    .cpu_ready    (dram_cpu_ready),
+    .cpu_ready    (dram_cpu_ready_raw),
     .cpu_we       (dram_cpu_we),
     .cpu_wstrb    (dram_cpu_wstrb),
     .cpu_addr     (dram_cpu_addr),

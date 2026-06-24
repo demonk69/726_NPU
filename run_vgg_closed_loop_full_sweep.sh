@@ -166,7 +166,7 @@ mkdir -p "$OUT_DIR/logs" "$OUT_DIR/meta"
 SUMMARY_TSV="$OUT_DIR/summary.tsv"
 SUMMARY_MD="$OUT_DIR/summary.md"
 
-printf "lanes\tshape\tflow\tstatus\tpred\texact\tfixed\tcycles\tpeak_tops\trd_burst_util\twr_burst_util\telapsed_s\trc\tlog\n" > "$SUMMARY_TSV"
+printf "lanes\tshape\tflow\tstatus\tpred\texact\tfixed\tcycles\tops_per_cycle\tpeak_tops\trd_burst_util\twr_burst_util\telapsed_s\trc\tlog\n" > "$SUMMARY_TSV"
 
 INPUT_ARGS=()
 INPUT_DESC="img_idx=$IMG_IDX"
@@ -187,13 +187,13 @@ write_summary_md() {
         echo
         echo "Shell timeout seconds: $SHELL_TIMEOUT_SECONDS"
         echo
-        echo "| lanes | shape | flow | status | pred | exact | fixed | cycles | peak TOPS | rd burst util | wr burst util | elapsed_s | rc | log |"
-        echo "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"
-        while IFS=$'\t' read -r lanes shape flow status pred exact fixed cycles peak_tops rd_burst_util wr_burst_util elapsed_s rc log; do
+        echo "| lanes | shape | flow | status | pred | exact | fixed | cycles | ops/cycle | peak TOPS | rd bus util | wr bus util | elapsed_s | rc | log |"
+        echo "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"
+        while IFS=$'\t' read -r lanes shape flow status pred exact fixed cycles ops_per_cycle peak_tops rd_burst_util wr_burst_util elapsed_s rc log; do
             [[ "$lanes" == "lanes" ]] && continue
-            printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n" \
+            printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n" \
                 "$lanes" "$shape" "$flow" "$status" "$pred" "$exact" "$fixed" \
-                "$cycles" "$peak_tops" "$rd_burst_util" "$wr_burst_util" \
+                "$cycles" "$ops_per_cycle" "$peak_tops" "$rd_burst_util" "$wr_burst_util" \
                 "$elapsed_s" "$rc" "$(basename "$log")"
         done < "$SUMMARY_TSV"
     } > "$SUMMARY_MD"
@@ -202,13 +202,13 @@ write_summary_md() {
 print_summary() {
     echo
     echo "=== Sweep summary table ==="
-    echo "| lanes | shape | flow | status | pred | exact | fixed | cycles | peak TOPS | rd burst util | wr burst util | elapsed_s | rc | log |"
-    echo "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"
-    while IFS=$'\t' read -r lanes shape flow status pred exact fixed cycles peak_tops rd_burst_util wr_burst_util elapsed_s rc log; do
+    echo "| lanes | shape | flow | status | pred | exact | fixed | cycles | ops/cycle | peak TOPS | rd bus util | wr bus util | elapsed_s | rc | log |"
+    echo "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"
+    while IFS=$'\t' read -r lanes shape flow status pred exact fixed cycles ops_per_cycle peak_tops rd_burst_util wr_burst_util elapsed_s rc log; do
         [[ "$lanes" == "lanes" ]] && continue
-        printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n" \
+        printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n" \
             "$lanes" "$shape" "$flow" "$status" "$pred" "$exact" "$fixed" \
-            "$cycles" "$peak_tops" "$rd_burst_util" "$wr_burst_util" \
+            "$cycles" "$ops_per_cycle" "$peak_tops" "$rd_burst_util" "$wr_burst_util" \
             "$elapsed_s" "$rc" "$(basename "$log")"
     done < "$SUMMARY_TSV"
     echo
@@ -228,7 +228,7 @@ run_case() {
     local run_log_copy="$OUT_DIR/logs/${case_name}.run.log"
     local meta_copy="$OUT_DIR/meta/${case_name}.metadata.json"
     local params_copy="$OUT_DIR/meta/${case_name}.params.vh"
-    local start_s end_s elapsed_s rc status cycles pred exact fixed perf_summary peak_tops rd_burst_util wr_burst_util
+    local start_s end_s elapsed_s rc status cycles pred exact fixed perf_summary ops_per_cycle peak_tops rd_burst_util wr_burst_util
 
     echo
     echo "=== Case: lanes=$lanes shape=$shape flow=$flow ==="
@@ -275,16 +275,17 @@ run_case() {
     pred=${pred:-NA}
     exact=${exact:-NA}
     fixed=${fixed:-NA}
+    ops_per_cycle=$(summary_value "$log_file" "ops_per_cycle")
     peak_tops=$(summary_value "$log_file" "peak_tops")
     rd_burst_util=$(summary_value "$log_file" "rd_burst_util")
     wr_burst_util=$(summary_value "$log_file" "wr_burst_util")
 
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
         "$lanes" "$shape" "$flow" "$status" "$pred" "$exact" "$fixed" \
-        "$cycles" "$peak_tops" "$rd_burst_util" "$wr_burst_util" \
+        "$cycles" "$ops_per_cycle" "$peak_tops" "$rd_burst_util" "$wr_burst_util" \
         "$elapsed_s" "$rc" "$log_file" >> "$SUMMARY_TSV"
 
-    echo "[SUMMARY] lanes=$lanes shape=$shape flow=$flow status=$status pred=$pred exact=$exact fixed=$fixed cycles=$cycles peak_tops=$peak_tops rd_burst_util=$rd_burst_util wr_burst_util=$wr_burst_util elapsed_s=$elapsed_s rc=$rc"
+    echo "[SUMMARY] lanes=$lanes shape=$shape flow=$flow status=$status pred=$pred exact=$exact fixed=$fixed cycles=$cycles ops_per_cycle=$ops_per_cycle peak_tops=$peak_tops rd_burst_util=$rd_burst_util wr_burst_util=$wr_burst_util elapsed_s=$elapsed_s rc=$rc"
 
     [[ "$status" == "PASS" && "$rc" -eq 0 ]]
 }

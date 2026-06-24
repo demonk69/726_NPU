@@ -16,6 +16,14 @@ def fmt_tops(tops_x1e6: int) -> str:
     return f"{tops_x1e6 // 1_000_000}.{tops_x1e6 % 1_000_000:06d}"
 
 
+def fmt_ratio(num: int, den: int, places: int = 3) -> str:
+    if den == 0:
+        return "0." + ("0" * places)
+    scale = 10 ** places
+    value = (num * scale) // den
+    return f"{value // scale}.{value % scale:0{places}d}"
+
+
 def ratio_bp(num: int, den: int) -> int:
     return 0 if den == 0 else (num * 10_000) // den
 
@@ -94,6 +102,7 @@ def main() -> int:
     print("[PERF_SUMMARY]")
     print(f"| cores            | {len(rows):-10d} |")
     print(f"| peak_tops        | {fmt_tops(totals['peak_tops_x1e6']):>10s} |")
+    print(f"| ops_per_cycle    | {fmt_ratio(totals['ops'], totals['busy_cycles']):>10s} |")
     print(f"| mac_ops          | {totals['mac_ops']:-10d} |")
     print(f"| ops              | {totals['ops']:-10d} |")
     print(f"| busy_cycles_sum  | {totals['busy_cycles']:-10d} |")

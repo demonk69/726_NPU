@@ -81,15 +81,3 @@ When `--image <path>` is used, Pillow loads the image, resizes it to 32x32, norm
 | closed-loop | `sim/vgg_closed_loop/` |
 
 These are generated artifacts and should not be committed.
-
-## FPGA Host Direction
-
-For PYNQ-Z2 deployment, runtime host preprocessing should be split from PyTorch checkpoint loading:
-
-- Extract input quant constants once from the checkpoint.
-- Use a small Pillow + numpy script to convert images to 3072 INT8 bytes.
-- Pass one image per inference to the PYNQ runtime through the normal Python/notebook/SSH path.
-- Receive one class plus raw performance counters.
-- Compute TOPS and bus utilization on PS or the host from raw counters.
-
-See `doc/pynq_z2_deployment.md`.

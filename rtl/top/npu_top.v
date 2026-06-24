@@ -148,6 +148,7 @@ wire [31:0] conv_ifm_shape_r, conv_channels_r, conv_kernel_r;
 wire [31:0] conv_out_shape_r, conv_stride_pad_r, conv_dilation_r;
 wire [7:0]  arr_cfg_r;
 wire [2:0]  clk_div_r;
+reg  [2:0]  clk_div_eff;
 wire [1:0]  cfg_shape_r;
 wire        cg_en_r;
 wire        status_busy, status_done, status_error, irq_flag;
@@ -410,7 +411,8 @@ npu_ctrl #(
     .w_ppb_clear  (ctrl_w_ppb_clear),
     .a_ppb_clear  (ctrl_a_ppb_clear),
     .r_fifo_clear  (ctrl_r_fifo_clear),
-    .irq          (irq_flag)
+    .irq          (irq_flag),
+    .compute_ce   (compute_ce)
 );
 
 // ---------------------------------------------------------------------------
@@ -660,15 +662,18 @@ axi_monitor #(
 
 wire pe_data_ready = !w_ppb_buf_empty_int && !a_ppb_buf_empty_int;
 wire pe_consume = pe_en && (pe_data_ready || pe_flush);
-// One packed A vector and one packed W vector are consumed only when both PPBufs
-// have enough lanes for the controller's current shape and k cycle.
-wire tile_vec_fire = ctrl_vec_consume &&
-                     w_ppb_rd_vec_valid &&
-                     a_ppb_rd_vec_valid;
-wire tile_feed_step = ctrl_tile_mode && pe_en && pe_stat && !pe_flush;
+wire scalar_pe_en_raw = (!ctrl_tile_mode) && pe_consume;
+wire scalar_pe_en = scalar_pe_en_raw && compute_ce;
+wire tile_vec_fire_raw = ctrl_vec_consume &&
+                         w_ppb_rd_vec_valid &&
+                         a_ppb_rd_vec_valid;
+wire tile_vec_fire = tile_vec_fire_raw && compute_ce;
+wire tile_feed_step_raw = ctrl_tile_mode && pe_en && pe_stat && !pe_flush;
+wire tile_feed_step = tile_feed_step_raw && compute_ce;
 
-assign w_ppb_rd_en = ctrl_tile_mode ? 1'b0 : pe_consume;
-assign a_ppb_rd_en = ctrl_tile_mode ? 1'b0 : pe_consume;
+wire ppb_scalar_consume = pe_consume && compute_ce;
+assign w_ppb_rd_en = ctrl_tile_mode ? 1'b0 : ppb_scalar_consume;
+assign a_ppb_rd_en = ctrl_tile_mode ? 1'b0 : ppb_scalar_consume;
 assign w_ppb_rd_vec_en = tile_vec_fire;
 assign a_ppb_rd_vec_en = tile_vec_fire;
 
@@ -713,15 +718,29 @@ wire [PHY_ROWS-1:0] power_row_cg = cg_en_r ? ~shape_row_ce_mask(ctrl_cfg_shape)
 wire [PHY_COLS-1:0] power_col_cg = cg_en_r ? ~shape_col_ce_mask(ctrl_cfg_shape)
                                            : {PHY_COLS{1'b0}};
 
-// CLK_DIV is intentionally held at 1x for the compute CE path until the
-// controller/DMA scheduler is made CE-aware. Row/column CE is safe today.
+// Apply CLK_DIV changes only while idle. This keeps in-flight compute from
+// seeing a torn divider phase if software writes 0x34 during a launch.
+always @(posedge sys_clk) begin
+    if (!sys_rst_n)
+        clk_div_eff <= 3'b000;
+    else if (!status_busy)
+        clk_div_eff <= clk_div_r;
+end
+
+// DFS clock-enable: gates compute path (PE array, A-skew pipe, PPBuf vector
+// consumption). DMA, AXI-Lite, controller FSM state decode, and serializer
+// continue at full sys_clk.  When CLK_DIV=0 the CE is always 1 (1x mode).
+wire compute_ce = pe_array_global_ce;
+
+// CLK_DIV is written via AXI-Lite offset 0x34. The divisor is applied to the
+// compute CE path; DMA/prefetch/writeback and register access stay at sys_clk.
 npu_power #(
     .ROWS(PHY_ROWS),
     .COLS(PHY_COLS)
 ) u_power (
     .clk         (sys_clk),
     .rst_n       (sys_rst_n),
-    .div_sel     (3'b000),
+    .div_sel     (clk_div_eff),
     .row_cg_en   (power_row_cg),
     .col_cg_en   (power_col_cg),
     .global_ce   (pe_array_global_ce),
@@ -861,7 +880,6 @@ assign pe_acc_init_mask = {PHY_ROWS*PHY_COLS{1'b0}};
 //
 // Keep the original single-output path for non-tile mode. 4x4 tile mode writes
 // back through the array serializer below.
-wire scalar_pe_en = (!ctrl_tile_mode) && pe_consume;
 wire [ACC_W-1:0] scalar_result;
 wire [ACC_W-1:0] scalar_act_result;
 wire [ACC_W-1:0] scalar_post_result;

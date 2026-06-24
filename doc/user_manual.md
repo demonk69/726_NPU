@@ -1,6 +1,6 @@
 # User Manual
 
-Updated: 2026-06-15
+Updated: 2026-06-24
 
 This document summarizes the firmware-facing ABI currently used by the maintained VGG simulation flows.
 
@@ -10,6 +10,10 @@ This document summarizes the firmware-facing ABI currently used by the maintaine
 ./run_vgg_e2e.sh
 ./run_vgg_e2e.sh --image ./pic/test_cifar10_2.jpg
 ./run_vgg_closed_loop.sh --image ./pic/test_cifar10_2.jpg
+./run_vgg_closed_loop.sh --image ./pic/test_cifar10_2.jpg --clk-div 1
+./run_vgg_closed_loop.sh --image ./pic/test_cifar10_2.jpg --ppb-depth 4096
+./run_vgg_mc_closed_loop.sh --num-cores 2 --image ./pic/test_cifar10_2.jpg
+./run_vgg_closed_loop_sweep.sh --lanes 4 --num-cores 1,2 --shapes 16x16 --ppb-depths 1024,4096,8192
 ./run_all.sh standard 0
 ./run_all.sh closed_loop --image ./pic/test_cifar10_2.jpg
 ```
@@ -24,13 +28,8 @@ Use the maintained Vivado filelist:
 
 ```tcl
 source scripts/vivado_npu_filelist.tcl
-```
-
-Default INT8-only source set:
-
-```tcl
 add_files -fileset sources_1 $npu_vivado_project_rtl_files
-set_property top npu_pynq_wrapper [get_filesets sources_1]
+set_property top npu_top [get_filesets sources_1]
 update_compile_order -fileset sources_1
 ```
 
@@ -40,7 +39,7 @@ To build with FP16 enabled:
 
 ```tcl
 add_files -fileset sources_1 $npu_vivado_fp16_project_rtl_files
-set_property top npu_pynq_wrapper [get_filesets sources_1]
+set_property top npu_top [get_filesets sources_1]
 update_compile_order -fileset sources_1
 ```
 
@@ -50,9 +49,7 @@ If the NPU is instantiated as a Vivado block-design module cell, also set the mo
 set_property -dict [list CONFIG.FP16_ENABLE {1}] [get_bd_cells npu_0]
 ```
 
-If `npu_pynq_wrapper` is used directly as the RTL top, set the Verilog generic/parameter `FP16_ENABLE=1` in the synthesis run or instantiate the wrapper with `.FP16_ENABLE(1)`.
-
-`scripts/create_pynq_z2_npu_project.tcl` intentionally sets `CONFIG.FP16_ENABLE {0}`. Change that value to `{1}` only for an explicit full FP16 build.
+If `npu_top` is used directly as the RTL top, set the Verilog generic/parameter `FP16_ENABLE=1` in the synthesis run or instantiate the top with `.FP16_ENABLE(1)`.
 
 ## NPU MMIO Base
 
@@ -73,7 +70,7 @@ Firmware writes NPU registers through PicoRV32 memory-mapped I/O.
 | `0x24` | `A_ADDR` | W | DRAM A tile address |
 | `0x28` | `R_ADDR` | W | DRAM result address |
 | `0x30` | `ARR_CFG` | W | array mode, including tile mode |
-| `0x34` | `CLK_DIV` | W/R | stored divider select; compute CE path currently holds 1x |
+| `0x34` | `CLK_DIV` | W/R | clock-enable divisor (0=1x, 1=1/2, 2=1/4, 3=1/8); invalid values fall back to 1x |
 | `0x38` | `CG_EN` | W/R | enables shape-based row/column CE into the PE array |
 | `0x3C` | `CFG_SHAPE` | W | shape select |
 | `0x40` | `DESC_BASE` | W | RTL descriptor-v1 base |
@@ -112,7 +109,37 @@ Current VGG flows use `CFG_SHAPE=2` for 16x16.
 
 `CG_EN=1` enables row/column clock-enable masks derived from `CFG_SHAPE`. This uses normal register clock-enable logic inside the PE array; it does not create gated clocks.
 
-`CLK_DIV` is readable/writable for ABI compatibility, but the current top-level holds the compute CE path at 1x. Do not rely on `CLK_DIV` to slow the array until the controller and DMA schedule become CE-aware.
+`CLK_DIV` controls a clock-enable pulse that gates the PE array and compute pipeline: `0=1x, 1=1/2, 2=1/4, 3=1/8`. DMA, AXI-Lite, and result serializer continue at full `sys_clk`. Write `CLK_DIV` while the NPU is idle (before asserting START); the RTL latches the new value only when `STATUS_BUSY=0`. Writes during active compute are safely ignored and do not affect the in-flight computation. The default is `0` (full speed).
+
+All runners accept `--clk-div`:
+```bash
+./run_vgg_closed_loop.sh --image ./pic/test_cifar10_2.jpg --clk-div 1
+./run_vgg_mc_closed_loop.sh --num-cores 2 --clk-div 2
+./run_vgg_closed_loop_sweep.sh --clk-divs 0,1,2,3 --shapes 16x16
+```
+
+## PPB Depth Sweeps
+
+`PPB_DEPTH` is the W/A ping-pong buffer depth in 32-bit words per bank. It is a Verilog parameter passed through the VGG closed-loop testbench, not an MMIO register.
+
+Use these options before generation/compile:
+
+```bash
+./run_vgg_closed_loop.sh --image ./pic/test_cifar10_2.jpg --ppb-depth 4096
+./run_vgg_mc_closed_loop.sh --num-cores 2 --ppb-depth 4096
+./run_vgg_closed_loop_sweep.sh --shapes 16x16 --flows os --lanes 4 --ppb-depths 1024,4096,8192
+```
+
+The generator writes `VGG_CLOSED_PPB_DEPTH` into `soc_vgg_closed_loop_params.vh` and recomputes `KT_ELEMS`; the testbench passes the same value into `soc_top.NPU_PPB_DEPTH` or `soc_mc_top.NPU_PPB_DEPTH`.
+
+## Multi-Core Operation
+
+```bash
+./run_vgg_mc_closed_loop.sh --num-cores 2 --image ./pic/test_cifar10_2.jpg
+./run_vgg_closed_loop_sweep.sh --num-cores 1,2 --lanes 4 --shapes 16x16 --flows os
+```
+
+Each core has independent `CLK_DIV`, CG, and PE config registers. The firmware writes per-core registers through the multi-core AXI-Lite bridge (`axi_lite_mc_bridge`).
 
 ## VGG E2E Tile Table ABI
 
@@ -161,7 +188,3 @@ Testbenches monitor `MARKER_ADDR` in DRAM.
 | `0x000000FF` | firmware failure marker |
 
 Closed-loop testbench compares the class marker against exact Python model output.
-
-## FPGA I/O ABI Planned
-
-PYNQ-Z2 deployment uses PS ARM plus PL NPU as the primary route. The first board interface is the normal PYNQ Python/SSH/notebook path, with UART deferred as an optional transport. Each image returns one class plus raw performance counters; derived TOPS and bus utilization are computed on PS or the host. The current ABI direction is documented in `doc/pynq_z2_deployment.md`.

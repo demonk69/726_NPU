@@ -21,6 +21,8 @@ SHAPE="16x16"
 FLOW="os"
 LANES="${VGG_CLOSED_LANES:-4}"
 NUM_CORES="2"
+CLK_DIV="${VGG_CLOSED_CLK_DIV:-0}"
+PPB_DEPTH="${VGG_CLOSED_PPB_DEPTH:-8192}"
 DIAG=""
 DIAG_INTERVAL="10000000"
 
@@ -54,8 +56,16 @@ while [[ $# -gt 0 ]]; do
             LANES="${2:?missing lanes}"
             shift 2
             ;;
+        --clk-div)
+            CLK_DIV="${2:?missing clk-div}"
+            shift 2
+            ;;
+        --ppb-depth)
+            PPB_DEPTH="${2:?missing ppb-depth}"
+            shift 2
+            ;;
         --help|-h)
-            echo "Usage: $0 [--num-cores 1|2|4] [--image <file>] [--shape 4x4|8x8|16x16|8x32] [--flow os|ws] [--lanes 1|2|4]"
+            echo "Usage: $0 [--num-cores 1|2|4] [--image <file>] [--shape 4x4|8x8|16x16|8x32] [--flow os|ws] [--lanes 1|2|4] [--clk-div 0|1|2|3] [--ppb-depth <words>]"
             exit 0
             ;;
         --*)
@@ -101,11 +111,24 @@ case "$LANES" in
         ;;
 esac
 
+case "$PPB_DEPTH" in
+    ''|*[!0-9]*)
+        echo "Invalid ppb-depth: $PPB_DEPTH (expected positive integer)" >&2
+        exit 2
+        ;;
+    0)
+        echo "Invalid ppb-depth: 0 (expected positive integer)" >&2
+        exit 2
+        ;;
+esac
+
 GEN_ARGS=()
 GEN_ARGS+=(--timeout-cycles "$TIMEOUT_CYCLES")
 GEN_ARGS+=(--shape "$SHAPE")
 GEN_ARGS+=(--flow "$FLOW")
 GEN_ARGS+=(--lanes "$LANES")
+GEN_ARGS+=(--clk-div "$CLK_DIV")
+GEN_ARGS+=(--ppb-depth "$PPB_DEPTH")
 GEN_ARGS+=(--num-cores "$NUM_CORES")
 if [[ -n "$IMAGE" ]]; then
     GEN_ARGS+=(--image "$IMAGE")
@@ -153,7 +176,9 @@ if [[ "$RUN_RC" -eq 124 ]]; then
     echo "[SHELL_TIMEOUT] ${RUN_TIMEOUT_SECONDS} seconds" | tee -a "$LOG_FILE"
 fi
 
-grep -E '\[PASS\]|\[FAIL\]|\[TIMEOUT\]|\[SHELL_TIMEOUT\]|Cycles' "$LOG_FILE" || true
+python3 -B "$ROOT/tools/report_perf_summary.py" "$LOG_FILE" >> "$LOG_FILE"
+
+grep -E '\[PASS\]|\[FAIL\]|\[TIMEOUT\]|\[SHELL_TIMEOUT\]|\[PERF\]|\[PERF_SUMMARY\]|^\||Cycles' "$LOG_FILE" || true
 
 if grep -qE '\[FAIL\]|\[TIMEOUT\]|\[SHELL_TIMEOUT\]' "$LOG_FILE"; then
     RUN_RC=1

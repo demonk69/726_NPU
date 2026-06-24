@@ -1,10 +1,10 @@
 # Current NPU/SoC Architecture
 
-Updated: 2026-06-15
+Updated: 2026-06-24
 
 This document describes the current implementation state. It is not a historical roadmap and not a target-only architecture plan.
 
-For verification results, see `doc/verification_status.md`. For the PYNQ-Z2 deployment direction, see `doc/pynq_z2_deployment.md`.
+For verification results, see `doc/verification_status.md`.
 
 ## System Boundary
 
@@ -38,27 +38,9 @@ soc_top
 
 There is currently no UART, SPI Flash controller, Boot ROM, GPIO, or board-level I/O peripheral in RTL.
 
-## Vivado/Board Boundary
+## Board-Level NPU Boundary
 
-The simulation SoC files under `rtl/soc/` are not the board-level NPU source set. For Vivado block-design integration, use `rtl/top/npu_pynq_wrapper.v` as the RTL module boundary and connect it to the Zynq PS or another AXI-capable host.
-
-```text
-Zynq PS or external host
-  |
-  +-- AXI4-Lite master  --> npu_pynq_wrapper.S_AXI registers
-  +-- AXI4/DDR slave    <-- npu_pynq_wrapper.M_AXI DMA traffic
-  +-- clock/reset       --> aclk / aresetn
-  +-- interrupt         <-- npu_irq
-
-npu_pynq_wrapper
-  |
-  +-- npu_top
-      +-- npu_axi_lite register file
-      +-- npu_ctrl scheduler
-      +-- npu_dma AXI master
-      +-- W/A pingpong buffers
-      +-- scalar PE and reconfigurable PE array
-```
+`rtl/top/npu_top.v` is the board-independent NPU integration module and provides a compact AXI4-Lite slave port (register file) plus an AXI4 master port (DMA for W/A/bias/result traffic). For FPGA board integration it should be wrapped with the target platform's AXI infrastructure (interconnect, clock, reset). The simulation SoC files under `rtl/soc/` are not board-level design sources.
 
 `scripts/vivado_npu_filelist.tcl` is the maintained source list for this boundary. Its default list is INT8-only and excludes the optional FP16 datapath files. Use `$npu_vivado_fp16_project_rtl_files` and set `FP16_ENABLE=1` only when a full FP16 build is required.
 
@@ -127,7 +109,9 @@ CPU firmware programs the NPU through the MMIO base `0x02000000`.
 | `0x20` | `W_ADDR` | W tile address in DRAM |
 | `0x24` | `A_ADDR` | A tile address in DRAM |
 | `0x28` | `R_ADDR` | Result address in DRAM |
-| `0x30` | `ARR_CFG` | tile mode control, including `bit7=1` |
+| `0x30` | `ARR_CFG` | tile mode control |
+| `0x34` | `CLK_DIV` | CE divisor: 0=1x, 1=1/2, 2=1/4, 3=1/8 |
+| `0x38` | `CG_EN` | shape-based row/column CE masking |
 | `0x3C` | `CFG_SHAPE` | shape select: 4x4, 8x8, 16x16, 8x32 |
 | `0x40` | `DESC_BASE` | RTL descriptor-v1 base address |
 | `0x44` | `DESC_COUNT` | RTL descriptor-v1 count |
@@ -135,6 +119,54 @@ CPU firmware programs the NPU through the MMIO base `0x02000000`.
 | `0x9C` | `QUANT_CFG` | Scalar hardware post-quant config |
 
 The runtime closed-loop VGG path disables hardware `QUANT_CFG` and performs exact per-channel Q24 requant in CPU firmware.
+
+## DFS (Clock-Enable Throttling)
+
+The NPU supports clock-enable based compute rate control via `CLK_DIV` register (`0x34`). This is not PLL/MMCM dynamic reconfiguration — it uses a single `sys_clk` with CE pulse gating.
+
+| `CLK_DIV` | Rate | CE duty cycle |
+|---:|---|---|
+| `0` | 1x (full speed) | 100% |
+| `1` | 1/2 | 50% |
+| `2` | 1/4 | 25% |
+| `3` | 1/8 | 12.5% |
+
+**Gated path:** `npu_power` → `global_ce` → `compute_ce` gates PE array, controller `tile_k_cycle`/`ws_consume_cnt`, drain state, `tile_feed_step`, `tile_vec_fire`, scalar PE enable, and PPBuf consumption.
+
+**Not gated:** DMA, AXI-Lite register access, result serializer, performance counters, and controller FSM state decode run at full `sys_clk`.
+
+**Latch:** An idle-only latch in `npu_top` captures `clk_div_eff ← clk_div_r` only when `STATUS_BUSY=0`. Writes to `CLK_DIV` during active compute are safely ignored.
+
+Firmware entry: `--clk-div 0|1|2|3` via runner scripts and generator. Default `0`.
+
+## PPB Depth And K Tiling
+
+The W/A ping-pong buffer depth is controlled by the `PPB_DEPTH` Verilog parameter. In VGG closed-loop simulations this is generated as `VGG_CLOSED_PPB_DEPTH` and passed by the testbench into `soc_top.NPU_PPB_DEPTH` or `soc_mc_top.NPU_PPB_DEPTH`.
+
+`PPB_DEPTH` affects two things that must stay matched:
+
+| Component | Effect |
+|---|---|
+| `pingpong_buf.DEPTH` | Physical W/A buffer capacity in 32-bit words per bank |
+| `npu_ctrl.PPB_DEPTH` | `k_tile_elems = (PPB_DEPTH * 4) / bytes_per_k`, controlling K-split |
+| `gen_vgg_closed_loop.py` | Computes matching `KT_ELEMS` and emits `VGG_CLOSED_PPB_DEPTH` |
+
+Runner entry: `--ppb-depth <words>` for single/multi closed-loop, and `--ppb-depths <csv>` for sweep. This is not an MMIO register; it is a build/testbench-time parameter.
+
+## Multi-Core
+
+`rtl/top/npu_mc_top.v` and `rtl/soc/soc_mc_top.v` wrap multiple `npu_top` instances sharing a single DRAM model and PicoRV32 CPU.
+
+| File | Role |
+|---|---|
+| `rtl/top/npu_mc_top.v` | Multi-core NPU wrapper with per-core AXI-Lite/DMA ports |
+| `rtl/soc/soc_mc_top.v` | SoC integrator: CPU, SRAM, `dram_multi_port`, AXI-Lite multi-core bridge |
+| `rtl/soc/dram_multi_port.v` | Simulation multi-port DRAM shared across CPU + N NPU cores |
+| `rtl/soc/axi_lite_mc_bridge.v` | Single PicoRV32 bus → per-core AXI-Lite fanout |
+
+Each core has its own `CLK_DIV`, CG, and PE array configuration; firmware can set different divisors per core.
+
+Entry: `./run_vgg_mc_closed_loop.sh --num-cores 1|2|4`.
 
 ## Execution Paths
 
@@ -255,9 +287,3 @@ Current policy:
 - Runtime closed-loop disables hardware quant and reads raw INT32+bias results.
 - Firmware applies ReLU and per-channel Q24 requant on the CPU.
 - Testbench validates against exact Python model output, not the old per-16-channel approximation.
-
-## FPGA Deployment Direction
-
-The current board target is PYNQ-Z2. The primary route uses Zynq PS ARM as the runtime CPU and keeps the NPU in PL. PS/host software will receive images, manage DDR buffers, program NPU registers, read raw performance counters, and compute derived TOPS and bus utilization.
-
-The previous pure-PL UART/SPI Flash/Boot ROM route is deferred for non-Zynq boards. The current flow is documented in `doc/pynq_z2_deployment.md`.

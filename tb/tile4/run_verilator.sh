@@ -63,7 +63,7 @@ run_icarus() {
     mkdir -p "$(dirname "$vvp")"
     iverilog -g2012 -I "$test_dir" -o "$vvp" \
         "${RTL_FILES[@]}" "$TB_FILE" 2>&1 || die "icarus compile fail: $test_name"
-    (cd "$test_dir" && timeout "$timeout_sec" vvp "$vvp" 2>&1 | grep -E 'PASS|FAIL|WARN|^RESULT')
+    (cd "$test_dir" && timeout "$timeout_sec" vvp "$vvp" 2>&1 | grep -E 'PASS|FAIL|WARN|^\[RESULT\]')
 }
 
 run_verilator() {
@@ -80,7 +80,7 @@ run_verilator() {
         $VL_WARN \
         +define+VERILATOR_TRACE \
         "${RTL_FILES[@]}" "$TB_FILE" 2>&1 || die "verilator compile fail: $test_name"
-    (cd "$test_dir" && timeout "$timeout_sec" "$vdir/Vtb_npu_tile_gemm_v2" 2>&1 | grep -E 'PASS|FAIL|WARN|^RESULT')
+    (cd "$test_dir" && timeout "$timeout_sec" "$vdir/Vtb_npu_tile_gemm_v2" 2>&1 | grep -E 'PASS|FAIL|WARN|^\[RESULT\]')
 }
 
 run_test() {

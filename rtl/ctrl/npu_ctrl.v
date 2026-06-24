@@ -170,7 +170,9 @@ module npu_ctrl #(
     // Result FIFO clear
     output reg               r_fifo_clear,
     // Interrupt
-    output reg               irq
+    output reg               irq,
+    // DFS clock-enable: controller advances compute progress only when high
+    input  wire              compute_ce
 );
 
 // ---------------------------------------------------------------------------
@@ -1194,7 +1196,7 @@ always @(posedge clk) begin
                     pe_load_w <= (ws_consume_cnt < lk_k_dim[15:0]) ? 1'b1 : 1'b0;
                     if (ws_consume_cnt < lk_k_dim[15:0] + 16'd2) begin
                         pe_en <= 1'b1;
-                        ws_consume_cnt <= ws_consume_cnt + 1;
+                        if (compute_ce) ws_consume_cnt <= ws_consume_cnt + 1;
                     end else begin
                         pe_en     <= 1'b0;
                         pe_load_w <= 1'b0;
@@ -1248,7 +1250,7 @@ always @(posedge clk) begin
                                 dma_a_done_r <= 1'b0;
                             end
                             tile_k_cycle <= 16'd0;
-                        end else if (tile_k_cycle + 16'd1 >= tile_compute_cycles) begin
+                        end else if (compute_ce && (tile_k_cycle + 16'd1 >= tile_compute_cycles)) begin
                     // Keep pe_en=1 so the PE pipeline drains completely
                     // before S_DRAIN asserts flush on the next cycle.
                     tile_k_cycle <= 16'd0;
@@ -1292,7 +1294,7 @@ always @(posedge clk) begin
                     end else begin
                         state <= S_DRAIN;
                     end
-                        end else begin
+                        end else if (compute_ce) begin
                             tile_k_cycle <= tile_k_cycle + 16'd1;
                         end
                     end else begin
@@ -1311,7 +1313,7 @@ always @(posedge clk) begin
                 pe_en    <= 1'b1;
                 pe_flush <= 1'b1;
                 pe_load_w <= 1'b0;
-                state    <= S_DRAIN2;
+                if (compute_ce) state <= S_DRAIN2;
             end
 
             // =================================================================
@@ -1320,7 +1322,7 @@ always @(posedge clk) begin
             S_DRAIN2: begin
                 pe_en    <= 1'b1;
                 pe_flush <= 1'b0;
-                state    <= S_WRITE_BACK;
+                if (compute_ce) state <= S_WRITE_BACK;
             end
 
             // =================================================================

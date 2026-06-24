@@ -40,6 +40,7 @@ __pycache__/
 /sim/vgg_mc_closed_loop/
 /sim/vgg_closed_loop_sweep_*/
 /sim/vgg_closed_loop_full_sweep_*/
+/sim/*_sweep_smoke/
 /sim/mc_tests/obj*/
 
 # Generated CIFAR-10 sample images

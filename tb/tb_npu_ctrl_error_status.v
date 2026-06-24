@@ -139,7 +139,8 @@ module tb_npu_ctrl_error_status;
         .w_ppb_clear(),
         .a_ppb_clear(),
         .r_fifo_clear(),
-        .irq(irq)
+        .irq(irq),
+        .compute_ce(1'b1)
     );
 
     always @(posedge clk) begin

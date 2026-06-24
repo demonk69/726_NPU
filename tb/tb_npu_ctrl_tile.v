@@ -124,7 +124,8 @@ module tb_npu_ctrl_tile;
         .w_ppb_clear(w_ppb_clear),
         .a_ppb_clear(a_ppb_clear),
         .r_fifo_clear(r_fifo_clear),
-        .irq(irq)
+        .irq(irq),
+        .compute_ce(1'b1)
     );
 
     initial clk = 1'b0;

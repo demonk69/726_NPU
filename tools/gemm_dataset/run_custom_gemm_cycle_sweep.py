@@ -26,7 +26,7 @@ SHAPE_DIMS = {
 RESULT_FIELDS = [
     "test", "cfg_shape", "data_w", "run_cycles", "perf_cycles", "busy_cycles",
     "compute_cycles", "dma_cycles", "rd_beats", "wr_beats", "rd_bytes", "wr_bytes",
-    "rd_bursts", "wr_bursts", "mac_ops_lo", "mac_ops_hi", "ops_lo", "ops_hi",
+    "rd_bursts", "wr_bursts", "mac_ops", "ops",
     "peak_ops_cycle", "aw_count", "err_status",
 ]
 
@@ -121,15 +121,39 @@ def collect_points(root: Path, args: argparse.Namespace) -> list[tuple[int, int,
 
 
 def parse_result_line(output: str) -> dict[str, str] | None:
+    """Parse [RESULT] pipe-table block from testbench output.
+
+    Expected:
+        [RESULT] test_name
+        | key1     | value1 |
+        | key2     | value2 |
+        | status   | PASS   |
+    """
+    in_block = False
+    fields: dict[str, str] = {}
     for line in output.splitlines():
-        if not line.startswith("RESULT\t"):
+        stripped = line.strip()
+        if stripped.startswith("[RESULT]"):
+            in_block = True
+            # Also capture test name from [RESULT] header line
+            test = stripped[len("[RESULT]"):].strip()
+            if test:
+                fields["test"] = test
             continue
-        fields: dict[str, str] = {}
-        for part in line.split("\t")[1:]:
-            if "=" not in part:
+        if in_block and stripped.startswith("|") and stripped.endswith("|"):
+            inner = stripped[1:-1].strip()
+            parts = inner.split("|", 1)
+            if len(parts) != 2:
                 continue
-            key, value = part.split("=", 1)
+            key = parts[0].strip()
+            value = parts[1].strip()
             fields[key] = value
+        elif in_block and not stripped.startswith("|"):
+            in_block = False
+            if "status" in fields:
+                return fields
+            fields = {}
+    if fields and "status" in fields:
         return fields
     return None
 

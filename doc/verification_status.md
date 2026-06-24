@@ -1,6 +1,6 @@
 # Verification Status
 
-Updated: 2026-06-23
+Updated: 2026-06-24
 
 This document is the current verification record. Older status files and worklogs in `doc/archive/` are historical and may describe superseded Windows/Icarus flows.
 
@@ -25,7 +25,7 @@ This document is the current verification record. Older status files and worklog
 | Runtime closed-loop image2 | `./run_all.sh closed_loop --image ./pic/test_cifar10_2.jpg` | PASS | frog/class 6 | 114,014,769 |
 | Runtime closed-loop image4 | `./run_all.sh closed_loop --image ./pic/test_cifar10_4.jpg` | PASS | dog/class 5 | 114,013,544 |
 | Multi-core closed-loop image2, `NUM_CORES=1` | `./run_vgg_mc_closed_loop.sh --num-cores 1 --image pic/test_cifar10_2.jpg` | PASS | frog/class 6 | 114,014,769 |
-| Multi-core closed-loop image2, `NUM_CORES=2` | `./run_vgg_mc_closed_loop.sh --num-cores 2 --image pic/test_cifar10_2.jpg` | PASS | frog/class 6 | 151,892,523 |
+| Multi-core closed-loop image2, `NUM_CORES=2` | `./run_vgg_mc_closed_loop.sh --num-cores 2 --image pic/test_cifar10_2.jpg` | PASS | frog/class 6 | 110,242,347 |
 | Runtime closed-loop local image, 4x4 OS | `./run_vgg_closed_loop.sh --image <local-image> --shape 4x4 --flow os` | PASS on 2026-06-01 | automobile/class 1 | 160,809,527 |
 | Runtime closed-loop local image, 4x4 WS | `./run_vgg_closed_loop.sh --image <local-image> --shape 4x4 --flow ws` | PASS on 2026-06-01 | automobile/class 1 | 160,809,527 |
 | Runtime closed-loop full shape/dataflow sweep | `./run_vgg_closed_loop_sweep.sh --image <local-image>` | PASS on 2026-06-02, 8/8 cases | ship/class 8 | see sweep table below |
@@ -64,22 +64,19 @@ The prior `4x4` timeout was caused by the old 150M-cycle default limit, not by a
 | `iverilog -g2012 -o /tmp/opencode/tb_reconfig_pe_acc_init.vvp rtl/pe/pe_top.v rtl/array/reconfig_pe_array.v tb/tb_reconfig_pe_acc_init.v && vvp /tmp/opencode/tb_reconfig_pe_acc_init.vvp` | PE-array accumulator init, continued MAC, and row CE gating | PASS |
 | `iverilog -g2012 -o /tmp/opencode/tb_reconfig_pe_8x32.vvp rtl/pe/pe_top.v rtl/array/reconfig_pe_array.v tb/tb_reconfig_pe_8x32.v && vvp /tmp/opencode/tb_reconfig_pe_8x32.vvp` | 8x32 folded PE-array mapping and WS row wrap with CE ports tied on | PASS |
 | `iverilog -g2012 -s npu_top -o /tmp/opencode/npu_top_elab.vvp rtl/pe/*.v rtl/common/*.v rtl/buf/*.v rtl/array/*.v rtl/axi/*.v rtl/ctrl/*.v rtl/power/*.v rtl/top/npu_top.v` | `npu_top` elaboration | PASS |
-| `iverilog -g2012 -s npu_pynq_wrapper -o /tmp/opencode/npu_pynq_wrapper_elab.vvp rtl/pe/*.v rtl/common/*.v rtl/buf/*.v rtl/array/*.v rtl/axi/*.v rtl/ctrl/*.v rtl/power/*.v rtl/top/*.v` | PYNQ wrapper elaboration | PASS |
 | `tb/tile4/run_verilator.sh --shape 16x16 --M 16 --K 4 --N 16 --bias` | 16x16 tile Icarus + Verilator smoke | PASS |
 | `tb/tile4/run_verilator.sh --all --icarus --lanes {1,2,4}` | Tile GEMM lanes 1/2/4 across 4x4, 8x8, 16x16, 8x32, bias, and K-split smokes | PASS |
 | `tb/tile4/run_verilator.sh --verilator --shape 16x16 --M 16 --K 5 --N 16 --lanes {1,2,4}` | Verilator cross-check for lanes 1/2/4 with non-multiple K | PASS |
-| `verilator --lint-only -Wall -Wno-fatal --top-module npu_pynq_wrapper rtl/pe/*.v rtl/common/*.v rtl/buf/*.v rtl/array/*.v rtl/axi/*.v rtl/ctrl/*.v rtl/power/*.v rtl/top/*.v` | PYNQ wrapper lint | Completes with existing width/unused warnings |
 
-CE integration was smoke-tested on 2026-06-16 with `CG_EN=0` default compatibility, PE-array CE ports tied on in direct tests, top/PYNQ elaboration, AXI-Lite/DMA/controller tests, and the 16x16 tile Icarus + Verilator flow. The long closed-loop sweep was not rerun for this CE-only change; the latest full closed-loop sweep remains the 2026-06-02 result above.
+CE integration was smoke-tested on 2026-06-16 with `CG_EN=0` default compatibility, PE-array CE ports tied on in direct tests, top elaboration, AXI-Lite/DMA/controller tests, and the 16x16 tile Icarus + Verilator flow. The long closed-loop sweep was not rerun for this CE-only change; the latest full closed-loop sweep remains the 2026-06-02 result above.
 
-## Multi-Core NPU Plan Checks
+## Multi-Core NPU Checks
 
-These checks apply to the multi-core planning work under `plan/`. They do not
-replace the maintained single-core VGG entry points above.
+The following checks validate the multi-core implementation.
 
 | Command | Coverage | Result |
 |---|---|---|
-| `python3 -B -m py_compile tools/pth/gen_vgg_closed_loop.py` | Generator syntax after global `n_tile` postprocess fix | PASS |
+| `python3 -B -m py_compile tools/pth/gen_vgg_closed_loop.py` | Generator syntax after global `n_tile` fix and multi-core postprocess loop-hoist optimization | PASS |
 | `python3 -B tools/pth/gen_vgg_closed_loop.py --out-dir /tmp/opencode/vgg_mc_fixed --image pic/test_cifar10_2.jpg --shape 16x16 --flow os --lanes 4 --timeout-cycles 500000000 --num-cores 2` | 2-core closed-loop asset generation | PASS generation; exact-python pred 6 |
 | `iverilog -g2012 -o /tmp/opencode/tb_axi_lite_mc_bridge.vvp rtl/soc/axi_lite_mc_bridge.v tb/tb_axi_lite_mc_bridge.v && vvp /tmp/opencode/tb_axi_lite_mc_bridge.vvp` | Multi-core AXI-Lite decode and invalid window | PASS, 8 checks |
 | `iverilog -g2012 -o /tmp/opencode/tb_dram_multi_port.vvp rtl/soc/dram_multi_port.v tb/tb_dram_multi_port.v && vvp /tmp/opencode/tb_dram_multi_port.vvp` | Shared multi-port DRAM model | PASS, 9 checks |
@@ -88,7 +85,7 @@ replace the maintained single-core VGG entry points above.
 | `iverilog -g2012 -o /tmp/opencode/tb_soc_mc_shared_a.vvp sim/picorv32.v rtl/pe/*.v rtl/common/*.v rtl/buf/*.v rtl/array/*.v rtl/axi/*.v rtl/ctrl/*.v rtl/power/*.v rtl/soc/*.v rtl/top/*.v tb/tb_soc_mc_shared_a.v && vvp /tmp/opencode/tb_soc_mc_shared_a.vvp` | Shared `A_WORK`, per-core `R_WORK` smoke | PASS, 1109 cycles |
 | `verilator --lint-only --timing -DMC_HEARTBEAT_INTERVAL=1000000 -I/tmp/opencode/vgg_mc_fixed --top-module tb_mc_heart ... tb/tb_mc_heart.v` | 2-core heartbeat testbench lint after `NUM_CORES=1` compatibility update | PASS with existing warning suppressions |
 | `./run_vgg_mc_closed_loop.sh --num-cores 1 --image pic/test_cifar10_2.jpg` | Multi-core SoC wrapper, single-core VGG baseline | PASS, frog/class 6, 114,014,769 cycles |
-| `./run_vgg_mc_closed_loop.sh --num-cores 2 --image pic/test_cifar10_2.jpg` | Full 2-core closed-loop VGG | PASS, frog/class 6, 151,892,523 cycles |
+| `./run_vgg_mc_closed_loop.sh --num-cores 2 --image pic/test_cifar10_2.jpg` | Full 2-core closed-loop VGG | PASS, frog/class 6, 110,242,347 cycles |
 
 Short-run diagnostic throughput samples on this host:
 
@@ -100,9 +97,10 @@ Short-run diagnostic throughput samples on this host:
 
 These samples are not full-run performance results. They show that the older 42x
 slowdown claim is not reproduced by the current short-run setup. Full image2 VGG
-classification now passes with `NUM_CORES=2`, but it is slower than the
-`NUM_CORES=1` baseline because the current multi-core firmware is still dominated
-by serial PicoRV32 scheduling, packing, requant, and scatter work.
+classification now passes with `NUM_CORES=2`, and the postprocess loop-hoist
+optimization reduces the full run to 110,242,347 cycles versus 114,014,769 cycles
+for `NUM_CORES=1`. The speedup is still modest because PicoRV32 scheduling,
+packing, requant, and scatter work remain largely serial.
 
 ## Syntax Checks
 
@@ -111,7 +109,6 @@ by serial PicoRV32 scheduling, packing, requant, and scatter work.
 | `python3 -B -m py_compile tools/pth/gen_vgg_closed_loop.py` | PASS |
 | `bash -n run_vgg_closed_loop.sh run_vgg_closed_loop_sweep.sh` | PASS |
 | `bash -n run_all.sh` | PASS |
-| `tclsh scripts/create_pynq_z2_npu_project.tcl` | PASS syntax-only load; Vivado execution not run in this shell |
 
 ## Python Environment
 
@@ -145,17 +142,6 @@ The closed-loop flow verifies that firmware can perform the runtime steps needed
 The current closed-loop validation target is exact Python model output. The older per-16-channel hardware `QUANT_CFG` approximation is no longer used as the PASS criterion.
 
 The default runtime closed-loop shape is `16x16`. The generator and script accept `4x4`, `8x8`, `16x16`, and `8x32`. The `4x4` shape is slower in the current firmware-driven Verilator path and needs a timeout above 150M cycles; `run_vgg_closed_loop.sh` defaults to 250M cycles.
-
-## Deployment Status
-
-The RTL SoC is still a simulation SoC. It has PicoRV32, SRAM, DRAM model, and NPU. The current board target is PYNQ-Z2, with PS ARM as the runtime CPU and the NPU in PL.
-
-The deployment path is documented in `doc/pynq_z2_deployment.md`:
-
-- PS ARM programs the PL NPU and accesses DDR buffers.
-- Host sends one preprocessed 3x32x32 INT8 image per inference.
-- Each image returns one class plus raw performance counters.
-- TOPS and bus utilization are computed from raw counters on the host.
 
 ## Regression Notes
 

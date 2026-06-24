@@ -71,6 +71,7 @@ REG_ARR_CFG = 0x30
 REG_CFG_SHAPE = 0x3C
 REG_BIAS_ADDR = 0x98
 REG_QUANT_CFG = 0x9C
+REG_CLK_DIV  = 0x34
 
 CTRL_BIAS_TILE_OS = 0x211  # start | INT8 | OS | bias, raw INT32 result
 CTRL_BIAS_TILE_WS = 0x201  # start | INT8 | WS | bias, raw INT32 result
@@ -95,6 +96,7 @@ PASS_BASE = 0x100
 FAIL_MARKER = 0xFF
 
 NUM_CORES = 1
+CLK_DIV_VAL = 0
 NPU_CORE_STRIDE = 0x100
 
 
@@ -512,6 +514,7 @@ def emit_run_conv_layer(a):
     a.emit(LW("s4", "s1", 8))      # reset W ptr
     a.label("conv_n_loop")
     emit_write_reg_imm(a, REG_CTRL, 0)
+    emit_write_reg_imm(a, REG_CLK_DIV, CLK_DIV_VAL)
     emit_write_reg_imm(a, REG_M_DIM, TR)
     emit_write_reg_imm(a, REG_N_DIM, TC)
     emit_write_reg_reg(a, REG_K_DIM, "s9")
@@ -678,8 +681,10 @@ def emit_run_conv_layer_mc(a):
     a.li("t0", NPU_CORE_STRIDE)
     a.emit(MUL("t0", "t0", "a5"))
     a.emit(ADD("t0", "s0", "t0"))     # core_base = NPU_BASE + core*256
-
     a.emit(SW("zero", "t0", REG_CTRL))
+
+    a.li("t1", CLK_DIV_VAL);    a.emit(SW("t1", "t0", REG_CLK_DIV))
+
     a.li("t1", TR);         a.emit(SW("t1", "t0", REG_M_DIM))
     a.li("t1", TC);         a.emit(SW("t1", "t0", REG_N_DIM))
     a.emit(SW("s9", "t0", REG_K_DIM))
@@ -753,36 +758,52 @@ def emit_run_conv_layer_mc(a):
     a.li("t1", 1); a.emit(SLL("t1", "t1", "a5"))
     a.emit(AND("t0", "t1", "a6"))
     a.branch("beq", "t0", "zero", "mc_post_skip")
-    a.li("t1", TC); a.emit(MUL("t1", "t1", "a3"))
-    a.emit(ADD("a2", "t1", "zero"))  # a2 = global n_base
 
     a.li("a1", R_WORK_STRIDE); a.emit(MUL("a1", "a1", "a5"))
     a.li("t2", R_WORK_BASE[0]); a.emit(ADD("a1", "a1", "t2"))  # R_WORK_BASE[core]
 
-    a.li("a4", 0)
-    a.label("mc_post_row")
-    a.li("a7", 0)  # col
+    post_row_full = a.unique("mc_post_row_full")
+    post_no_wrap = a.unique("mc_post_no_wrap")
+    a.li("a2", 0)  # col within this core's tile
     a.label("mc_post_col")
-    a.li("t0", TC * 4); a.emit(MUL("t0", "t0", "a4"))
-    a.emit(SLLI("t2", "a7", 2)); a.emit(ADD("t0", "t0", "t2"))
-    a.emit(ADD("t0", "a1", "t0")); a.emit(LW("t4", "t0", 0))
-    a.emit(ADD("t0", "a2", "a7")); a.emit(SLLI("t0", "t0", 2))
-    a.emit(ADD("t0", "s6", "t0"))
-    a.emit(ADD("a0", "a7", "zero"))
-    a.emit(LW("a7", "t0", 0))      # Q24 multiplier for this output channel
-    a.emit(ADD("t1", "t4", "zero")); emit_requant_nonnegative(a)
-    a.emit(ADD("a7", "a0", "zero"))
-    a.emit(ADD("t0", "s10", "a4"))
-    a.emit(SRL("t2", "t0", "s2")); a.emit(MUL("t2", "t2", "tp"))
-    a.emit(AND("t4", "t0", "t3")); a.emit(ADD("t2", "t2", "t4"))
-    a.emit(ADD("t2", "t2", "tp")); a.emit(ADDI("t2", "t2", 1))
-    a.emit(ADD("t0", "a2", "a7")); a.emit(MUL("t0", "t0", "gp"))
-    a.emit(ADD("t0", "t0", "s3")); a.emit(ADD("t0", "t0", "t2"))
-    a.emit(SB("t1", "t0", 0))
-    a.emit(ADDI("a7", "a7", 1)); a.li("t0", TC)
-    a.branch("bne", "a7", "t0", "mc_post_col")
-    a.emit(ADDI("a4", "a4", 1)); a.li("t0", TR)
-    a.branch("bne", "a4", "t0", "mc_post_row")
+    a.emit(SLLI("a0", "a2", 2))
+    a.emit(ADD("a0", "a1", "a0"))       # R ptr = R_WORK_BASE[core] + col*4
+    a.li("t1", TC); a.emit(MUL("t1", "t1", "a3"))
+    a.emit(ADD("t1", "t1", "a2"))       # global output channel
+    a.emit(SLLI("t2", "t1", 2))
+    a.emit(ADD("t2", "s6", "t2"))
+    a.emit(LW("a7", "t2", 0))           # Q24 multiplier for this channel
+    a.emit(MUL("a4", "t1", "gp"))
+    a.emit(ADD("a4", "a4", "s3"))      # OFM channel base
+    a.emit(LW("t3", "s1", 56))          # ow_mask
+    a.emit(SRL("t0", "s10", "s2")); a.emit(MUL("t0", "t0", "tp"))
+    a.emit(ADD("t2", "s10", "zero"))
+    a.emit(AND("t2", "t2", "t3")); a.emit(ADD("t0", "t0", "t2"))
+    a.emit(ADD("t0", "t0", "tp")); a.emit(ADDI("t0", "t0", 1))
+    a.emit(ADD("a4", "a4", "t0"))      # OFM row start for this channel
+    a.li("t3", TR)
+    a.emit(LW("t2", "s1", 48))          # OW
+    a.emit(SLTI("t0", "t2", TR))
+    a.branch("beq", "t0", "zero", post_row_full)
+    a.emit(ADD("t3", "t2", "zero"))
+    a.label(post_row_full)
+    a.emit(ADD("t0", "t3", "zero"))    # remaining valid row bytes before pad
+    a.li("t2", TR)                      # rows in tile
+    a.label("mc_post_row_loop")
+    a.emit(LW("t1", "a0", 0))
+    emit_requant_nonnegative(a)
+    a.emit(SB("t1", "a4", 0))
+    a.emit(ADDI("a0", "a0", TC * 4))
+    a.emit(ADDI("a4", "a4", 1))
+    a.emit(ADDI("t0", "t0", -1))
+    a.branch("bne", "t0", "zero", post_no_wrap)
+    a.emit(ADDI("a4", "a4", 2))
+    a.emit(ADD("t0", "t3", "zero"))
+    a.label(post_no_wrap)
+    a.emit(ADDI("t2", "t2", -1))
+    a.branch("bne", "t2", "zero", "mc_post_row_loop")
+    a.emit(ADDI("a2", "a2", 1)); a.li("t1", TC)
+    a.branch("bne", "a2", "t1", "mc_post_col")
     a.emit(ADDI("a3", "a3", 1))
     a.label("mc_post_skip")
     a.emit(ADDI("a5", "a5", 1)); a.li("t1", nc)
@@ -990,9 +1011,13 @@ def emit_firmware(conv_descs, pool_descs, cls_w_base, cls_b_base, expected_label
 
 
 def generate(args):
-    global TR, TC, CFG_SHAPE, KT_ELEMS, A_PACK_LANES, CTRL_BIAS_TILE, SIMD, NUM_CORES
+    global TR, TC, CFG_SHAPE, KT_ELEMS, A_PACK_LANES, CTRL_BIAS_TILE, SIMD, NUM_CORES, CLK_DIV_VAL, PPB_DEPTH
 
     NUM_CORES = args.num_cores
+    CLK_DIV_VAL = args.clk_div
+    if args.ppb_depth <= 0:
+        raise SystemExit("--ppb-depth must be a positive integer")
+    PPB_DEPTH = args.ppb_depth
 
     shape = SHAPE_CONFIGS[args.shape]
     SIMD = args.lanes
@@ -1211,6 +1236,7 @@ def generate(args):
         f.write(f'`define VGG_CLOSED_INT8_SIMD_LANES {args.lanes}\n')
         f.write(f'`define VGG_CLOSED_NPU_DATA_W {32 if args.lanes == 4 else 16}\n')
         f.write(f'`define VGG_CLOSED_NUM_CORES {NUM_CORES}\n')
+        f.write(f'`define VGG_CLOSED_PPB_DEPTH {PPB_DEPTH}\n')
 
     meta = {
         "schema": "vgg_closed_loop_v1",
@@ -1224,6 +1250,7 @@ def generate(args):
         "flow": args.flow,
         "int8_simd_lanes": args.lanes,
         "npu_data_w": 32 if args.lanes == 4 else 16,
+        "ppb_depth": PPB_DEPTH,
         "tile_rows": TR,
         "tile_cols": TC,
         "a_pack_lanes": A_PACK_LANES,
@@ -1237,7 +1264,7 @@ def generate(args):
         json.dump(meta, f, indent=2)
 
     print(f"Generated closed-loop VGG case: {out}")
-    print(f"  shape: {args.shape} (TR={TR}, TC={TC}, A_PACK_LANES={A_PACK_LANES}, KT_ELEMS={KT_ELEMS}), flow={args.flow}, lanes={args.lanes}")
+    print(f"  shape: {args.shape} (TR={TR}, TC={TC}, A_PACK_LANES={A_PACK_LANES}, KT_ELEMS={KT_ELEMS}), flow={args.flow}, lanes={args.lanes}, ppb_depth={PPB_DEPTH}")
     print(f"  firmware words: {len(fw)} / {MEM_WORDS}")
     print(f"  static end: 0x{next_static:08x}, desc end: 0x{desc_ptr:08x}, max: 0x{max_addr:08x}")
     print(f"  sparse dram words: {used_dram_words}")
@@ -1263,6 +1290,10 @@ def main():
     parser.add_argument("--timeout-cycles", type=int, default=500000000)
     parser.add_argument("--num-cores", type=int, default=1, choices=(1, 2, 4),
                         help="Number of NPU cores: 1, 2, or 4")
+    parser.add_argument("--clk-div", type=int, default=0, choices=(0, 1, 2, 3),
+                        help="CLK_DIV divisor: 0=1x, 1=1/2, 2=1/4, 3=1/8")
+    parser.add_argument("--ppb-depth", type=int, default=8192,
+                        help="Ping-pong buffer depth in 32-bit words per bank")
     generate(parser.parse_args())
 
 

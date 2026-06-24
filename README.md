@@ -1,18 +1,17 @@
 # NPU OpenAI Lab Prototype
 
-Current state: Linux + Verilator simulation of a PicoRV32-controlled NPU SoC for RepOpt VGG-like CIFAR-10 inference.
-
-This README describes the maintained flow. Older Windows/Icarus worklogs are archived under `doc/archive/` and should not be treated as current guidance. Obsolete plan documents have been removed.
+Current state: Linux + Verilator simulation of a PicoRV32-controlled NPU SoC for RepOpt VGG-like CIFAR-10 inference. Supports single-core and multi-core (1/2 cores), DFS clock-enable throttling, and INT8 SIMD lane config (1/2/4).
 
 ## What Works Now
 
 | Flow | Entry point | Purpose | Current status |
 |---|---|---|---|
 | Fast VGG e2e | `./run_vgg_e2e.sh` or `./run_all.sh standard` | Python pre-generates all Conv A tiles; CPU firmware runs 1024 NPU tiles plus avgpool/classifier/argmax | PASS, cat/class 3, 10,768,727 cycles |
-| Runtime closed-loop VGG | `./run_vgg_closed_loop.sh` or `./run_all.sh closed_loop` | CPU firmware packs A tiles at runtime, runs NPU, performs per-channel requant/scatter, maxpool, avgpool, classifier | PASS on tested images, about 114M cycles for default `16x16`; about 161M cycles for `4x4` |
+| Runtime closed-loop VGG (1-core) | `./run_vgg_closed_loop.sh` | CPU firmware packs A tiles at runtime, runs NPU, performs per-channel requant/scatter, maxpool, avgpool, classifier | PASS, about 114M cycles for default `16x16` |
+| Runtime closed-loop VGG (multi-core) | `./run_vgg_mc_closed_loop.sh` | Same as above, distributed across multiple NPU cores via N-tile split | PASS, 1-core ≈114M, 2-core ≈110M |
+| DFS (clock-enable throttling) | `--clk-div 0|1|2|3` | CE-based compute rate control (1x, 1/2, 1/4, 1/8) | PASS, tile golden-check + VGG closed-loop |
+| Multi-dimensional sweep | `./run_vgg_closed_loop_sweep.sh` | Sweep shapes×flows×lanes×cores×clk_div×PPB depth | Supported |
 | Arbitrary image e2e | `./run_all.sh image <file>` | Classify an image after host resize/normalize/quantize | Supported |
-
-The closed-loop flow is the path closest to an FPGA deployment: model assets are static, while each inference only needs a new 3x32x32 INT8 input image.
 
 ## Prerequisites
 
@@ -165,37 +164,52 @@ Use this for quick regression and baseline confidence.
 
 This flow avoids the old per-16-channel hardware `QUANT_CFG` approximation and validates against the exact Python model target.
 
-The default closed-loop shape is `16x16`. The run script and generator also support `4x4`, `8x8`, and `8x32` shape selection; new tile/packed-SIMD work should keep those modes shape-aware. Use `run_vgg_closed_loop_sweep.sh` for serial OS/WS shape sweeps.
+The default closed-loop shape is `16x16`. The run script and generator also support `4x4`, `8x8`, and `8x32` shape selection. Use `run_vgg_closed_loop_sweep.sh` for serial sweeps across shapes, flows, lanes, core count, CLK_DIV divisor, and PPB depth.
 
-## FPGA Deployment Direction
+### Multi-Core Flow
 
-The current board target is PYNQ-Z2. The primary route uses the Zynq PS ARM as the runtime CPU and keeps the NPU in PL:
+`./run_vgg_mc_closed_loop.sh` distributes tiles across multiple NPU cores via N-tile splitting. Accepts `--num-cores 1|2|4`, with the same shape/flow/lanes/clk-div options as the single-core runner.
 
-- PC/host sends one preprocessed 3x32x32 INT8 image per inference.
-- PS ARM writes image/model/runtime buffers in DDR and programs the PL NPU.
-- PL NPU runs tile GEMM and exposes raw performance counters.
-- PS/host returns one class plus raw counters; TOPS and bus utilization are computed on the host.
+### DFS (Clock-Enable Throttling)
 
-See `doc/pynq_z2_deployment.md` for the current deployment plan.
+CE-based compute rate control via `--clk-div 0|1|2|3` (1x, 1/2, 1/4, 1/8). DMA and AXI-Lite run at full speed; only the PE array and controller compute state are throttled. Default `0` maintains backward compatibility.
+
+### PPB Depth Sweeps
+
+`--ppb-depth <words>` changes the W/A ping-pong buffer depth used by the VGG closed-loop testbench and generator. The generator recomputes `KT_ELEMS` from the same depth, so RTL buffer capacity and firmware K-splitting stay matched.
+
+### Sweep
+
+```bash
+# lanes=4, all cores/shapes/flows
+./run_vgg_closed_loop_sweep.sh --lanes 4 --num-cores 1,2
+
+# DFS sweep on 16x16/os
+./run_vgg_closed_loop_sweep.sh --shapes 16x16 --flows os --clk-divs 0,1,2,3
+
+# Buffer-depth sweep on 16x16/os/lanes=4
+./run_vgg_closed_loop_sweep.sh --shapes 16x16 --flows os --lanes 4 --ppb-depths 1024,4096,8192
+```
 
 ## Documentation Map
 
 | Document | Purpose |
 |---|---|
 | `doc/verification_status.md` | Current verified commands and results |
-| `doc/architecture.md` | Current SoC/NPU architecture and address map |
+| `doc/architecture.md` | Current SoC/NPU architecture, DFS, multi-core |
 | `doc/vgg_e2e_flow.md` | Fast e2e flow details |
 | `doc/vgg_closed_loop_flow.md` | Runtime closed-loop flow details |
-| `doc/pynq_z2_deployment.md` | PYNQ-Z2 deployment and counter readback plan |
 | `doc/known_issues.md` | Current limitations and risks |
-| `doc/user_manual.md` | Register and firmware-facing ABI reference |
-| `doc/rtl_reference.md` | RTL module reference |
+| `doc/user_manual.md` | Register and firmware-facing ABI reference, DFS usage |
+| `doc/rtl_reference.md` | RTL module reference, CE/DFS integration |
 | `doc/conv_gemm_mapping.md` | Conv2D-to-GEMM mapping reference |
 | `doc/archive/` | Historical plans and obsolete worklogs |
 
 ## Important Distinctions
 
 - `run_vgg_e2e.sh` is the fast baseline, but Python pre-generates all Conv A tiles.
-- `run_vgg_closed_loop.sh` is the runtime closed-loop path and is the basis for FPGA I/O deployment.
-- PYNQ-Z2 deployment uses PS ARM plus PL NPU as the primary route; pure-PL UART/SPI/Boot ROM bring-up is deferred.
+- `run_vgg_closed_loop.sh` is the runtime single-core closed-loop path.
+- `run_vgg_mc_closed_loop.sh` is the multi-core runtime closed-loop path (`--num-cores 1|2|4`).
+- DFS is CE-based; `--clk-div` works with all runners and sweep scripts.
+- PPB depth is compile/testbench configuration, not an MMIO register; use `--ppb-depth`/`--ppb-depths` before generation.
 - Do not use archived Windows/Icarus documents as current run instructions.

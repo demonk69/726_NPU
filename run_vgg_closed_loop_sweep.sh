@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Sweep runtime closed-loop VGG across tile shapes and OS/WS dataflows.
+# Sweep runtime closed-loop VGG across tile shapes, flows, lanes, cores, CLK_DIV,
+# and ping-pong buffer depth.
 #
-# Usage:
-#   ./run_vgg_closed_loop_sweep.sh
-#   ./run_vgg_closed_loop_sweep.sh --image pic/test_cifar10_5.jpeg
-#   ./run_vgg_closed_loop_sweep.sh --img-idx 7
-#   ./run_vgg_closed_loop_sweep.sh --shapes 4x4,8x8 --flows os,ws
+# Usage examples:
+#   ./run_vgg_closed_loop_sweep.sh --lanes 4 --num-cores 1,2
+#       → lanes=4, all shapes×flows×cores(1,2)
+#   ./run_vgg_closed_loop_sweep.sh --num-cores 2 --shapes 16x16 --flows os,ws
+#       → cores=2, shapes=16x16, both flows, default lanes=4
+#   ./run_vgg_closed_loop_sweep.sh --clk-divs 0,1,2 --ppb-depths 1024,4096,8192 --shapes 16x16 --lanes 4
+#       → DFS + buffer-depth sweep on 16x16, all flows, cores=1, lanes=4
 
 set -euo pipefail
 
@@ -13,6 +16,10 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 SHAPES=(4x4 8x8 16x16 8x32)
 FLOWS=(os ws)
+LANES_LIST=(4)
+NUM_CORES_LIST=(1)
+CLK_DIVS=(0)
+PPB_DEPTHS=(8192)
 IMAGE=""
 IMG_IDX="0"
 OUT_DIR=""
@@ -25,18 +32,22 @@ Usage: ./run_vgg_closed_loop_sweep.sh [options]
 
 Options:
   --image <file>          Run the sweep on an arbitrary image file.
-  --img-idx <idx>         Run the sweep on a CIFAR-10 index when --image is not used. Default: 0.
-  --shapes <csv>          Tile shapes to run. Default: 4x4,8x8,16x16,8x32.
-  --flows <csv>           Dataflows to run. Default: os,ws.
-  --timeout-cycles <n>    Override VGG_CLOSED_TIMEOUT_CYCLES for each case.
-  --out-dir <dir>         Result directory. Default: sim/vgg_closed_loop_sweep_<timestamp>.
+  --img-idx <idx>         Run the sweep on a CIFAR-10 index (default: 0).
+  --shapes <csv>          Tile shapes.      Default: 4x4,8x8,16x16,8x32
+  --flows <csv>           Dataflows.        Default: os,ws
+  --lanes <csv>           INT8 SIMD lanes.  Default: 4
+  --num-cores <csv>       Number of cores (1 uses single-core runner). Default: 1
+  --clk-divs <csv>        CLK_DIV divisors. Default: 0
+  --ppb-depths <csv>      Ping-pong buffer depth in 32-bit words. Default: 8192
+  --timeout-cycles <n>    Override VGG_CLOSED_TIMEOUT_CYCLES.
+  --out-dir <dir>         Result directory. Default: sim/vgg_closed_loop_sweep_<timestamp>
   --stop-on-fail          Stop after the first non-PASS case.
   --help, -h              Show this help.
 
 Notes:
-  This script calls run_vgg_closed_loop.sh serially. That script rebuilds
-  sim/vgg_closed_loop for each case, so do not run this sweep concurrently
-  with another closed-loop run in the same repo.
+  This script calls run_vgg_closed_loop.sh or run_vgg_mc_closed_loop.sh serially.
+  Each case rebuilds sim/vgg_closed_loop (or sim/vgg_mc_closed_loop), so do not
+  run concurrently with another closed-loop run in the same repo.
 EOF
 }
 
@@ -66,6 +77,66 @@ validate_flows() {
     done
 }
 
+validate_lanes() {
+    local lanes
+    for lanes in "${LANES_LIST[@]}"; do
+        case "$lanes" in
+            1|2|4) ;;
+            *) echo "Invalid lanes: $lanes" >&2; exit 2 ;;
+        esac
+    done
+}
+
+validate_num_cores() {
+    local nc
+    for nc in "${NUM_CORES_LIST[@]}"; do
+        case "$nc" in
+            1|2|4) ;;
+            *) echo "Invalid num-cores: $nc (1, 2, or 4)" >&2; exit 2 ;;
+        esac
+    done
+}
+
+validate_clk_divs() {
+    local div
+    for div in "${CLK_DIVS[@]}"; do
+        case "$div" in
+            0|1|2|3) ;;
+            *) echo "Invalid clk-div: $div" >&2; exit 2 ;;
+        esac
+    done
+}
+
+validate_ppb_depths() {
+    local depth
+    for depth in "${PPB_DEPTHS[@]}"; do
+        case "$depth" in
+            ''|*[!0-9]*) echo "Invalid ppb-depth: $depth (positive integer required)" >&2; exit 2 ;;
+            0) echo "Invalid ppb-depth: 0 (positive integer required)" >&2; exit 2 ;;
+        esac
+    done
+}
+
+summary_value() {
+    local log_file="$1"
+    local key="$2"
+    local value
+    value=$(awk -F'|' -v key="$key" '
+        NF >= 3 {
+            k = $2; v = $3;
+            gsub(/^[ \t]+|[ \t]+$/, "", k);
+            gsub(/^[ \t]+|[ \t]+$/, "", v);
+            if (k == key || k == key "_sum") last = v;
+        }
+        END { if (last != "") print last; }
+    ' "$log_file")
+    if [[ -n "$value" ]]; then
+        printf "%s" "$value"
+    else
+        printf "NA"
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --image)
@@ -82,6 +153,22 @@ while [[ $# -gt 0 ]]; do
             ;;
         --flows)
             split_csv "${2:?missing flow list}" FLOWS
+            shift 2
+            ;;
+        --lanes)
+            split_csv "${2:?missing lanes list}" LANES_LIST
+            shift 2
+            ;;
+        --num-cores)
+            split_csv "${2:?missing num-cores list}" NUM_CORES_LIST
+            shift 2
+            ;;
+        --clk-divs)
+            split_csv "${2:?missing clk-div list}" CLK_DIVS
+            shift 2
+            ;;
+        --ppb-depths)
+            split_csv "${2:?missing ppb-depth list}" PPB_DEPTHS
             shift 2
             ;;
         --timeout-cycles)
@@ -110,6 +197,10 @@ done
 
 validate_shapes
 validate_flows
+validate_lanes
+validate_num_cores
+validate_clk_divs
+validate_ppb_depths
 
 if [[ -z "$OUT_DIR" ]]; then
     OUT_DIR="$ROOT/sim/vgg_closed_loop_sweep_$(date +%Y%m%d_%H%M%S)"
@@ -126,7 +217,7 @@ fi
 SUMMARY_TSV="$OUT_DIR/summary.tsv"
 SUMMARY_MD="$OUT_DIR/summary.md"
 
-printf "shape\tflow\tstatus\tpred\texact\tfixed\tcycles\telapsed_s\trc\tlog\n" > "$SUMMARY_TSV"
+printf "shape\tflow\tlanes\tcores\tclk_div\tppb_depth\tstatus\tpred\texact\tfixed\tcycles\tbusy_cycles\tcompute_cycles\tpeak_tops\trd_burst_util\twr_burst_util\telapsed_s\trc\tlog\n" > "$SUMMARY_TSV"
 
 INPUT_ARGS=()
 INPUT_DESC="img_idx=$IMG_IDX"
@@ -138,10 +229,14 @@ else
 fi
 
 echo "=== Closed-loop sweep ==="
-echo "Input:  $INPUT_DESC"
-echo "Shapes: ${SHAPES[*]}"
-echo "Flows:  ${FLOWS[*]}"
-echo "Output: $OUT_DIR"
+echo "Input:    $INPUT_DESC"
+echo "Shapes:   ${SHAPES[*]}"
+echo "Flows:    ${FLOWS[*]}"
+echo "Lanes:    ${LANES_LIST[*]}"
+echo "Cores:    ${NUM_CORES_LIST[*]}"
+echo "CLK_DIVs: ${CLK_DIVS[*]}"
+echo "PPB:      ${PPB_DEPTHS[*]}"
+echo "Output:   $OUT_DIR"
 if [[ -n "${VGG_CLOSED_TIMEOUT_CYCLES:-}" ]]; then
     echo "VGG_CLOSED_TIMEOUT_CYCLES=$VGG_CLOSED_TIMEOUT_CYCLES"
 fi
@@ -149,23 +244,48 @@ fi
 run_case() {
     local shape="$1"
     local flow="$2"
-    local case_name="${shape}_${flow}"
+    local lanes="$3"
+    local nc="$4"
+    local clk_div="$5"
+    local ppb_depth="$6"
+
+    local runner run_dir runner_args case_name
+    if [[ "$nc" -eq 1 ]]; then
+        runner="$ROOT/run_vgg_closed_loop.sh"
+        run_dir="$ROOT/sim/vgg_closed_loop"
+        runner_args=(
+            "${INPUT_ARGS[@]}"
+            --shape "$shape" --flow "$flow" --lanes "$lanes"
+            --clk-div "$clk_div"
+            --ppb-depth "$ppb_depth"
+        )
+    else
+        runner="$ROOT/run_vgg_mc_closed_loop.sh"
+        run_dir="$ROOT/sim/vgg_mc_closed_loop"
+        runner_args=(
+            "${INPUT_ARGS[@]}"
+            --shape "$shape" --flow "$flow" --lanes "$lanes"
+            --num-cores "$nc" --clk-div "$clk_div"
+            --ppb-depth "$ppb_depth"
+        )
+    fi
+    case_name="${shape}_${flow}_L${lanes}_C${nc}_D${clk_div}_P${ppb_depth}"
     local log_file="$OUT_DIR/logs/${case_name}.log"
     local run_log_copy="$OUT_DIR/logs/${case_name}.run.log"
-    local start_s end_s elapsed_s rc status cycles pred exact fixed
+    local start_s end_s elapsed_s rc status cycles busy_cycles compute_cycles perf_summary peak_tops rd_burst_util wr_burst_util
 
     echo
-    echo "=== Case: shape=$shape flow=$flow ==="
+    echo "=== Case: shape=$shape flow=$flow lanes=$lanes cores=$nc clk_div=$clk_div ppb_depth=$ppb_depth runner=$(basename "$runner") ==="
     start_s=$(date +%s)
     set +e
-    "$ROOT/run_vgg_closed_loop.sh" "${INPUT_ARGS[@]}" --shape "$shape" --flow "$flow" 2>&1 | tee "$log_file"
+    "$runner" "${runner_args[@]}" 2>&1 | tee "$log_file"
     rc=${PIPESTATUS[0]}
     set -e
     end_s=$(date +%s)
     elapsed_s=$((end_s - start_s))
 
-    if [[ -f "$ROOT/sim/vgg_closed_loop/run.log" ]]; then
-        cp "$ROOT/sim/vgg_closed_loop/run.log" "$run_log_copy"
+    if [[ -f "$run_dir/run.log" ]]; then
+        cp "$run_dir/run.log" "$run_log_copy"
     fi
 
     if grep -q '\[PASS\]' "$log_file"; then
@@ -187,12 +307,19 @@ run_case() {
     pred=${pred:-NA}
     exact=${exact:-NA}
     fixed=${fixed:-NA}
+    busy_cycles=$(summary_value "$log_file" "busy_cycles")
+    compute_cycles=$(summary_value "$log_file" "compute_cycles")
+    peak_tops=$(summary_value "$log_file" "peak_tops")
+    rd_burst_util=$(summary_value "$log_file" "rd_burst_util")
+    wr_burst_util=$(summary_value "$log_file" "wr_burst_util")
 
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-        "$shape" "$flow" "$status" "$pred" "$exact" "$fixed" \
-        "$cycles" "$elapsed_s" "$rc" "$log_file" >> "$SUMMARY_TSV"
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+        "$shape" "$flow" "$lanes" "$nc" "$clk_div" "$ppb_depth" "$status" "$pred" "$exact" "$fixed" \
+        "$cycles" "$busy_cycles" "$compute_cycles" \
+        "$peak_tops" "$rd_burst_util" "$wr_burst_util" \
+        "$elapsed_s" "$rc" "$log_file" >> "$SUMMARY_TSV"
 
-    echo "[SUMMARY] shape=$shape flow=$flow status=$status pred=$pred exact=$exact fixed=$fixed cycles=$cycles elapsed_s=$elapsed_s rc=$rc"
+    echo "[SUMMARY] shape=$shape flow=$flow lanes=$lanes cores=$nc clk_div=$clk_div ppb_depth=$ppb_depth status=$status pred=$pred exact=$exact fixed=$fixed cycles=$cycles busy=$busy_cycles compute=$compute_cycles peak_tops=$peak_tops rd_burst_util=$rd_burst_util wr_burst_util=$wr_burst_util elapsed_s=$elapsed_s rc=$rc"
 
     if [[ "$status" != "PASS" && "$STOP_ON_FAIL" -eq 1 ]]; then
         return 1
@@ -203,10 +330,18 @@ run_case() {
 overall_rc=0
 for shape in "${SHAPES[@]}"; do
     for flow in "${FLOWS[@]}"; do
-        if ! run_case "$shape" "$flow"; then
-            overall_rc=1
-            break 2
-        fi
+        for lanes in "${LANES_LIST[@]}"; do
+            for nc in "${NUM_CORES_LIST[@]}"; do
+                for clk_div in "${CLK_DIVS[@]}"; do
+                    for ppb_depth in "${PPB_DEPTHS[@]}"; do
+                        if ! run_case "$shape" "$flow" "$lanes" "$nc" "$clk_div" "$ppb_depth"; then
+                            overall_rc=1
+                            break 6
+                        fi
+                    done
+                done
+            done
+        done
     done
 done
 
@@ -215,25 +350,30 @@ done
     echo
     echo "Input: $INPUT_DESC"
     echo
-    echo "| shape | flow | status | pred | exact | fixed | cycles | elapsed_s | rc | log |"
-    echo "|---|---|---|---:|---:|---:|---:|---:|---:|---|"
-    while IFS=$'\t' read -r shape flow status pred exact fixed cycles elapsed_s rc log; do
+    echo "| shape | flow | lanes | cores | clk_div | ppb_depth | status | pred | exact | fixed | cycles | busy | compute | TOPS | rd_util | wr_util | elapsed_s | rc | log |"
+    echo "|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"
+    while IFS=$'\t' read -r shape flow lanes nc clk_div ppb_depth status pred exact fixed cycles busy_cycles compute_cycles peak_tops rd_burst_util wr_burst_util elapsed_s rc log; do
         [[ "$shape" == "shape" ]] && continue
-        printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n" \
-            "$shape" "$flow" "$status" "$pred" "$exact" "$fixed" \
-            "$cycles" "$elapsed_s" "$rc" "$(basename "$log")"
+        printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n" \
+            "$shape" "$flow" "$lanes" "$nc" "$clk_div" "$ppb_depth" "$status" "$pred" "$exact" "$fixed" \
+            "$cycles" "$busy_cycles" "$compute_cycles" \
+            "$peak_tops" "$rd_burst_util" "$wr_burst_util" \
+            "$elapsed_s" "$rc" "$(basename "$log")"
     done < "$SUMMARY_TSV"
 } > "$SUMMARY_MD"
 
 echo
 echo "=== Sweep summary ==="
-printf "%-6s %-4s %-8s %-5s %-5s %-5s %-12s %-9s %-3s %s\n" \
-    "shape" "flow" "status" "pred" "exact" "fixed" "cycles" "elapsed" "rc" "log"
-while IFS=$'\t' read -r shape flow status pred exact fixed cycles elapsed_s rc log; do
+printf "%-6s %-4s %-5s %-5s %-7s %-9s %-8s %-5s %-5s %-5s %-12s %-10s %-10s %-10s %-11s %-11s %-8s %-3s %s\n" \
+    "shape" "flow" "lanes" "cores" "clkdiv" "ppb" "status" "pred" "exact" "fixed" "cycles" "busy" "compute" "peak_tops" "rd_util" "wr_util" "elapsed" "rc" "log"
+
+while IFS=$'\t' read -r shape flow lanes nc clk_div ppb_depth status pred exact fixed cycles busy_cycles compute_cycles peak_tops rd_burst_util wr_burst_util elapsed_s rc log; do
     [[ "$shape" == "shape" ]] && continue
-    printf "%-6s %-4s %-8s %-5s %-5s %-5s %-12s %-9s %-3s %s\n" \
-        "$shape" "$flow" "$status" "$pred" "$exact" "$fixed" \
-        "$cycles" "$elapsed_s" "$rc" "$(basename "$log")"
+    printf "%-6s %-4s %-5s %-5s %-7s %-9s %-8s %-5s %-5s %-5s %-12s %-10s %-10s %-10s %-11s %-11s %-8s %-3s %s\n" \
+        "$shape" "$flow" "$lanes" "$nc" "$clk_div" "$ppb_depth" "$status" "$pred" "$exact" "$fixed" \
+        "$cycles" "$busy_cycles" "$compute_cycles" \
+        "$peak_tops" "$rd_burst_util" "$wr_burst_util" \
+        "$elapsed_s" "$rc" "$(basename "$log")"
 done < "$SUMMARY_TSV"
 
 echo
@@ -242,7 +382,7 @@ echo "  $SUMMARY_TSV"
 echo "  $SUMMARY_MD"
 echo "  $OUT_DIR/logs/"
 
-if awk -F '\t' 'NR > 1 && $3 != "PASS" { found = 1 } END { exit found ? 0 : 1 }' "$SUMMARY_TSV"; then
+if awk -F '\t' 'NR > 1 && $7 != "PASS" { found = 1 } END { exit found ? 0 : 1 }' "$SUMMARY_TSV"; then
     overall_rc=1
 fi
 

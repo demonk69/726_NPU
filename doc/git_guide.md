@@ -4,7 +4,7 @@
 > 工具：Git + GitHub  
 > 难度：⭐☆☆☆☆（零基础友好）
 
-> 项目工程状态以 [verification_status.md](verification_status.md)、[architecture.md](architecture.md) 和 [pynq_z2_deployment.md](pynq_z2_deployment.md) 为准；本文只说明 Git 协作流程，不作为架构或验证结论。
+> 项目工程状态以 [verification_status.md](verification_status.md) 和 [architecture.md](architecture.md) 为准；本文只说明 Git 协作流程，不作为架构或验证结论。
 
 ---
 

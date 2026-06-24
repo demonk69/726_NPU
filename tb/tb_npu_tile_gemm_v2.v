@@ -52,6 +52,7 @@ localparam REG_R_ADDR    = 32'h28;
 localparam REG_BIAS_ADDR = 32'h98;
 localparam REG_QUANT_CFG = 32'h9C;
 localparam REG_ARR_CFG   = 32'h30;
+localparam REG_CLK_DIV   = 32'h34;
 localparam REG_CFG_SHAPE = 32'h3C;
 localparam REG_PERF_CYCLES         = 32'h48;
 localparam REG_PERF_RD_BEATS       = 32'h4C;
@@ -81,6 +82,11 @@ localparam CFG_SHAPE    = 32'h0;  // default 4x4
 localparam GRID_COLS    = `GRID_COLS_VAL;
 `else
 localparam GRID_COLS    = 4;      // default 4
+`endif
+`ifdef CLK_DIV_VAL
+localparam CLK_DIV = `CLK_DIV_VAL;
+`else
+localparam CLK_DIV = 0;
 `endif
 `ifdef AW_EXPECT_VAL
 localparam AW_EXPECT    = `AW_EXPECT_VAL;
@@ -513,6 +519,7 @@ initial begin
     $display("  Tile GEMM Test: %s DATA_W=%0d INT8_SIMD_LANES=%0d PERF_ONLY=%0d", `TEST_NAME, DATA_W, INT8_SIMD_LANES, PERF_ONLY_MODE);
     $display("################################################################");
 
+    axi_write(REG_CLK_DIV, CLK_DIV);
     axi_write(REG_M_DIM, `M_DIM);
     axi_write(REG_N_DIM, `N_DIM);
     axi_write(REG_K_DIM, `K_DIM);
@@ -604,14 +611,30 @@ initial begin
     `endif
 
     if (fail_cnt == 0) begin
-        $display("RESULT\ttest=%s\tM=%0d\tN=%0d\tK=%0d\tcfg_shape=%0d\tlanes=%0d\tdata_w=%0d\trun_cycles=%0d\tperf_cycles=%0d\tbusy_cycles=%0d\tcompute_cycles=%0d\tdma_cycles=%0d\trd_beats=%0d\twr_beats=%0d\trd_bytes=%0d\twr_bytes=%0d\trd_bursts=%0d\twr_bursts=%0d\tmac_ops_lo=%0d\tmac_ops_hi=%0d\tops_lo=%0d\tops_hi=%0d\tpeak_ops_cycle=%0d\taw_count=%0d\terr_status=0x%08h\tstatus=PASS",
-                 `TEST_NAME, `M_DIM, `N_DIM, `K_DIM, CFG_SHAPE,
-                 INT8_SIMD_LANES, DATA_W, run_cycles, perf_cycles,
-                 perf_busy_cycles, perf_compute_cycles, perf_dma_cycles,
-                 perf_rd_beats, perf_wr_beats, perf_rd_bytes, perf_wr_bytes,
-                 perf_rd_bursts, perf_wr_bursts, perf_mac_ops_lo,
-                 perf_mac_ops_hi, perf_ops_lo, perf_ops_hi,
-                 perf_peak_ops_cycle, aw_count, err_status);
+        $display("[RESULT] %s", `TEST_NAME);
+        $display("| M               | %-10d |", `M_DIM);
+        $display("| N               | %-10d |", `N_DIM);
+        $display("| K               | %-10d |", `K_DIM);
+        $display("| cfg_shape       | %-10d |", CFG_SHAPE);
+        $display("| lanes           | %-10d |", INT8_SIMD_LANES);
+        $display("| data_w          | %-10d |", DATA_W);
+        $display("| run_cycles      | %-10d |", run_cycles);
+        $display("| perf_cycles     | %-10d |", perf_cycles);
+        $display("| busy_cycles     | %-10d |", perf_busy_cycles);
+        $display("| compute_cycles  | %-10d |", perf_compute_cycles);
+        $display("| dma_cycles      | %-10d |", perf_dma_cycles);
+        $display("| rd_beats        | %-10d |", perf_rd_beats);
+        $display("| wr_beats        | %-10d |", perf_wr_beats);
+        $display("| rd_bytes        | %-10d |", perf_rd_bytes);
+        $display("| wr_bytes        | %-10d |", perf_wr_bytes);
+        $display("| rd_bursts       | %-10d |", perf_rd_bursts);
+        $display("| wr_bursts       | %-10d |", perf_wr_bursts);
+        $display("| mac_ops         | %-10d |", {perf_mac_ops_hi, perf_mac_ops_lo});
+        $display("| ops             | %-10d |", {perf_ops_hi, perf_ops_lo});
+        $display("| peak_ops_cycle  | %-10d |", perf_peak_ops_cycle);
+        $display("| aw_count        | %-10d |", aw_count);
+        $display("| err_status      | 0x%08h |", err_status);
+        $display("| status          | PASS     |");
 `ifdef PERF_ONLY
         $display("[PASS] %s: PERF-ONLY COMPLETE", `TEST_NAME);
 `else

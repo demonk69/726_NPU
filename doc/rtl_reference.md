@@ -10,7 +10,7 @@ Use `scripts/vivado_npu_filelist.tcl` for board/Vivado projects.
 
 | Source list | Purpose |
 |---|---|
-| `$npu_vivado_project_rtl_files` | Default INT8-only NPU source set for `npu_pynq_wrapper` |
+| `$npu_vivado_project_rtl_files` | Default INT8-only NPU source set for `npu_top` |
 | `$npu_vivado_fp16_project_rtl_files` | Full source set for `FP16_ENABLE=1` builds |
 | `$npu_vivado_excluded_sim_rtl_files` | Simulation-only SoC files that should not be board design sources |
 
@@ -35,13 +35,10 @@ Simulation address decode in `soc_top`:
 | `4*MEM_WORDS <= addr < 0x0200_0000` | `dram_model` CPU port |
 | `addr >= 0x0200_0000` | NPU registers through `axi_lite_bridge` |
 
-## Vivado NPU Boundary
-
-`npu_pynq_wrapper` is the intended RTL module boundary for a Zynq/PYNQ-style block design.
+## NPU Top-Level
 
 | Module | File | Function | Main Inputs | Main Outputs |
 |---|---|---|---|---|
-| `npu_pynq_wrapper` | `rtl/top/npu_pynq_wrapper.v` | Thin AXI wrapper around `npu_top`; exposes Xilinx-friendly AXI sideband pins and strips AXI-Lite address to a local offset | `aclk`, `aresetn`, full AXI4-Lite slave inputs, AXI4 master ready/response/read-data inputs | AXI4-Lite ready/response/read-data outputs, AXI4 master address/data/control outputs, `npu_irq` |
 | `npu_top` | `rtl/top/npu_top.v` | Board-independent NPU integration: register file, controller, DMA, W/A buffers, PE datapaths, postprocess, counters, power enables | `sys_clk`, `sys_rst_n`, compact AXI4-Lite slave inputs, AXI4 master ready/response/read-data inputs | AXI4-Lite outputs, AXI4 master outputs, `npu_irq` |
 
 Important top parameters:
@@ -105,7 +102,7 @@ When `FP16_ENABLE=0`, `npu_ctrl` forces hardware execution to INT8 and rejects F
 | `fp32_add` | `rtl/pe/fp32_add.v` | Optional FP32 adder for FP16 accumulation | FP32 operands | FP32 sum |
 | `psum_out_buf` | `rtl/buf/psum_out_buf.v` | Tile-local dual-port PSUM/OUT storage block kept as reusable RTL | clear, valid mask, port A/B read/write controls | port A/B read data/valid, write conflict flag |
 
-`psum_out_buf` is not part of the current `npu_pynq_wrapper` dependency closure. It remains in the optional extra source list for compatibility and future K-split/partial-sum work.
+`psum_out_buf` is not part of the current NPU dependency closure. It remains in the optional extra source list for compatibility and future K-split/partial-sum work.
 
 ## Performance And Power Support
 
@@ -115,7 +112,7 @@ When `FP16_ENABLE=0`, `npu_ctrl` forces hardware execution to INT8 and rejects F
 | `op_counter` | `rtl/common/op_counter.v` | Counts useful MAC/OPS, busy/compute/DMA cycles, peak ops per cycle | controller/PE activity, dimensions, shape context, SIMD lanes | MAC/OPS counters, utilization counters, derived TOPS when enabled |
 | `npu_power` | `rtl/power/npu_power.v` | Emits clock-enable style global/row/column CE signals and keeps `npu_clk=clk` | `clk`, `rst_n`, divider select, row/col gate requests | `global_ce`, row enables, column enables, legacy aliases |
 
-`npu_power` does not generate or gate fabric clocks. Its historical `row_clk_gated` and `col_clk_gated` port names now carry enable semantics. `npu_top` connects these CE signals into `reconfig_pe_array`, where they gate PE compute/control updates and OS shift-register updates through normal clock-enable logic. `CLK_DIV` is not yet applied to the compute CE path because the controller/DMA schedule is not CE-aware.
+`npu_power` does not generate or gate fabric clocks. Its historical `row_clk_gated` and `col_clk_gated` port names now carry enable semantics. `npu_top` connects these CE signals into `reconfig_pe_array`, where they gate PE compute/control updates and OS shift-register updates through normal clock-enable logic. `CLK_DIV` is applied to the compute CE path via an idle-only latch in `npu_top`; the controller and top-level compute signals are CE-aware (`compute_ce` gates `tile_k_cycle`, `tile_feed_step`, `tile_vec_fire`, etc.).
 
 ## Shape Modes
 
@@ -141,7 +138,3 @@ The physical array is always 16x16. `CFG_SHAPE` selects the active logical tile 
 The RTL contains scalar/tile bias, activation, and scalar quantization support. This is valid when one `QUANT_CFG` applies to the whole launch.
 
 RepOpt VGG needs per-output-channel requant. Runtime closed-loop therefore disables hardware quant, writes raw INT32+bias results, and performs ReLU plus per-channel Q24 requant in CPU firmware.
-
-## FPGA Deployment Notes
-
-The current PYNQ/Zynq route uses PS software for runtime control and DDR buffer management while the NPU remains in PL. The previous pure-PL UART/SPI/Boot ROM route is deferred unless targeting a non-Zynq FPGA board. See `doc/pynq_z2_deployment.md` for the current interface and bring-up order.

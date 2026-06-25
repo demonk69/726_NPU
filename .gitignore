@@ -47,5 +47,8 @@ __pycache__/
 /pic/test_cifar10_*.jpg
 /pic/test_cifar10_*.jpeg
 
+# Future implementation plans – reference only, not part of current codebase
+/plan/
+
 # Local session scratch
 /session

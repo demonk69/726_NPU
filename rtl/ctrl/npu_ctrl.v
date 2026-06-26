@@ -176,6 +176,18 @@ module npu_ctrl #(
 );
 
 // ---------------------------------------------------------------------------
+// Descriptor v1 decode helpers
+// ---------------------------------------------------------------------------
+localparam DESC_W_CTRL        = 0;
+localparam DESC_W_M           = 1;
+localparam DESC_W_N           = 2;
+localparam DESC_W_K           = 3;
+localparam DESC_W_IFM_ADDR    = 4;
+localparam DESC_W_WEIGHT_ADDR = 5;
+localparam DESC_W_OFM_ADDR    = 8;
+localparam DESC_W_NEXT_DESC   = 15;
+
+// ---------------------------------------------------------------------------
 // FSM state encoding
 // ---------------------------------------------------------------------------
 localparam S_IDLE            = 4'd0;
@@ -334,18 +346,6 @@ wire direct_start_valid_rise = direct_start_rise && !direct_start_invalid;
 
 reg        prev_ofm_valid;
 reg [31:0] prev_ofm_addr;
-
-// ---------------------------------------------------------------------------
-// Descriptor v1 decode helpers
-// ---------------------------------------------------------------------------
-localparam integer DESC_W_CTRL        = 0;
-localparam integer DESC_W_M           = 1;
-localparam integer DESC_W_N           = 2;
-localparam integer DESC_W_K           = 3;
-localparam integer DESC_W_IFM_ADDR    = 4;
-localparam integer DESC_W_WEIGHT_ADDR = 5;
-localparam integer DESC_W_OFM_ADDR    = 8;
-localparam integer DESC_W_NEXT_DESC   = 15;
 
 wire [31:0] desc_ctrl_word = desc_words[DESC_W_CTRL*32 +: 32];
 wire [31:0] desc_m_word    = desc_words[DESC_W_M*32 +: 32];

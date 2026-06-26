@@ -130,6 +130,18 @@ module npu_dma #(
     input  wire        m_axi_rlast
 );
 
+localparam AXI_DATA_BYTES = DATA_W / 8;
+localparam AXI_BYTE_SHIFT = $clog2(DATA_W / 8);
+localparam [31:0] AXI_ALIGN_MASK = AXI_DATA_BYTES - 1;
+localparam [15:0] READ_BURST_MAX_BEATS =
+    (BURST_MAX > 256) ? 16'd256 : BURST_MAX;
+localparam [15:0] DESC_BYTES = 16'd64;
+
+localparam [31:0] ERR_DMA_RRESP    = 32'h0000_0010;
+localparam [31:0] ERR_DMA_BRESP    = 32'h0000_0020;
+localparam [31:0] ERR_DMA_RD_ALIGN = 32'h0000_0040;
+localparam [31:0] ERR_DMA_WR_ALIGN = 32'h0000_0080;
+
 // ===========================================================================
 // Result sync FIFO
 // ===========================================================================
@@ -227,18 +239,6 @@ reg        im2col_fp16_latch;
 reg [15:0] im2col_k_pos;
 reg [1:0]  im2col_lane_pos;
 reg [31:0] im2col_pack_word;
-
-localparam integer AXI_DATA_BYTES = DATA_W / 8;
-localparam integer AXI_BYTE_SHIFT = $clog2(DATA_W / 8);
-localparam [31:0] AXI_ALIGN_MASK = AXI_DATA_BYTES - 1;
-localparam [15:0] READ_BURST_MAX_BEATS =
-    (BURST_MAX > 256) ? 16'd256 : BURST_MAX;
-localparam [15:0] DESC_BYTES = 16'd64;
-
-localparam [31:0] ERR_DMA_RRESP    = 32'h0000_0010;
-localparam [31:0] ERR_DMA_BRESP    = 32'h0000_0020;
-localparam [31:0] ERR_DMA_RD_ALIGN = 32'h0000_0040;
-localparam [31:0] ERR_DMA_WR_ALIGN = 32'h0000_0080;
 
 reg [31:0] load_err_status;
 reg [31:0] wb_err_status;

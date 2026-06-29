@@ -282,6 +282,8 @@ wire pe_load_w, pe_swap_w, pe_acc_init_en;   // WS mode weight control and accum
 wire pe_half_en;           // 8x32: half-array enable (0=top, 1=bottom)
 wire ctrl_w_ppb_swap, ctrl_a_ppb_swap, ctrl_w_ppb_clear, ctrl_a_ppb_clear;
 wire ctrl_r_fifo_clear;
+wire w_ppb_buf_empty_int, a_ppb_buf_empty_int;
+wire w_ppb_buf_ready_int, a_ppb_buf_ready_int;
 wire [1:0] ctrl_cfg_shape;
 wire [1:0] ctrl_post_act_mode;
 wire [31:0] ctrl_post_quant_cfg;
@@ -402,10 +404,10 @@ npu_ctrl #(
     .pe_swap_w    (pe_swap_w),
     .pe_acc_init_en(pe_acc_init_en),
     .pe_half_en   (pe_half_en),
-    .w_ppb_ready  (u_w_ppb.buf_ready),
-    .w_ppb_empty  (u_w_ppb.buf_empty),
-    .a_ppb_ready  (u_a_ppb.buf_ready),
-    .a_ppb_empty  (u_a_ppb.buf_empty),
+    .w_ppb_ready  (w_ppb_buf_ready_int),
+    .w_ppb_empty  (w_ppb_buf_empty_int),
+    .a_ppb_ready  (a_ppb_buf_ready_int),
+    .a_ppb_empty  (a_ppb_buf_empty_int),
     .w_ppb_swap   (ctrl_w_ppb_swap),
     .a_ppb_swap   (ctrl_a_ppb_swap),
     .w_ppb_clear  (ctrl_w_ppb_clear),
@@ -426,9 +428,6 @@ wire [DATA_W-1:0] w_ppb_rd_data, a_ppb_rd_data;
 wire        w_ppb_rd_vec_en, a_ppb_rd_vec_en;
 wire [MAX_TILE_LANES*DATA_W-1:0] w_ppb_rd_vec, a_ppb_rd_vec;
 wire        w_ppb_rd_vec_valid, a_ppb_rd_vec_valid;
-
-wire w_ppb_buf_empty_int, a_ppb_buf_empty_int;
-wire w_ppb_buf_ready_int, a_ppb_buf_ready_int;
 
 // Weight Ping-Pong Buffer
 pingpong_buf #(

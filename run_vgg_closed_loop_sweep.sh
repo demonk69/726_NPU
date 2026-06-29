@@ -45,7 +45,7 @@ Options:
   --help, -h              Show this help.
 
 Notes:
-  This script calls run_vgg_closed_loop.sh or run_vgg_mc_closed_loop.sh serially.
+  This script calls run_vgg_closed_loop.sh serially.
   Each case rebuilds sim/vgg_closed_loop (or sim/vgg_mc_closed_loop), so do not
   run concurrently with another closed-loop run in the same repo.
 EOF
@@ -241,44 +241,39 @@ if [[ -n "${VGG_CLOSED_TIMEOUT_CYCLES:-}" ]]; then
     echo "VGG_CLOSED_TIMEOUT_CYCLES=$VGG_CLOSED_TIMEOUT_CYCLES"
 fi
 
-run_case() {
-    local shape="$1"
-    local flow="$2"
-    local lanes="$3"
-    local nc="$4"
-    local clk_div="$5"
-    local ppb_depth="$6"
+TOTAL_CASES=$(( ${#SHAPES[@]} * ${#FLOWS[@]} * ${#LANES_LIST[@]} * ${#NUM_CORES_LIST[@]} * ${#CLK_DIVS[@]} * ${#PPB_DEPTHS[@]} ))
+echo "Cases:    $TOTAL_CASES"
 
-    local runner run_dir runner_args case_name
-    if [[ "$nc" -eq 1 ]]; then
-        runner="$ROOT/run_vgg_closed_loop.sh"
-        run_dir="$ROOT/sim/vgg_closed_loop"
-        runner_args=(
-            "${INPUT_ARGS[@]}"
-            --shape "$shape" --flow "$flow" --lanes "$lanes"
-            --clk-div "$clk_div"
-            --ppb-depth "$ppb_depth"
-        )
-    else
-        runner="$ROOT/run_vgg_mc_closed_loop.sh"
-        run_dir="$ROOT/sim/vgg_mc_closed_loop"
-        runner_args=(
-            "${INPUT_ARGS[@]}"
-            --shape "$shape" --flow "$flow" --lanes "$lanes"
-            --num-cores "$nc" --clk-div "$clk_div"
-            --ppb-depth "$ppb_depth"
-        )
-    fi
-    case_name="${shape}_${flow}_L${lanes}_C${nc}_D${clk_div}_P${ppb_depth}"
+run_case() {
+    local case_idx="$1"
+    local total_cases="$2"
+    local shape="$3"
+    local flow="$4"
+    local lanes="$5"
+    local nc="$6"
+    local clk_div="$7"
+    local ppb_depth="$8"
+
+    local runner="$ROOT/run_vgg_closed_loop.sh"
+    local run_dir="$ROOT/sim/vgg_closed_loop"
+    [[ "$nc" -ne 1 ]] && run_dir="$ROOT/sim/vgg_mc_closed_loop"
+    local runner_args=(
+        "${INPUT_ARGS[@]}"
+        --shape "$shape" --flow "$flow" --lanes "$lanes"
+        --num-cores "$nc" --clk-div "$clk_div"
+        --ppb-depth "$ppb_depth"
+    )
+    local case_name="${shape}_${flow}_L${lanes}_C${nc}_D${clk_div}_P${ppb_depth}"
+    local progress="[$case_idx/$total_cases]"
     local log_file="$OUT_DIR/logs/${case_name}.log"
     local run_log_copy="$OUT_DIR/logs/${case_name}.run.log"
     local start_s end_s elapsed_s rc status cycles busy_cycles compute_cycles ops_per_cycle perf_summary peak_tops rd_burst_util wr_burst_util
 
     echo
-    echo "=== Case: shape=$shape flow=$flow lanes=$lanes cores=$nc clk_div=$clk_div ppb_depth=$ppb_depth runner=$(basename "$runner") ==="
+    echo "$progress === Case: shape=$shape flow=$flow lanes=$lanes cores=$nc clk_div=$clk_div ppb_depth=$ppb_depth runner=$(basename "$runner") ==="
     start_s=$(date +%s)
     set +e
-    "$runner" "${runner_args[@]}" 2>&1 | tee "$log_file"
+    "$runner" "${runner_args[@]}" 2>&1 | awk -v p="$progress" '{ print p " " $0; fflush(); }' | tee "$log_file"
     rc=${PIPESTATUS[0]}
     set -e
     end_s=$(date +%s)
@@ -320,7 +315,9 @@ run_case() {
         "$peak_tops" "$rd_burst_util" "$wr_burst_util" \
         "$elapsed_s" "$rc" "$log_file" >> "$SUMMARY_TSV"
 
-    echo "[SUMMARY] shape=$shape flow=$flow lanes=$lanes cores=$nc clk_div=$clk_div ppb_depth=$ppb_depth status=$status pred=$pred exact=$exact fixed=$fixed cycles=$cycles busy=$busy_cycles compute=$compute_cycles ops_per_cycle=$ops_per_cycle peak_tops=$peak_tops rd_burst_util=$rd_burst_util wr_burst_util=$wr_burst_util elapsed_s=$elapsed_s rc=$rc"
+    echo "$progress [SUMMARY] shape=$shape flow=$flow lanes=$lanes cores=$nc clk_div=$clk_div ppb_depth=$ppb_depth status=$status pred=$pred exact=$exact fixed=$fixed cycles=$cycles busy=$busy_cycles compute=$compute_cycles ops_per_cycle=$ops_per_cycle peak_tops=$peak_tops rd_burst_util=$rd_burst_util wr_burst_util=$wr_burst_util elapsed_s=$elapsed_s rc=$rc"
+
+    rm -rf "$run_dir"
 
     if [[ "$status" != "PASS" && "$STOP_ON_FAIL" -eq 1 ]]; then
         return 1
@@ -329,13 +326,15 @@ run_case() {
 }
 
 overall_rc=0
+case_idx=0
 for shape in "${SHAPES[@]}"; do
     for flow in "${FLOWS[@]}"; do
         for lanes in "${LANES_LIST[@]}"; do
             for nc in "${NUM_CORES_LIST[@]}"; do
                 for clk_div in "${CLK_DIVS[@]}"; do
                     for ppb_depth in "${PPB_DEPTHS[@]}"; do
-                        if ! run_case "$shape" "$flow" "$lanes" "$nc" "$clk_div" "$ppb_depth"; then
+                        case_idx=$((case_idx + 1))
+                        if ! run_case "$case_idx" "$TOTAL_CASES" "$shape" "$flow" "$lanes" "$nc" "$clk_div" "$ppb_depth"; then
                             overall_rc=1
                             break 6
                         fi

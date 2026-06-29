@@ -73,15 +73,6 @@ reg [DATA_W-1:0] mem [0:WORDS-1];
 assign cpu_ready = 1'b1;  // CPU port always ready (no backpressure in sim)
 assign cpu_rdata = mem[cpu_addr[ADDR_W+1:2]];
 
-always @(posedge clk) begin
-    if (cpu_valid && cpu_we) begin
-        if (cpu_wstrb[0]) mem[cpu_addr[ADDR_W+1:2]][ 7: 0] <= cpu_wdata[ 7: 0];
-        if (cpu_wstrb[1]) mem[cpu_addr[ADDR_W+1:2]][15: 8] <= cpu_wdata[15: 8];
-        if (cpu_wstrb[2]) mem[cpu_addr[ADDR_W+1:2]][23:16] <= cpu_wdata[23:16];
-        if (cpu_wstrb[3]) mem[cpu_addr[ADDR_W+1:2]][31:24] <= cpu_wdata[31:24];
-    end
-end
-
 // ---------------------------------------------------------------------------
 // Port 2: AXI4 Write (AW + W + B)
 // ---------------------------------------------------------------------------
@@ -96,6 +87,24 @@ assign axi_bresp   = 2'b00;
 
 wire do_axi_write = wr_active && axi_wvalid && axi_wready;
 
+// Centralized memory write process avoids multiple procedural drivers on mem.
+// CPU is treated as port 0, so it has priority on same-byte collisions.
+always @(posedge clk) begin
+    if (do_axi_write) begin
+        if (axi_wstrb[0]) mem[w_addr_cnt[ADDR_W+1:2]][ 7: 0] <= axi_wdata[ 7: 0];
+        if (axi_wstrb[1]) mem[w_addr_cnt[ADDR_W+1:2]][15: 8] <= axi_wdata[15: 8];
+        if (axi_wstrb[2]) mem[w_addr_cnt[ADDR_W+1:2]][23:16] <= axi_wdata[23:16];
+        if (axi_wstrb[3]) mem[w_addr_cnt[ADDR_W+1:2]][31:24] <= axi_wdata[31:24];
+    end
+
+    if (cpu_valid && cpu_we) begin
+        if (cpu_wstrb[0]) mem[cpu_addr[ADDR_W+1:2]][ 7: 0] <= cpu_wdata[ 7: 0];
+        if (cpu_wstrb[1]) mem[cpu_addr[ADDR_W+1:2]][15: 8] <= cpu_wdata[15: 8];
+        if (cpu_wstrb[2]) mem[cpu_addr[ADDR_W+1:2]][23:16] <= cpu_wdata[23:16];
+        if (cpu_wstrb[3]) mem[cpu_addr[ADDR_W+1:2]][31:24] <= cpu_wdata[31:24];
+    end
+end
+
 always @(posedge clk) begin
     if (!rst_n) begin
         wr_active  <= 1'b0;
@@ -108,11 +117,6 @@ always @(posedge clk) begin
         end
 
         if (do_axi_write) begin
-            if (axi_wstrb[0]) mem[w_addr_cnt[ADDR_W+1:2]][ 7: 0] <= axi_wdata[ 7: 0];
-            if (axi_wstrb[1]) mem[w_addr_cnt[ADDR_W+1:2]][15: 8] <= axi_wdata[15: 8];
-            if (axi_wstrb[2]) mem[w_addr_cnt[ADDR_W+1:2]][23:16] <= axi_wdata[23:16];
-            if (axi_wstrb[3]) mem[w_addr_cnt[ADDR_W+1:2]][31:24] <= axi_wdata[31:24];
-
             if (axi_wlast) begin
                 wr_active <= 1'b0;
                 b_q       <= 1'b1;

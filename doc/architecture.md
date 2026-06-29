@@ -1,6 +1,8 @@
 # Current NPU/SoC Architecture
 
-Updated: 2026-06-24
+Updated: 2026-06-29
+
+Release marker: v4.2.0 - multi-core implemented.
 
 This document describes the current implementation state. It is not a historical roadmap and not a target-only architecture plan.
 
@@ -166,7 +168,7 @@ Runner entry: `--ppb-depth <words>` for single/multi closed-loop, and `--ppb-dep
 
 Each core has its own `CLK_DIV`, CG, and PE array configuration; firmware can set different divisors per core.
 
-Entry: `./run_vgg_mc_closed_loop.sh --num-cores 1|2|4`.
+Entry: `./run_vgg_closed_loop.sh --num-cores 1|2|4`.
 
 ## Execution Paths
 

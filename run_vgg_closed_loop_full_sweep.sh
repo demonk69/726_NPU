@@ -220,10 +220,13 @@ print_summary() {
 }
 
 run_case() {
-    local lanes="$1"
-    local shape="$2"
-    local flow="$3"
+    local case_idx="$1"
+    local total_cases="$2"
+    local lanes="$3"
+    local shape="$4"
+    local flow="$5"
     local case_name="L${lanes}_${shape}_${flow}"
+    local progress="[$case_idx/$total_cases]"
     local log_file="$OUT_DIR/logs/${case_name}.log"
     local run_log_copy="$OUT_DIR/logs/${case_name}.run.log"
     local meta_copy="$OUT_DIR/meta/${case_name}.metadata.json"
@@ -231,13 +234,13 @@ run_case() {
     local start_s end_s elapsed_s rc status cycles pred exact fixed perf_summary ops_per_cycle peak_tops rd_burst_util wr_burst_util
 
     echo
-    echo "=== Case: lanes=$lanes shape=$shape flow=$flow ==="
+    echo "$progress === Case: lanes=$lanes shape=$shape flow=$flow ==="
     start_s=$(date +%s)
     set +e
     VGG_CLOSED_TIMEOUT_CYCLES="$TIMEOUT_CYCLES" \
     VGG_CLOSED_SHELL_TIMEOUT_SECONDS="$SHELL_TIMEOUT_SECONDS" \
         "$ROOT/run_vgg_closed_loop.sh" "${INPUT_ARGS[@]}" \
-            --shape "$shape" --flow "$flow" --lanes "$lanes" 2>&1 | tee "$log_file"
+            --shape "$shape" --flow "$flow" --lanes "$lanes" 2>&1 | awk -v p="$progress" '{ print p " " $0; fflush(); }' | tee "$log_file"
     rc=${PIPESTATUS[0]}
     set -e
     end_s=$(date +%s)
@@ -269,7 +272,7 @@ run_case() {
     pred=$(sed -n 's/.*Predicted class: \([0-9][0-9]*\).*/\1/p' "$log_file" | tail -n 1 || true)
     exact=$(sed -n 's/.*expected exact-python: \([0-9][0-9]*\).*/\1/p' "$log_file" | tail -n 1 || true)
     fixed=$(sed -n 's/.*fixed-runtime: \([0-9][0-9]*\).*/\1/p' "$log_file" | tail -n 1 || true)
-    perf_summary=$(grep '^\[PERF_SUMMARY\]' "$log_file" | tail -n 1 || true)
+    perf_summary=$(grep '\[PERF_SUMMARY\]' "$log_file" | tail -n 1 || true)
 
     cycles=${cycles:-NA}
     pred=${pred:-NA}
@@ -285,7 +288,9 @@ run_case() {
         "$cycles" "$ops_per_cycle" "$peak_tops" "$rd_burst_util" "$wr_burst_util" \
         "$elapsed_s" "$rc" "$log_file" >> "$SUMMARY_TSV"
 
-    echo "[SUMMARY] lanes=$lanes shape=$shape flow=$flow status=$status pred=$pred exact=$exact fixed=$fixed cycles=$cycles ops_per_cycle=$ops_per_cycle peak_tops=$peak_tops rd_burst_util=$rd_burst_util wr_burst_util=$wr_burst_util elapsed_s=$elapsed_s rc=$rc"
+    echo "$progress [SUMMARY] lanes=$lanes shape=$shape flow=$flow status=$status pred=$pred exact=$exact fixed=$fixed cycles=$cycles ops_per_cycle=$ops_per_cycle peak_tops=$peak_tops rd_burst_util=$rd_burst_util wr_burst_util=$wr_burst_util elapsed_s=$elapsed_s rc=$rc"
+
+    rm -rf "$ROOT/sim/vgg_closed_loop"
 
     [[ "$status" == "PASS" && "$rc" -eq 0 ]]
 }
@@ -299,12 +304,16 @@ echo "Output: $OUT_DIR"
 echo "VGG_CLOSED_TIMEOUT_CYCLES=$TIMEOUT_CYCLES"
 echo "VGG_CLOSED_SHELL_TIMEOUT_SECONDS=$SHELL_TIMEOUT_SECONDS"
 echo "Stop on fail: $STOP_ON_FAIL"
+TOTAL_CASES=$(( ${#LANES_LIST[@]} * ${#SHAPES[@]} * ${#FLOWS[@]} ))
+echo "Cases:  $TOTAL_CASES"
 
 overall_rc=0
+case_idx=0
 for lanes in "${LANES_LIST[@]}"; do
     for shape in "${SHAPES[@]}"; do
         for flow in "${FLOWS[@]}"; do
-            if ! run_case "$lanes" "$shape" "$flow"; then
+            case_idx=$((case_idx + 1))
+            if ! run_case "$case_idx" "$TOTAL_CASES" "$lanes" "$shape" "$flow"; then
                 overall_rc=1
                 write_summary_md
                 print_summary

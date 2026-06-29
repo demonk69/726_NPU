@@ -312,15 +312,21 @@ npu_mc_top #(
 // CPU IRQ vector — single assignment only
 // =========================================================================
 wire [31:0] cpu_irq;
+localparam integer CPU_IRQ_BASE   = 7;
+localparam integer CPU_IRQ_SLOTS  = 32 - CPU_IRQ_BASE;
+localparam integer CPU_IRQ_MAPPED = (NUM_CORES < CPU_IRQ_SLOTS) ? NUM_CORES : CPU_IRQ_SLOTS;
+
 genvar irq_g;
 generate
-    for (irq_g = 0; irq_g < NUM_CORES; irq_g = irq_g + 1) begin : gen_cpu_irq
-        assign cpu_irq[7 + irq_g] = npu_irq[irq_g];
+    assign cpu_irq[CPU_IRQ_BASE-1:0] = {CPU_IRQ_BASE{1'b0}};
+
+    for (irq_g = 0; irq_g < CPU_IRQ_MAPPED; irq_g = irq_g + 1) begin : gen_cpu_irq
+        assign cpu_irq[CPU_IRQ_BASE + irq_g] = npu_irq[irq_g];
     end
-    if (NUM_CORES <= 8) begin
-        assign cpu_irq[31 : 7 + NUM_CORES] = {(25 - NUM_CORES){1'b0}};
-    end else begin
-        assign cpu_irq[31:15] = 17'd0;
+
+    if (CPU_IRQ_MAPPED < CPU_IRQ_SLOTS) begin : gen_cpu_irq_zero_high
+        assign cpu_irq[31 : CPU_IRQ_BASE + CPU_IRQ_MAPPED] =
+            {(CPU_IRQ_SLOTS - CPU_IRQ_MAPPED){1'b0}};
     end
 endgenerate
 

@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # Run runtime closed-loop RepOpt VGG classification.
+# Supports both single-core (default) and multi-core NPU configurations.
 #
 # Usage:
 #   ./run_vgg_closed_loop.sh
 #   ./run_vgg_closed_loop.sh 7
-#   ./run_vgg_closed_loop.sh --image cat.jpg
-#   ./run_vgg_closed_loop.sh --shape 8x8 --image cat.jpg
-#   ./run_vgg_closed_loop.sh --flow ws --shape 4x4 --image cat.jpg
-#   ./run_vgg_closed_loop.sh --shape 16x16 --flow os --lanes 2
+#   ./run_vgg_closed_loop.sh --num-cores 2
+#   ./run_vgg_closed_loop.sh --num-cores 1 --image cat.jpg
+#   ./run_vgg_closed_loop.sh --num-cores 2 --shape 16x16 --flow os
+#   ./run_vgg_closed_loop.sh --num-cores 2 --shape 4x4 --flow ws --image cat.jpg
+#   ./run_vgg_closed_loop.sh --num-cores 2 --lanes 2
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-OUT_DIR="$ROOT/sim/vgg_closed_loop"
-TIMEOUT_CYCLES="${VGG_CLOSED_TIMEOUT_CYCLES:-250000000}"
-RUN_TIMEOUT_SECONDS="${VGG_CLOSED_SHELL_TIMEOUT_SECONDS:-12000}"
 
+# ── Defaults ──
+NUM_CORES="1"
 IMG_IDX="0"
 IMAGE=""
 SHAPE="16x16"
@@ -22,9 +23,25 @@ FLOW="os"
 LANES="${VGG_CLOSED_LANES:-4}"
 CLK_DIV="${VGG_CLOSED_CLK_DIV:-0}"
 PPB_DEPTH="${VGG_CLOSED_PPB_DEPTH:-8192}"
+TIMEOUT_CYCLES="${VGG_CLOSED_TIMEOUT_CYCLES:-500000000}"
+RUN_TIMEOUT_SECONDS="${VGG_CLOSED_SHELL_TIMEOUT_SECONDS:-14400}"
+DIAG=""
+DIAG_INTERVAL="10000000"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --num-cores)
+            NUM_CORES="${2:?missing num-cores}"
+            shift 2
+            ;;
+        --diag)
+            DIAG="1"
+            shift
+            ;;
+        --diag-interval)
+            DIAG_INTERVAL="${2:?missing interval}"
+            shift 2
+            ;;
         --image)
             IMAGE="${2:?missing image path}"
             shift 2
@@ -50,7 +67,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --help|-h)
-            echo "Usage: $0 [img_idx] [--image <file>] [--shape 4x4|8x8|16x16|8x32] [--flow os|ws] [--lanes 1|2|4] [--clk-div 0|1|2|3] [--ppb-depth <words>]"
+            echo "Usage: $0 [img_idx] [--num-cores 1|2|4] [--image <file>] [--shape 4x4|8x8|16x16|8x32] [--flow os|ws] [--lanes 1|2|4] [--clk-div 0|1|2|3] [--ppb-depth <words>] [--diag [--diag-interval N]]"
             exit 0
             ;;
         --*)
@@ -63,6 +80,15 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# ── Validation ──
+case "$NUM_CORES" in
+    1|2|4) ;;
+    *)
+        echo "Invalid num-cores: $NUM_CORES (expected 1, 2, or 4)" >&2
+        exit 2
+        ;;
+esac
 
 case "$SHAPE" in
     4x4|8x8|16x16|8x32) ;;
@@ -99,6 +125,20 @@ case "$PPB_DEPTH" in
         ;;
 esac
 
+# ── Core‑dependent settings ──
+if [[ "$NUM_CORES" -eq 1 ]]; then
+    OUT_DIR="$ROOT/sim/vgg_closed_loop"
+    TOP_MODULE="tb_soc_vgg_closed_loop"
+    TB_FILE="$ROOT/tb/tb_soc_vgg_closed_loop.v"
+    CORE_DESC="Single-Core"
+else
+    OUT_DIR="$ROOT/sim/vgg_mc_closed_loop"
+    TOP_MODULE="tb_soc_mc_vgg_closed_loop"
+    TB_FILE="$ROOT/tb/tb_soc_mc_vgg_closed_loop.v"
+    CORE_DESC="Multi-Core (cores=$NUM_CORES)"
+fi
+
+# ── Generator arguments ──
 GEN_ARGS=()
 GEN_ARGS+=(--timeout-cycles "$TIMEOUT_CYCLES")
 GEN_ARGS+=(--shape "$SHAPE")
@@ -106,6 +146,7 @@ GEN_ARGS+=(--flow "$FLOW")
 GEN_ARGS+=(--lanes "$LANES")
 GEN_ARGS+=(--clk-div "$CLK_DIV")
 GEN_ARGS+=(--ppb-depth "$PPB_DEPTH")
+GEN_ARGS+=(--num-cores "$NUM_CORES")
 if [[ -n "$IMAGE" ]]; then
     GEN_ARGS+=(--image "$IMAGE")
 else
@@ -117,15 +158,18 @@ CLASSES=("airplane" "automobile" "bird" "cat" "deer" "dog" "frog" "horse" "ship"
 echo "=== Clean ==="
 rm -rf "$OUT_DIR"
 
-echo "=== Generate Closed Loop ==="
+echo "=== Generate $CORE_DESC ==="
 python3 -B "$ROOT/tools/pth/gen_vgg_closed_loop.py" --out-dir "$OUT_DIR" "${GEN_ARGS[@]}"
 
-echo "=== Compile ==="
-verilator --binary --timing \
-  -I"$OUT_DIR" -Mdir "$OUT_DIR/obj_dir" --top-module tb_soc_vgg_closed_loop \
-  -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-UNUSED -Wno-UNDRIVEN \
-  -Wno-UNOPTFLAT -Wno-PINMISSING -Wno-CASEINCOMPLETE -Wno-COMBDLY \
-  -Wno-INITIALDLY -Wno-LITENDIAN \
+echo "=== Compile (top=$TOP_MODULE) ==="
+VL_ARGS=("--binary" "--timing" "-I$OUT_DIR" "-Mdir" "$OUT_DIR/obj_dir" "--top-module" "$TOP_MODULE"
+  -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-UNUSED -Wno-UNDRIVEN
+  -Wno-UNOPTFLAT -Wno-PINMISSING -Wno-CASEINCOMPLETE -Wno-COMBDLY
+  -Wno-INITIALDLY -Wno-LITENDIAN)
+if [[ -n "$DIAG" ]]; then
+    VL_ARGS+=(-DDIAG_VGG_HEARTBEAT -DDIAG_VGG_HEARTBEAT_INTERVAL="$DIAG_INTERVAL")
+fi
+verilator "${VL_ARGS[@]}" \
   "$ROOT/sim/picorv32.v" \
   "$ROOT/rtl/pe/"*.v \
   "$ROOT/rtl/common/"*.v \
@@ -136,12 +180,12 @@ verilator --binary --timing \
   "$ROOT/rtl/power/"*.v \
   "$ROOT/rtl/soc/"*.v \
   "$ROOT/rtl/top/"*.v \
-  "$ROOT/tb/tb_soc_vgg_closed_loop.v"
+  "$TB_FILE"
 
 echo "=== Run ==="
 LOG_FILE="$OUT_DIR/run.log"
 set +e
-timeout "$RUN_TIMEOUT_SECONDS" stdbuf -oL -eL "$OUT_DIR/obj_dir/Vtb_soc_vgg_closed_loop" 2>&1 | tee "$LOG_FILE"
+timeout "$RUN_TIMEOUT_SECONDS" stdbuf -oL -eL "$OUT_DIR/obj_dir/V${TOP_MODULE}" 2>&1 | tee "$LOG_FILE"
 RUN_RC=${PIPESTATUS[0]}
 set -e
 

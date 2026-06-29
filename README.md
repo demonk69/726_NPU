@@ -1,6 +1,8 @@
 # NPU OpenAI Lab Prototype
 
-Current state: Linux + Verilator simulation of a PicoRV32-controlled NPU SoC for RepOpt VGG-like CIFAR-10 inference. Supports single-core and multi-core (1/2 cores), DFS clock-enable throttling, and INT8 SIMD lane config (1/2/4).
+Version: v4.2.0 - multi-core implemented.
+
+Current state: Linux + Verilator simulation of a PicoRV32-controlled NPU SoC for RepOpt VGG-like CIFAR-10 inference. Supports single-core and multi-core configurations (`--num-cores 1|2|4`; 1/2-core VGG verified), DFS clock-enable throttling, and INT8 SIMD lane config (1/2/4).
 
 ## What Works Now
 
@@ -8,7 +10,7 @@ Current state: Linux + Verilator simulation of a PicoRV32-controlled NPU SoC for
 |---|---|---|---|
 | Fast VGG e2e | `./run_vgg_e2e.sh` or `./run_all.sh standard` | Python pre-generates all Conv A tiles; CPU firmware runs 1024 NPU tiles plus avgpool/classifier/argmax | PASS, cat/class 3, 10,768,727 cycles |
 | Runtime closed-loop VGG (1-core) | `./run_vgg_closed_loop.sh` | CPU firmware packs A tiles at runtime, runs NPU, performs per-channel requant/scatter, maxpool, avgpool, classifier | PASS, about 114M cycles for default `16x16` |
-| Runtime closed-loop VGG (multi-core) | `./run_vgg_mc_closed_loop.sh` | Same as above, distributed across multiple NPU cores via N-tile split | PASS, 1-core ≈114M, 2-core ≈110M |
+| Runtime closed-loop VGG (multi-core) | `./run_vgg_closed_loop.sh --num-cores 2` | Same as above, distributed across multiple NPU cores via N-tile split | PASS, 1-core ≈114M, 2-core ≈110M |
 | DFS (clock-enable throttling) | `--clk-div 0|1|2|3` | CE-based compute rate control (1x, 1/2, 1/4, 1/8) | PASS, tile golden-check + VGG closed-loop |
 | Multi-dimensional sweep | `./run_vgg_closed_loop_sweep.sh` | Sweep shapes×flows×lanes×cores×clk_div×PPB depth | Supported |
 | Arbitrary image e2e | `./run_all.sh image <file>` | Classify an image after host resize/normalize/quantize | Supported |
@@ -168,7 +170,7 @@ The default closed-loop shape is `16x16`. The run script and generator also supp
 
 ### Multi-Core Flow
 
-`./run_vgg_mc_closed_loop.sh` distributes tiles across multiple NPU cores via N-tile splitting. Accepts `--num-cores 1|2|4`, with the same shape/flow/lanes/clk-div options as the single-core runner.
+`./run_vgg_closed_loop.sh --num-cores N` distributes tiles across multiple NPU cores via N-tile splitting. Accepts `--num-cores 1|2|4`, with the same shape/flow/lanes/clk-div options as the single-core runner. This is the maintained multi-core entry point as of v4.2.0.
 
 ### DFS (Clock-Enable Throttling)
 
@@ -208,8 +210,7 @@ CE-based compute rate control via `--clk-div 0|1|2|3` (1x, 1/2, 1/4, 1/8). DMA a
 ## Important Distinctions
 
 - `run_vgg_e2e.sh` is the fast baseline, but Python pre-generates all Conv A tiles.
-- `run_vgg_closed_loop.sh` is the runtime single-core closed-loop path.
-- `run_vgg_mc_closed_loop.sh` is the multi-core runtime closed-loop path (`--num-cores 1|2|4`).
+- `run_vgg_closed_loop.sh` is the runtime closed-loop path for both single-core and multi-core runs (`--num-cores 1|2|4`).
 - DFS is CE-based; `--clk-div` works with all runners and sweep scripts.
 - PPB depth is compile/testbench configuration, not an MMIO register; use `--ppb-depth`/`--ppb-depths` before generation.
 - Do not use archived Windows/Icarus documents as current run instructions.

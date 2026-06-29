@@ -1,6 +1,8 @@
 # Verification Status
 
-Updated: 2026-06-24
+Updated: 2026-06-29
+
+Release marker: v4.2.0 - multi-core implemented.
 
 This document is the current verification record. Older status files and worklogs in `doc/archive/` are historical and may describe superseded Windows/Icarus flows.
 
@@ -24,8 +26,8 @@ This document is the current verification record. Older status files and worklog
 | Fast VGG e2e baseline | `./run_vgg_e2e.sh` | PASS on 2026-05-31 | cat/class 3 | 10,768,727 |
 | Runtime closed-loop image2 | `./run_all.sh closed_loop --image ./pic/test_cifar10_2.jpg` | PASS | frog/class 6 | 114,014,769 |
 | Runtime closed-loop image4 | `./run_all.sh closed_loop --image ./pic/test_cifar10_4.jpg` | PASS | dog/class 5 | 114,013,544 |
-| Multi-core closed-loop image2, `NUM_CORES=1` | `./run_vgg_mc_closed_loop.sh --num-cores 1 --image pic/test_cifar10_2.jpg` | PASS | frog/class 6 | 114,014,769 |
-| Multi-core closed-loop image2, `NUM_CORES=2` | `./run_vgg_mc_closed_loop.sh --num-cores 2 --image pic/test_cifar10_2.jpg` | PASS | frog/class 6 | 110,242,347 |
+| Multi-core closed-loop image2, `NUM_CORES=1` | `./run_vgg_closed_loop.sh --num-cores 1 --image pic/test_cifar10_2.jpg` | PASS | frog/class 6 | 114,014,769 |
+| Multi-core closed-loop image2, `NUM_CORES=2` | `./run_vgg_closed_loop.sh --num-cores 2 --image pic/test_cifar10_2.jpg` | PASS | frog/class 6 | 110,242,347 |
 | Runtime closed-loop local image, 4x4 OS | `./run_vgg_closed_loop.sh --image <local-image> --shape 4x4 --flow os` | PASS on 2026-06-01 | automobile/class 1 | 160,809,527 |
 | Runtime closed-loop local image, 4x4 WS | `./run_vgg_closed_loop.sh --image <local-image> --shape 4x4 --flow ws` | PASS on 2026-06-01 | automobile/class 1 | 160,809,527 |
 | Runtime closed-loop full shape/dataflow sweep | `./run_vgg_closed_loop_sweep.sh --image <local-image>` | PASS on 2026-06-02, 8/8 cases | ship/class 8 | see sweep table below |
@@ -84,8 +86,8 @@ The following checks validate the multi-core implementation.
 | `iverilog -g2012 -o /tmp/opencode/tb_soc_mc_mmio.vvp sim/picorv32.v rtl/pe/*.v rtl/common/*.v rtl/buf/*.v rtl/array/*.v rtl/axi/*.v rtl/ctrl/*.v rtl/power/*.v rtl/soc/*.v rtl/top/*.v tb/tb_soc_mc_mmio.v && vvp /tmp/opencode/tb_soc_mc_mmio.vvp` | PicoRV32 multi-core MMIO access | PASS, 52 cycles |
 | `iverilog -g2012 -o /tmp/opencode/tb_soc_mc_shared_a.vvp sim/picorv32.v rtl/pe/*.v rtl/common/*.v rtl/buf/*.v rtl/array/*.v rtl/axi/*.v rtl/ctrl/*.v rtl/power/*.v rtl/soc/*.v rtl/top/*.v tb/tb_soc_mc_shared_a.v && vvp /tmp/opencode/tb_soc_mc_shared_a.vvp` | Shared `A_WORK`, per-core `R_WORK` smoke | PASS, 1109 cycles |
 | `verilator --lint-only --timing -DMC_HEARTBEAT_INTERVAL=1000000 -I/tmp/opencode/vgg_mc_fixed --top-module tb_mc_heart ... tb/tb_mc_heart.v` | 2-core heartbeat testbench lint after `NUM_CORES=1` compatibility update | PASS with existing warning suppressions |
-| `./run_vgg_mc_closed_loop.sh --num-cores 1 --image pic/test_cifar10_2.jpg` | Multi-core SoC wrapper, single-core VGG baseline | PASS, frog/class 6, 114,014,769 cycles |
-| `./run_vgg_mc_closed_loop.sh --num-cores 2 --image pic/test_cifar10_2.jpg` | Full 2-core closed-loop VGG | PASS, frog/class 6, 110,242,347 cycles |
+| `./run_vgg_closed_loop.sh --num-cores 1 --image pic/test_cifar10_2.jpg` | Multi-core SoC wrapper, single-core VGG baseline | PASS, frog/class 6, 114,014,769 cycles |
+| `./run_vgg_closed_loop.sh --num-cores 2 --image pic/test_cifar10_2.jpg` | Full 2-core closed-loop VGG | PASS, frog/class 6, 110,242,347 cycles |
 
 Short-run diagnostic throughput samples on this host:
 

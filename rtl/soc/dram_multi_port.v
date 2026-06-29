@@ -63,20 +63,21 @@ localparam ADDR_W = $clog2(WORDS);
 // ---------------------------------------------------------------------------
 reg [DATA_W-1:0] mem [0:WORDS-1];
 
+wire [NUM_CORES-1:0]                  npu_write_fire;
+wire [NUM_CORES*32-1:0]               npu_write_addr;
+wire [NUM_CORES*DATA_W-1:0]           npu_write_data;
+wire [NUM_CORES*(DATA_W/8)-1:0]       npu_write_strb;
+
+integer write_port;
+reg [31:0] write_addr_sel;
+reg [DATA_W-1:0] write_data_sel;
+reg [DATA_W/8-1:0] write_strb_sel;
+
 // ---------------------------------------------------------------------------
 // CPU simple port
 // ---------------------------------------------------------------------------
 assign cpu_ready = 1'b1;
 assign cpu_rdata = mem[cpu_addr[ADDR_W+1:2]];
-
-always @(posedge clk) begin
-    if (cpu_valid && cpu_we) begin
-        if (cpu_wstrb[0]) mem[cpu_addr[ADDR_W+1:2]][ 7: 0] <= cpu_wdata[ 7: 0];
-        if (cpu_wstrb[1]) mem[cpu_addr[ADDR_W+1:2]][15: 8] <= cpu_wdata[15: 8];
-        if (cpu_wstrb[2]) mem[cpu_addr[ADDR_W+1:2]][23:16] <= cpu_wdata[23:16];
-        if (cpu_wstrb[3]) mem[cpu_addr[ADDR_W+1:2]][31:24] <= cpu_wdata[31:24];
-    end
-end
 
 // ---------------------------------------------------------------------------
 // NPU AXI4 ports — replicated per core
@@ -131,6 +132,10 @@ generate
         assign local_bresp   = 2'b00;
 
         wire do_write = wr_active && local_wvalid && local_wready;
+        assign npu_write_fire[port] = do_write;
+        assign npu_write_addr[port*32 +: 32] = w_addr_cnt;
+        assign npu_write_data[port*DATA_W +: DATA_W] = local_wdata;
+        assign npu_write_strb[port*(DATA_W/8) +: (DATA_W/8)] = local_wstrb;
 
         always @(posedge clk) begin
             if (!rst_n) begin
@@ -144,11 +149,6 @@ generate
                 end
 
                 if (do_write) begin
-                    if (local_wstrb[0]) mem[w_addr_cnt[ADDR_W+1:2]][ 7: 0] <= local_wdata[ 7: 0];
-                    if (local_wstrb[1]) mem[w_addr_cnt[ADDR_W+1:2]][15: 8] <= local_wdata[15: 8];
-                    if (local_wstrb[2]) mem[w_addr_cnt[ADDR_W+1:2]][23:16] <= local_wdata[23:16];
-                    if (local_wstrb[3]) mem[w_addr_cnt[ADDR_W+1:2]][31:24] <= local_wdata[31:24];
-
                     if (local_wlast) begin
                         wr_active <= 1'b0;
                         b_q       <= 1'b1;
@@ -200,5 +200,30 @@ generate
 
     end
 endgenerate
+
+// Centralized memory write process avoids multiple procedural drivers on mem.
+// Writes are applied high-to-low NPU port, then CPU port 0 last; same-byte
+// collisions therefore resolve in favor of the lower port index.
+always @(posedge clk) begin
+    for (write_port = NUM_CORES; write_port > 0; write_port = write_port - 1) begin
+        if (npu_write_fire[write_port-1]) begin
+            write_addr_sel = npu_write_addr[(write_port-1)*32 +: 32];
+            write_data_sel = npu_write_data[(write_port-1)*DATA_W +: DATA_W];
+            write_strb_sel = npu_write_strb[(write_port-1)*(DATA_W/8) +: (DATA_W/8)];
+
+            if (write_strb_sel[0]) mem[write_addr_sel[ADDR_W+1:2]][ 7: 0] <= write_data_sel[ 7: 0];
+            if (write_strb_sel[1]) mem[write_addr_sel[ADDR_W+1:2]][15: 8] <= write_data_sel[15: 8];
+            if (write_strb_sel[2]) mem[write_addr_sel[ADDR_W+1:2]][23:16] <= write_data_sel[23:16];
+            if (write_strb_sel[3]) mem[write_addr_sel[ADDR_W+1:2]][31:24] <= write_data_sel[31:24];
+        end
+    end
+
+    if (cpu_valid && cpu_we) begin
+        if (cpu_wstrb[0]) mem[cpu_addr[ADDR_W+1:2]][ 7: 0] <= cpu_wdata[ 7: 0];
+        if (cpu_wstrb[1]) mem[cpu_addr[ADDR_W+1:2]][15: 8] <= cpu_wdata[15: 8];
+        if (cpu_wstrb[2]) mem[cpu_addr[ADDR_W+1:2]][23:16] <= cpu_wdata[23:16];
+        if (cpu_wstrb[3]) mem[cpu_addr[ADDR_W+1:2]][31:24] <= cpu_wdata[31:24];
+    end
+end
 
 endmodule

@@ -1,6 +1,8 @@
 # User Manual
 
-Updated: 2026-06-24
+Updated: 2026-06-29
+
+Release marker: v4.2.0 - multi-core implemented.
 
 This document summarizes the firmware-facing ABI currently used by the maintained VGG simulation flows.
 
@@ -12,7 +14,7 @@ This document summarizes the firmware-facing ABI currently used by the maintaine
 ./run_vgg_closed_loop.sh --image ./pic/test_cifar10_2.jpg
 ./run_vgg_closed_loop.sh --image ./pic/test_cifar10_2.jpg --clk-div 1
 ./run_vgg_closed_loop.sh --image ./pic/test_cifar10_2.jpg --ppb-depth 4096
-./run_vgg_mc_closed_loop.sh --num-cores 2 --image ./pic/test_cifar10_2.jpg
+./run_vgg_closed_loop.sh --num-cores 2 --image ./pic/test_cifar10_2.jpg
 ./run_vgg_closed_loop_sweep.sh --lanes 4 --num-cores 1,2 --shapes 16x16 --ppb-depths 1024,4096,8192
 ./run_all.sh standard 0
 ./run_all.sh closed_loop --image ./pic/test_cifar10_2.jpg
@@ -114,7 +116,7 @@ Current VGG flows use `CFG_SHAPE=2` for 16x16.
 All runners accept `--clk-div`:
 ```bash
 ./run_vgg_closed_loop.sh --image ./pic/test_cifar10_2.jpg --clk-div 1
-./run_vgg_mc_closed_loop.sh --num-cores 2 --clk-div 2
+./run_vgg_closed_loop.sh --num-cores 2 --clk-div 2
 ./run_vgg_closed_loop_sweep.sh --clk-divs 0,1,2,3 --shapes 16x16
 ```
 
@@ -126,7 +128,7 @@ Use these options before generation/compile:
 
 ```bash
 ./run_vgg_closed_loop.sh --image ./pic/test_cifar10_2.jpg --ppb-depth 4096
-./run_vgg_mc_closed_loop.sh --num-cores 2 --ppb-depth 4096
+./run_vgg_closed_loop.sh --num-cores 2 --ppb-depth 4096
 ./run_vgg_closed_loop_sweep.sh --shapes 16x16 --flows os --lanes 4 --ppb-depths 1024,4096,8192
 ```
 
@@ -135,7 +137,7 @@ The generator writes `VGG_CLOSED_PPB_DEPTH` into `soc_vgg_closed_loop_params.vh`
 ## Multi-Core Operation
 
 ```bash
-./run_vgg_mc_closed_loop.sh --num-cores 2 --image ./pic/test_cifar10_2.jpg
+./run_vgg_closed_loop.sh --num-cores 2 --image ./pic/test_cifar10_2.jpg
 ./run_vgg_closed_loop_sweep.sh --num-cores 1,2 --lanes 4 --shapes 16x16 --flows os
 ```
 

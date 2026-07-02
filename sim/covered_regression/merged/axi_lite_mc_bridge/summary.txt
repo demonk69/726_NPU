@@ -1,0 +1,1 @@
+axi_lite_mc_bridge       line=  97% toggle=  27% comb=  93%

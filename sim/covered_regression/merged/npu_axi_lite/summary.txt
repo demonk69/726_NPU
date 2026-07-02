@@ -1,0 +1,1 @@
+npu_axi_lite             line=  99% toggle=   6% comb=  67%

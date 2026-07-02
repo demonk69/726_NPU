@@ -1,0 +1,5 @@
+npu_axi_lite             line=  99% toggle=   6% comb=  67%
+npu_dma                  line= 100% toggle=  24% comb=  83%
+npu_ctrl                 line= 100% toggle=  10% comb=  68%
+reconfig_pe_array        line=  99% toggle=   5% comb=  75%
+axi_lite_mc_bridge       line=  97% toggle=  27% comb=  93%

@@ -1,0 +1,75 @@
+
+Covered covered-0.7.10 -- Verilog Code Coverage Utility
+Written by Trevor Williams  (phase1geo@gmail.com)
+Freely distributable under the GPL license
+
+                            :::::::::::::::::::::::::::::::::::::::::::::::::::::
+                            ::                                                 ::
+                            ::  Covered -- Verilog Coverage Summarized Report  ::
+                            ::                                                 ::
+                            :::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~   GENERAL INFORMATION   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+* Report generated from CDD file : /mnt/e/06.CoreCreation/09_npu_rtl/sim/covered_regression/merged/npu_dma/merged.cdd
+
+* Reported by                    : Module
+
+* Report generated from CDD file that was merged from the following files:
+    Filename                                           Leading Hierarchy
+    -----------------------------------------------------------------------------------------------------------------
+    sim/covered_regression/dma_read_burst/cov.cdd      tb_dma_read_burst                                             
+    sim/covered_regression/dma_write_burst/cov.cdd     tb_dma_write_burst                                            
+    sim/covered_regression/dma_burst/cov.cdd           tb_dma_burst                                                  
+    sim/covered_regression/dma_perf/cov.cdd            tb_dma_perf                                                   
+    sim/covered_regression/dma_adv_paths/cov.cdd       tb_dma_adv_paths                                              
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~   LINE COVERAGE RESULTS   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Module/Task/Function      Filename                 Hit/ Miss/Total    Percent hit
+---------------------------------------------------------------------------------------------------------------------
+  $root                   NA                         0/    0/    0      100%
+  npu_dma                 npu_dma.v                478/  107/  585       82%
+  sync_fifo               fifo.v                    24/    0/   24      100%
+  npu_dma.req_aligned     npu_dma.v                  1/    0/    1      100%
+  npu_dma.addr_aligned    npu_dma.v                  1/    0/    1      100%
+  npu_dma.pack_im2col_    npu_dma.v                  9/    0/    9      100%
+---------------------------------------------------------------------------------------------------------------------
+  Accumulated                                      513/  107/  620       83%
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~   TOGGLE COVERAGE RESULTS   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                                                           Toggle 0 -> 1                       Toggle 1 -> 0
+Module/Task/Function      Filename                 Hit/ Miss/Total    Percent hit      Hit/ Miss/Total    Percent hit
+---------------------------------------------------------------------------------------------------------------------
+  $root                   NA                         0/    0/    0      100%             0/    0/    0      100%
+  npu_dma                 npu_dma.v                908/ 2314/ 3222       28%           730/ 2492/ 3222       23%
+  sync_fifo               fifo.v                    78/   35/  113       69%            65/   48/  113       58%
+  npu_dma.req_aligned     npu_dma.v                 20/   29/   49       41%            18/   31/   49       37%
+  npu_dma.addr_aligned    npu_dma.v                  6/   27/   33       18%             6/   27/   33       18%
+  npu_dma.pack_im2col_    npu_dma.v                 20/   63/   83       24%            15/   68/   83       18%
+---------------------------------------------------------------------------------------------------------------------
+  Accumulated                                     1032/ 2468/ 3500       29%           834/ 2666/ 3500       24%
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~   COMBINATIONAL LOGIC COVERAGE RESULTS   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                                                                            Logic Combinations
+Module/Task/Function                Filename                          Hit/Miss/Total    Percent hit
+---------------------------------------------------------------------------------------------------------------------
+  $root                             NA                                  0/   0/   0      100%
+  npu_dma                           npu_dma.v                         788/ 357/1145       69%
+  sync_fifo                         fifo.v                             50/   9/  59       85%
+  npu_dma.req_aligned               npu_dma.v                          10/   3/  13       77%
+  npu_dma.addr_aligned              npu_dma.v                           4/   0/   4      100%
+  npu_dma.pack_im2col_elem          npu_dma.v                          18/   2/  20       90%
+---------------------------------------------------------------------------------------------------------------------
+  Accumulated                                                         870/ 371/1241       70%
+
+

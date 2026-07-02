@@ -1,0 +1,121 @@
+
+Covered covered-0.7.10 -- Verilog Code Coverage Utility
+Written by Trevor Williams  (phase1geo@gmail.com)
+Freely distributable under the GPL license
+
+                            :::::::::::::::::::::::::::::::::::::::::::::::::::::
+                            ::                                                 ::
+                            ::  Covered -- Verilog Coverage Summarized Report  ::
+                            ::                                                 ::
+                            :::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~   GENERAL INFORMATION   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+* Report generated from CDD file : /mnt/e/06.CoreCreation/09_npu_rtl/sim/covered_regression/closure/npu_ctrl_line95.cdd
+
+* Reported by                    : Module
+
+* Report generated from CDD file that was merged from the following files:
+    Filename                                           Leading Hierarchy
+    -----------------------------------------------------------------------------------------------------------------
+    sim/covered_regression/ctrl_error_status/cov.cdd   tb_npu_ctrl_error_status                                      
+    sim/covered_regression/ctrl_tile/cov.cdd           tb_npu_ctrl_tile                                              
+    sim/covered_regression/ctrl_ksplit/cov.cdd         tb_npu_ctrl_ksplit                                            
+    sim/covered_regression/ctrl_dataflow/cov.cdd       tb_npu_ctrl_dataflow_modes                                    
+    sim/covered_regression/ctrl_desc_flow/cov.cdd      tb_npu_ctrl_desc_flow                                         
+    sim/covered_regression/ctrl_extra_paths/cov.cdd    tb_npu_ctrl_extra_paths                                       
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~   LINE COVERAGE RESULTS   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Module/Task/Function      Filename                 Hit/ Miss/Total    Percent hit
+---------------------------------------------------------------------------------------------------------------------
+  $root                   NA                         0/    0/    0      100%
+  npu_ctrl                npu_ctrl.v               806/    0/  806      100%
+  npu_ctrl.shape_tile_    npu_ctrl.v                 4/    0/    4      100%
+  npu_ctrl.shape_tile_    npu_ctrl.v                 3/    0/    3      100%
+  npu_ctrl.shape_tile_    npu_ctrl.v                 4/    0/    4      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 2/    0/    2      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 2/    0/    2      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 2/    0/    2      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 2/    0/    2      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 2/    0/    2      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 2/    0/    2      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 2/    0/    2      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 2/    0/    2      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 2/    0/    2      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 2/    0/    2      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 2/    0/    2      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 2/    0/    2      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 2/    0/    2      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 2/    0/    2      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 2/    0/    2      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 2/    0/    2      100%
+---------------------------------------------------------------------------------------------------------------------
+  Accumulated                                      849/    0/  849      100%
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~   TOGGLE COVERAGE RESULTS   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                                                           Toggle 0 -> 1                       Toggle 1 -> 0
+Module/Task/Function      Filename                 Hit/ Miss/Total    Percent hit      Hit/ Miss/Total    Percent hit
+---------------------------------------------------------------------------------------------------------------------
+  $root                   NA                         0/    0/    0      100%             0/    0/    0      100%
+  npu_ctrl                npu_ctrl.v               610/ 4433/ 5043       12%           497/ 4546/ 5043       10%
+  npu_ctrl.shape_tile_    npu_ctrl.v                 4/    3/    7       57%             4/    3/    7       57%
+  npu_ctrl.shape_tile_    npu_ctrl.v                 5/    2/    7       71%             5/    2/    7       71%
+  npu_ctrl.shape_tile_    npu_ctrl.v                 6/    2/    8       75%             6/    2/    8       75%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 0/    0/    0      100%             0/    0/    0      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 0/    0/    0      100%             0/    0/    0      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 0/    0/    0      100%             0/    0/    0      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 0/    0/    0      100%             0/    0/    0      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 0/    0/    0      100%             0/    0/    0      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 0/    0/    0      100%             0/    0/    0      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 0/    0/    0      100%             0/    0/    0      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 0/    0/    0      100%             0/    0/    0      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 0/    0/    0      100%             0/    0/    0      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 0/    0/    0      100%             0/    0/    0      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 0/    0/    0      100%             0/    0/    0      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 0/    0/    0      100%             0/    0/    0      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 0/    0/    0      100%             0/    0/    0      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 0/    0/    0      100%             0/    0/    0      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 0/    0/    0      100%             0/    0/    0      100%
+  npu_ctrl.gen_tile_va    npu_ctrl.v                 0/    0/    0      100%             0/    0/    0      100%
+---------------------------------------------------------------------------------------------------------------------
+  Accumulated                                      625/ 4440/ 5065       12%           512/ 4553/ 5065       10%
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~   COMBINATIONAL LOGIC COVERAGE RESULTS   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                                                                            Logic Combinations
+Module/Task/Function                Filename                          Hit/Miss/Total    Percent hit
+---------------------------------------------------------------------------------------------------------------------
+  $root                             NA                                  0/   0/   0      100%
+  npu_ctrl                          npu_ctrl.v                       1071/ 498/1569       68%
+  npu_ctrl.shape_tile_lanes         npu_ctrl.v                          2/   0/   2      100%
+  npu_ctrl.shape_tile_a_lanes       npu_ctrl.v                          2/   0/   2      100%
+  npu_ctrl.shape_tile_n_lanes       npu_ctrl.v                          2/   0/   2      100%
+  npu_ctrl.gen_tile_valid[0]        npu_ctrl.v                          4/   4/   8       50%
+  npu_ctrl.gen_tile_valid[1]        npu_ctrl.v                          6/   2/   8       75%
+  npu_ctrl.gen_tile_valid[2]        npu_ctrl.v                          6/   2/   8       75%
+  npu_ctrl.gen_tile_valid[3]        npu_ctrl.v                          6/   2/   8       75%
+  npu_ctrl.gen_tile_valid[4]        npu_ctrl.v                          6/   2/   8       75%
+  npu_ctrl.gen_tile_valid[5]        npu_ctrl.v                          6/   2/   8       75%
+  npu_ctrl.gen_tile_valid[6]        npu_ctrl.v                          6/   2/   8       75%
+  npu_ctrl.gen_tile_valid[7]        npu_ctrl.v                          6/   2/   8       75%
+  npu_ctrl.gen_tile_valid[8]        npu_ctrl.v                          5/   3/   8       62%
+  npu_ctrl.gen_tile_valid[9]        npu_ctrl.v                          5/   3/   8       62%
+  npu_ctrl.gen_tile_valid[10]       npu_ctrl.v                          5/   3/   8       62%
+  npu_ctrl.gen_tile_valid[11]       npu_ctrl.v                          5/   3/   8       62%
+  npu_ctrl.gen_tile_valid[12]       npu_ctrl.v                          5/   3/   8       62%
+  npu_ctrl.gen_tile_valid[13]       npu_ctrl.v                          5/   3/   8       62%
+  npu_ctrl.gen_tile_valid[14]       npu_ctrl.v                          5/   3/   8       62%
+  npu_ctrl.gen_tile_valid[15]       npu_ctrl.v                          5/   3/   8       62%
+---------------------------------------------------------------------------------------------------------------------
+  Accumulated                                                        1163/ 540/1703       68%
+
+

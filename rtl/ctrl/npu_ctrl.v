@@ -668,7 +668,8 @@ assign vec_consume = tile_mode &&
 // DMA completion latches
 // ---------------------------------------------------------------------------
 reg dma_w_done_r, dma_a_done_r, dma_bias_done_r, dma_r_done_r;
-wire dma_load_done = dma_w_done_r && dma_a_done_r;
+wire dma_load_done = dma_w_done_r && dma_a_done_r &&
+                     (!lk_bias_en || tile_mode || dma_bias_done_r);
 
 // ---------------------------------------------------------------------------
 // WS consume counter
@@ -1098,6 +1099,7 @@ always @(posedge clk) begin
             S_WARMUP_WAIT: begin
                 pe_stat        <= lk_stat[0];
                 pe_load_w      <= ((lk_stat[0] == 1'b0) && (!tile_mode || tile_direct_ws)) ? 1'b1 : 1'b0;
+                pe_swap_w      <= ((lk_stat[0] == 1'b0) && (!tile_mode || tile_direct_ws)) ? 1'b1 : 1'b0;
                 ws_consume_cnt <= 16'd0;
                 tile_k_cycle   <= 16'd0;
 
@@ -1148,6 +1150,14 @@ always @(posedge clk) begin
                     dma_a_im2col_dilation_w <= lk_conv_dilation_w;
                     dma_a_im2col_fp16_mode <= lk_dma_fp16_mode;
                     dma_bias_addr <= lk_bias_addr + (seq1_j << 2);
+                    if (!tile_mode) begin
+                        dma_w_start <= 1'b1;
+                        dma_a_start <= 1'b1;
+                        dma_bias_start <= lk_bias_en;
+                        dma_w_done_r <= 1'b0;
+                        dma_a_done_r <= 1'b0;
+                        dma_bias_done_r <= 1'b0;
+                    end
                 end
 
                 // Tile-mode bias: sequential per-column fetch
@@ -1189,23 +1199,26 @@ always @(posedge clk) begin
 
                 if (cfg_abort) begin
                     state <= S_IDLE; busy <= 1'b0;
-                    pe_en <= 1'b0; pe_load_w <= 1'b0;
+                    pe_en <= 1'b0; pe_load_w <= 1'b0; pe_swap_w <= 1'b0;
 
                 end else if (lk_stat[0] == 1'b0 && !tile_mode) begin
                     // ─── Legacy scalar WS mode ───
                     pe_load_w <= (ws_consume_cnt < lk_k_dim[15:0]) ? 1'b1 : 1'b0;
+                    pe_swap_w <= (ws_consume_cnt < lk_k_dim[15:0]) ? 1'b1 : 1'b0;
                     if (ws_consume_cnt < lk_k_dim[15:0] + 16'd2) begin
                         pe_en <= 1'b1;
                         if (compute_ce) ws_consume_cnt <= ws_consume_cnt + 1;
                     end else begin
                         pe_en     <= 1'b0;
                         pe_load_w <= 1'b0;
+                        pe_swap_w <= 1'b0;
                         state     <= S_DRAIN;
                     end
 
                 end else begin
                     // ─── Tile OS or packed direct-WS mode ───
                     pe_load_w <= tile_direct_ws && (tile_k_cycle < tile_k_cycles);
+                    pe_swap_w <= tile_direct_ws && (tile_k_cycle < tile_k_cycles);
                     if (tile_mode) begin
                         pe_en <= 1'b1;
                         if (!pe_en) begin
@@ -1255,6 +1268,7 @@ always @(posedge clk) begin
                     // before S_DRAIN asserts flush on the next cycle.
                     tile_k_cycle <= 16'd0;
                     pe_load_w <= 1'b0;
+                    pe_swap_w <= 1'b0;
                     // 8x32 two-pass: pass 0 done, load W for cols 16-31
                     if (is_8x32 && !pass_idx) begin
                         `ifdef DIAG_8X32
@@ -1313,6 +1327,7 @@ always @(posedge clk) begin
                 pe_en    <= 1'b1;
                 pe_flush <= 1'b1;
                 pe_load_w <= 1'b0;
+                pe_swap_w <= 1'b0;
                 if (compute_ce) state <= S_DRAIN2;
             end
 
@@ -1405,6 +1420,7 @@ always @(posedge clk) begin
                             r_fifo_clear <= 1'b1;
                             pe_stat        <= lk_stat[0];
                             pe_load_w      <= ((lk_stat[0] == 1'b0) && (!tile_mode || tile_direct_ws)) ? 1'b1 : 1'b0;
+                            pe_swap_w      <= ((lk_stat[0] == 1'b0) && (!tile_mode || tile_direct_ws)) ? 1'b1 : 1'b0;
                             ws_consume_cnt <= 16'd0;
                             tile_k_cycle   <= 16'd0;
                             dma_w_done_r   <= 1'b0;
@@ -1438,6 +1454,7 @@ always @(posedge clk) begin
                         r_fifo_clear <= 1'b1;
                     pe_stat        <= lk_stat[0];
                     pe_load_w      <= ((lk_stat[0] == 1'b0) && (!tile_mode || tile_direct_ws)) ? 1'b1 : 1'b0;
+                    pe_swap_w      <= ((lk_stat[0] == 1'b0) && (!tile_mode || tile_direct_ws)) ? 1'b1 : 1'b0;
                     ws_consume_cnt <= 16'd0;
                     tile_k_cycle   <= 16'd0;
                     dma_w_done_r   <= 1'b0;

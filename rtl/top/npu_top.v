@@ -30,7 +30,7 @@ module npu_top #(
     parameter ACC_W        = 32,
     parameter PPB_DEPTH    = 64,
     parameter PPB_THRESH   = 16,
-    parameter INT8_SIMD_LANES = 4,
+    parameter INT8_SIMD_LANES = (DATA_W >= 32) ? 4 : 2,
     parameter PERF_ENABLE_DERIVED = 0,
     parameter FP16_ENABLE = 0,
     parameter PPB_SCALAR_READ_ENABLE = 1

@@ -5,6 +5,7 @@ module tb_npu_tile_ksplit_gemm;
 localparam DATA_W  = 16;
 localparam ACC_W   = 32;
 localparam CLK_T   = 10;
+localparam INT8_SIMD_LANES = (DATA_W >= 32) ? 4 : 2;
 localparam DRAM_SZ = 2048;
 
 localparam REG_CTRL      = 32'h00;
@@ -97,6 +98,7 @@ reg [7:0]  aw_len_seen  [0:7];
 npu_top #(
     .DATA_W(DATA_W),
     .ACC_W (ACC_W),
+    .INT8_SIMD_LANES(INT8_SIMD_LANES),
     .PPB_DEPTH(4),
     .PPB_THRESH(4)
 ) u_npu (

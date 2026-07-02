@@ -284,7 +284,7 @@ generate
                                              (fold_enable ? fold_load_row_match
                                                           : (r == ws_load_row))));
             wire pe_load_w_ce = pe_load_w && pe_power_ce;
-            wire pe_swap_w_ce = swap_w && pe_power_ce;
+            wire pe_swap_w_ce = swap_w && pe_load_w && pe_power_ce;
             wire pe_flush_ce  = flush && pe_power_ce;
 
             // ── Activation input selection ──

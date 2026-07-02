@@ -6,7 +6,10 @@ param(
     [switch]$DumpVcd
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
+if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $RtlDir = Join-Path $ProjectRoot "rtl"
@@ -47,7 +50,12 @@ if ($LASTEXITCODE -ne 0) {
     throw "multilayer pth SoC case generation failed."
 }
 
-Copy-Item (Join-Path $Picorv32Dir "picorv32.v") (Join-Path $SimDir "picorv32.v") -Force
+$PicorvSrc = Join-Path $Picorv32Dir "picorv32.v"
+if (Test-Path $PicorvSrc) {
+    Copy-Item $PicorvSrc (Join-Path $SimDir "picorv32.v") -Force
+} elseif (-not (Test-Path (Join-Path $SimDir "picorv32.v"))) {
+    throw "picorv32.v not found in picorv32_ref or sim."
+}
 
 Write-Host "[2/3] Compiling Verilog..." -ForegroundColor Yellow
 $VvpFile = Join-Path $SimDir "soc_pth_multilayer_conv.vvp"
@@ -89,7 +97,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "  OK: Compiled to $VvpFile" -ForegroundColor Green
 
 Write-Host "[3/3] Running simulation..." -ForegroundColor Yellow
-Push-Location $SimDir
+Push-Location $ProjectRoot
 $simOut = & vvp -N $VvpFile 2>&1
 $simExit = $LASTEXITCODE
 Pop-Location

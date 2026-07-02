@@ -9,7 +9,10 @@ param(
     [switch]$DumpVcd
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
+if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $RtlDir = Join-Path $ProjectRoot "rtl"
@@ -51,7 +54,12 @@ if ($LASTEXITCODE -ne 0) {
     throw "tiny pth SoC case generation failed."
 }
 
-Copy-Item (Join-Path $Picorv32Dir "picorv32.v") (Join-Path $SimDir "picorv32.v") -Force
+$PicorvSrc = Join-Path $Picorv32Dir "picorv32.v"
+if (Test-Path $PicorvSrc) {
+    Copy-Item $PicorvSrc (Join-Path $SimDir "picorv32.v") -Force
+} elseif (-not (Test-Path (Join-Path $SimDir "picorv32.v"))) {
+    throw "picorv32.v not found in picorv32_ref or sim."
+}
 
 Write-Host "[2/3] Compiling Verilog..." -ForegroundColor Yellow
 $VvpFile = Join-Path $SimDir "soc_pth_tiny_conv.vvp"

@@ -7,6 +7,7 @@
 #   ./run_all.sh im2col27               # im2col K=27 test
 #   ./run_all.sh im2col576              # im2col K=576 test
 #   ./run_all.sh regress                # full pipeline regression
+#   ./run_all.sh icarus                 # Windows/WSL Icarus regression set
 #   ./run_all.sh all                    # run fast regression set
 set -euo pipefail
 
@@ -48,21 +49,48 @@ test_regress() {
     timeout 1200 /tmp/mp_full_fixed/obj_dir/Vtb_soc_vgg_e2e 2>&1 | grep -E 'PASS|Cycles|TIMEOUT'
 }
 
+test_icarus() {
+    echo "=== Icarus Regression (RTL + SoC smoke) ==="
+    if ! command -v powershell.exe >/dev/null 2>&1; then
+        echo "powershell.exe not found from bash; run scripts/run_regression.ps1 directly in PowerShell." >&2
+        exit 1
+    fi
+    WIN_ROOT="$(wslpath -w "$ROOT")"
+    TORCH_ENV_WIN="${TORCH25_ENV_WIN:-E:\\Users\\xiegaogao\\anaconda3\\envs\\torch25_env}"
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
+        Set-Location -LiteralPath '${WIN_ROOT}';
+        \$env:Path='${TORCH_ENV_WIN};${TORCH_ENV_WIN}\\Scripts;' + \$env:Path;
+        .\\scripts\\run_regression.ps1;
+        if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }
+        .\\scripts\\run_pth_tiny_conv_soc.ps1;
+        if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }
+        .\\scripts\\run_pth_multilayer_soc.ps1;
+        if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }
+        .\\scripts\\run_repopt_tile_soc.ps1;
+        if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }
+    "
+}
+
 case "${1:-standard}" in
     standard) shift; test_standard "$@" ;;
     image)    shift; test_image "$@" ;;
     closed_loop|closed-loop|full) shift; test_closed_loop "$@" ;;
+    icarus|iverilog) test_icarus ;;
     im2col27) test_im2col27 ;;
     im2col576) test_im2col576 ;;
     regress) test_regress ;;
     all)
-        test_im2col27
-        test_im2col576
-        test_standard 0
-        test_regress
+        if [[ "${SIM:-}" == "icarus" || "${SIM:-}" == "iverilog" ]]; then
+            test_icarus
+        else
+            test_im2col27
+            test_im2col576
+            test_standard 0
+            test_regress
+        fi
         ;;
     *)
-        echo "Usage: $0 [standard [idx] | image <file> | closed_loop [args...] | im2col27 | im2col576 | regress | all]"
+        echo "Usage: $0 [standard [idx] | image <file> | closed_loop [args...] | icarus | im2col27 | im2col576 | regress | all]"
         exit 1
         ;;
 esac

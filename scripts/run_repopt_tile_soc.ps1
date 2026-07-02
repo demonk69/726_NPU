@@ -14,12 +14,18 @@ param(
     [int]$TileRows = 4,
     [int]$TileCols = 4,
     [int]$CfgShape = 0,
+    [string]$Pth = "E:\06.CoreCreation\06_RepOpt_VGG\runs\cifar10_repopt_vgglike_qat\qat_int8_quantized.pth",
+    [string]$Plan = "sim\pth_repopt_probe\model_plan.json",
+    [string]$DataRoot = "E:\06.CoreCreation\06_RepOpt_VGG\data",
     [switch]$FullLayer,
     [switch]$CompileOnly,
     [switch]$DumpVcd
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
+if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $RtlDir = Join-Path $ProjectRoot "rtl"
@@ -65,7 +71,10 @@ $genArgs = @(
     "--n-tiles", $NTiles,
     "--tile-rows", $TileRows,
     "--tile-cols", $TileCols,
-    "--cfg-shape", $CfgShape
+    "--cfg-shape", $CfgShape,
+    "--pth", $Pth,
+    "--plan", $Plan,
+    "--data-root", $DataRoot
 )
 if ($FullLayer) {
     $genArgs += "--full-layer"
@@ -75,7 +84,12 @@ if ($LASTEXITCODE -ne 0) {
     throw "RepOpt tile SoC case generation failed."
 }
 
-Copy-Item (Join-Path $Picorv32Dir "picorv32.v") (Join-Path $SimDir "picorv32.v") -Force
+$PicorvSrc = Join-Path $Picorv32Dir "picorv32.v"
+if (Test-Path $PicorvSrc) {
+    Copy-Item $PicorvSrc (Join-Path $SimDir "picorv32.v") -Force
+} elseif (-not (Test-Path (Join-Path $SimDir "picorv32.v"))) {
+    throw "picorv32.v not found in picorv32_ref or sim."
+}
 
 Write-Host "[2/3] Compiling Verilog..." -ForegroundColor Yellow
 $VvpFile = Join-Path $SimDir "soc_repopt_tile_window.vvp"

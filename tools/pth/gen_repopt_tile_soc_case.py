@@ -285,6 +285,8 @@ def build_case_tiles(plan, plan_dir, state_dict, args):
         "results_per_tile": results_per_tile,
         "words_per_k_a": words_per_k_a,
         "words_per_k_w": words_per_k_w,
+        "padded_a_bytes": a_padded_words_total * 4,
+        "padded_w_bytes": w_padded_words_total * 4,
         "kt_elems": ((PPB_DEPTH << 2) // max(tile_rows, tile_cols)),
     }
     return layer, label, in_scale, in_zp, tiles, layout
@@ -489,7 +491,7 @@ def assemble_firmware(layout, args):
     emit_postprocess_tile()
 
     emit(ADDI("s2", "s2", 1))
-    emit(ADDI("s4", "s4", layout["k_dim"] * layout["words_per_k_w"] * 4))
+    emit(ADDI("s4", "s4", layout["padded_w_bytes"]))
     emit(ADDI("s5", "s5", args.tile_rows * args.tile_cols * 4))
     emit(ADDI("s10", "s10", args.tile_cols * 4))
     emit(ADDI("s11", "s11", args.tile_cols * 4))
@@ -498,7 +500,7 @@ def assemble_firmware(layout, args):
     patch_bne(n_bne_idx, "n_loop", "s2", "s7")
 
     emit(ADDI("s1", "s1", 1))
-    emit(ADDI("s3", "s3", layout["k_dim"] * layout["words_per_k_a"] * 4))
+    emit(ADDI("s3", "s3", layout["padded_a_bytes"]))
     m_bne_idx = len(insns)
     emit(0)
     patch_bne(m_bne_idx, "m_loop", "s1", "s8")

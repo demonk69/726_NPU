@@ -12,8 +12,6 @@ module tb_npu_scalar_smoke;
 localparam DATA_W  = 16;
 localparam ACC_W   = 32;
 localparam CLK_T   = 10;
-localparam INT8_SIMD_LANES = (DATA_W >= 32) ? 4 : 2;
-localparam EXPECTED_PEAK_OPS_CYCLE = INT8_SIMD_LANES * 2;
 localparam DRAM_SZ = 1024;
 
 localparam REG_CTRL      = 32'h00;
@@ -454,7 +452,7 @@ initial begin
     if (perf_mac_ops_lo !== 32'd4 || perf_ops_lo !== 32'd8 ||
         perf_busy_cycles == 32'd0 || perf_compute_cycles == 32'd0 ||
         perf_dma_cycles == 32'd0 ||
-        perf_peak_ops_cycle !== EXPECTED_PEAK_OPS_CYCLE) begin
+        perf_peak_ops_cycle !== 32'd8) begin
         $display("[FAIL] op perf mac=%0d ops=%0d busy=%0d compute=%0d dma=%0d tops_x1e6=%0d compute_util=%0d e2e_util=%0d peak_ops=%0d",
                  perf_mac_ops_lo, perf_ops_lo, perf_busy_cycles,
                  perf_compute_cycles, perf_dma_cycles, perf_tops_x1e6,

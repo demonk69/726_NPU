@@ -7,7 +7,6 @@ module tb_npu_tile_gemm;
 localparam DATA_W  = 16;
 localparam ACC_W   = 32;
 localparam CLK_T   = 10;
-localparam INT8_SIMD_LANES = (DATA_W >= 32) ? 4 : 2;
 
 localparam REG_CTRL      = 32'h00;
 localparam REG_STATUS    = 32'h04;
@@ -86,8 +85,7 @@ end
 
 npu_top #(
     .DATA_W(DATA_W),
-    .ACC_W (ACC_W),
-    .INT8_SIMD_LANES(INT8_SIMD_LANES)
+    .ACC_W (ACC_W)
 ) u_npu (
     .sys_clk       (clk),
     .sys_rst_n     (rst_n),

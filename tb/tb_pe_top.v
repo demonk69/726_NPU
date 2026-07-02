@@ -233,19 +233,6 @@ integer fail_cnt = 0;
 integer failed_tests[0:99];
 integer fail_idx = 0;
 
-function is_fp16_removed_test;
-    input integer test_id;
-    begin
-        is_fp16_removed_test =
-            (test_id == 3)  || (test_id == 4)  ||
-            (test_id == 61) || (test_id == 62) ||
-            (test_id == 7)  || (test_id == 92) ||
-            (test_id == 10) || (test_id == 11) ||
-            (test_id == 12) || (test_id == 13) ||
-            (test_id == 16);
-    end
-endfunction
-
 task check_result;
     input [ACC_W-1:0] got;
     input [ACC_W-1:0] exp;
@@ -254,9 +241,7 @@ begin
     $display("Expected Output  : 0x%08X (Dec: %0d)", exp, $signed(exp));
     $display("Actual Output    : 0x%08X (Dec: %0d)", got, $signed(got));
 
-    if (is_fp16_removed_test(test_id)) begin
-        $display("Status           : [SKIP] FP16 path removed from pe_top");
-    end else if (got === exp) begin
+    if (got === exp) begin
         $display("Status           : [PASS]");
         pass_cnt = pass_cnt + 1;
     end else begin
@@ -327,9 +312,9 @@ initial begin
     // Load weight into PE (first beat also computes): w=3, a=1
     @(posedge clk); #1;
     w_in = {{8{iw[7]}}, iw}; a_in = 16'd1; acc_in = 32'd0;
-    flush = 0; load_w = 1; swap_w = 1; en = 1;
+    flush = 0; load_w = 1; en = 1;
     @(posedge clk); #1;
-    en = 0; load_w = 0; swap_w = 0;          // drop en after exactly ONE cycle
+    en = 0; load_w = 0;          // drop en after exactly ONE cycle
 
     // Stream remaining activations (internal accumulation)
     drive_ws_beat(16'd2, 32'd0);      // w=3, a=2 => internal acc += 6
@@ -379,7 +364,7 @@ initial begin
     // Load weight and compute first product
     @(posedge clk); #1;
     w_in = 16'h4000; a_in = 16'h3E00; acc_in = 32'd0;
-    flush = 0; load_w = 1; swap_w = 1; en = 1;
+    flush = 0; load_w = 1; en = 1;
     @(posedge clk); #1;
     en = 0;
     @(posedge clk); #1;
@@ -443,8 +428,8 @@ initial begin
     // Test 61: Inf * 1.0 = Inf
     @(posedge clk); #1;
     w_in = 16'h7C00; a_in = 16'h3C00; acc_in = 32'd0;
-    flush = 0; load_w = 1; swap_w = 1; en = 1;
-    @(posedge clk); #1; en = 0; load_w = 0; swap_w = 0;
+    flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1; en = 0; load_w = 0;
     @(posedge clk); #1;
     @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
     @(posedge clk); #1; flush = 0; en = 0;
@@ -455,8 +440,8 @@ initial begin
     // Test 62: Inf * 0.0 = NaN
     @(posedge clk); #1;
     w_in = 16'h7C00; a_in = 16'h0000; acc_in = 32'd0;
-    flush = 0; load_w = 1; swap_w = 1; en = 1;
-    @(posedge clk); #1; en = 0; load_w = 0; swap_w = 0;
+    flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1; en = 0; load_w = 0;
     @(posedge clk); #1;
     @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
     @(posedge clk); #1; flush = 0; en = 0;
@@ -519,8 +504,8 @@ initial begin
     mode = 0;
     @(posedge clk); #1;
     w_in = 16'd2; a_in = 16'd3; acc_in = 32'd0;
-    flush = 0; load_w = 1; swap_w = 1; en = 1;
-    @(posedge clk); #1; en = 0; load_w = 0; swap_w = 0;
+    flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1; en = 0; load_w = 0;
     @(posedge clk); #1;
     @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
     @(posedge clk); #1; flush = 0; en = 0;
@@ -532,8 +517,8 @@ initial begin
     mode = 1;
     @(posedge clk); #1;
     w_in = 16'h3C00; a_in = 16'h4000; acc_in = 32'd0;
-    flush = 0; load_w = 1; swap_w = 1; en = 1;
-    @(posedge clk); #1; en = 0; load_w = 0; swap_w = 0;
+    flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1; en = 0; load_w = 0;
     @(posedge clk); #1;
     @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
     @(posedge clk); #1; flush = 0; en = 0;
@@ -555,8 +540,8 @@ initial begin
     // Beat 0: load weight and multiply with a=1.0
     @(posedge clk); #1;
     w_in = 16'h4000; a_in = 16'h3C00; acc_in = 32'd0;  // w=2.0, a=1.0
-    flush = 0; load_w = 1; swap_w = 1; en = 1;
-    @(posedge clk); #1; en = 0; load_w = 0; swap_w = 0;
+    flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1; en = 0; load_w = 0;
     // internal ws_acc = 2.0
 
     // Beat 1: a=2.0 (internal accumulation)
@@ -589,8 +574,8 @@ initial begin
     // Beat 0: load weight = -1.5, a=2.0
     @(posedge clk); #1;
     w_in = 16'hBE00; a_in = 16'h4000; acc_in = 32'd0;  // w=-1.5, a=2.0
-    flush = 0; load_w = 1; swap_w = 1; en = 1;
-    @(posedge clk); #1; en = 0; load_w = 0; swap_w = 0;
+    flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1; en = 0; load_w = 0;
     // internal ws_acc = -3.0
 
     // Beat 1: a=3.0 (internal accumulation)
@@ -663,8 +648,8 @@ initial begin
     iw = 5;
     @(posedge clk); #1;
     w_in = {{8{iw[7]}}, iw}; a_in = 16'd10; acc_in = 32'd0;
-    flush = 0; load_w = 1; swap_w = 1; en = 1;
-    @(posedge clk); #1; en = 0; load_w = 0; swap_w = 0;
+    flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1; en = 0; load_w = 0;
     @(posedge clk); #1;
     // Flush beat: a_in=0 to avoid extra product
     @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
@@ -689,8 +674,8 @@ initial begin
     iw = 7;
     @(posedge clk); #1;
     w_in = {{8{iw[7]}}, iw}; a_in = 16'd4; acc_in = 32'd0;
-    flush = 0; load_w = 1; swap_w = 1; en = 1;
-    @(posedge clk); #1; en = 0; load_w = 0; swap_w = 0;
+    flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1; en = 0; load_w = 0;
     @(posedge clk); #1;
     // Flush beat: a_in=0 to avoid extra product
     @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
@@ -752,8 +737,8 @@ initial begin
     pulse_acc_init(32'd10);
     @(posedge clk); #1;
     w_in = 16'd3; a_in = 16'd4; acc_in = 32'd0;
-    flush = 0; load_w = 1; swap_w = 1; en = 1;
-    @(posedge clk); #1; en = 0; load_w = 0; swap_w = 0;
+    flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1; en = 0; load_w = 0;
     @(posedge clk); #1;
     @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
     @(posedge clk); #1; flush = 0; en = 0;
@@ -794,8 +779,8 @@ initial begin
 
     @(posedge clk); #1;
     w_in = pack_s8x2(4, 3); a_in = pack_s8x2(5, 2); acc_in = 32'd0;
-    flush = 0; load_w = 1; swap_w = 1; en = 1;
-    @(posedge clk); #1; en = 0; load_w = 0; swap_w = 0;
+    flush = 0; load_w = 1; en = 1;
+    @(posedge clk); #1; en = 0; load_w = 0;
     drive_ws_beat(pack_s8x2(-2, 1), 32'd0);
     @(posedge clk); #1; w_in = 16'd0; a_in = 16'd0; flush = 1; en = 1;
     @(posedge clk); #1; flush = 0; en = 0;
@@ -858,8 +843,8 @@ initial begin
 
     @(posedge clk); #1;
     w4_in = pack_s8x4(4, -3, 2, 1); a4_in = pack_s8x4(5, 6, -7, 8); acc4_in = 32'd0;
-    flush4 = 0; load_w4 = 1; swap_w4 = 1; en4 = 1;
-    @(posedge clk); #1; en4 = 0; load_w4 = 0; swap_w4 = 0;
+    flush4 = 0; load_w4 = 1; en4 = 1;
+    @(posedge clk); #1; en4 = 0; load_w4 = 0;
     drive_ws_beat4(pack_s8x4(-2, 3, 4, -5), 32'd0);
     @(posedge clk); #1; w4_in = 32'd0; a4_in = 32'd0; flush4 = 1; en4 = 1;
     @(posedge clk); #1; flush4 = 0; en4 = 0;

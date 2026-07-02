@@ -7,10 +7,7 @@
 # Prerequisites: iverilog, vvp
 # =============================================================================
 
-$ErrorActionPreference = "Continue"
-if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
-    $PSNativeCommandUseErrorActionPreference = $false
-}
+$ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $RtlDir  = Join-Path $ProjectRoot "rtl"
 $TbDir   = Join-Path $ProjectRoot "tb"
@@ -114,12 +111,15 @@ Write-Host "  NPU Full Regression Suite" -ForegroundColor Cyan
 Write-Host "  $(Get-Date -Format 'yyyy-MM-dd HH:mm')" -ForegroundColor Cyan
 Write-Host "======================================================" -ForegroundColor Cyan
 
-# ---- 0. PE Top INT8 MAC + T7.3/T7.4 INT8 SIMD ----
+# ---- 0. PE Top INT8/FP16 MAC + T7.3/T7.4 INT8 SIMD ----
 Run-Test -Name "pe_top" `
     -VvpOut "$SimDir\reg_pe_top.vvp" `
     -ExtraSrc @("$TbDir\tb_pe_top.v")
 
-Write-Host "  [SKIP] fp16_e2e (FP16 path removed from pe_top)" -ForegroundColor Yellow
+# ---- 1. FP16 E2E ----
+Run-Test -Name "fp16_e2e" `
+    -VvpOut "$SimDir\reg_fp16_e2e.vvp" `
+    -ExtraSrc @("$TbDir\tb_fp16_e2e.v")
 
 # ---- 2. Multi-RC Comprehensive ----
 Run-Test -Name "multi_rc_comprehensive" `
@@ -224,11 +224,14 @@ Run-Test -Name "tile4/int8_4x4x4" `
     -IncDir "$TbDir\tile4\int8_4x4x4" `
     -ExtraSrc @("$TbDir\tb_npu_tile_gemm.v")
 
-Write-Host "  [SKIP] tile4/fp16_4x4x4 (FP16 path removed from pe_top)" -ForegroundColor Yellow
+Run-Test -Name "tile4/fp16_4x4x4" `
+    -VvpOut "$SimDir\reg_tile4_fp16_4x4x4.vvp" `
+    -IncDir "$TbDir\tile4\fp16_4x4x4" `
+    -ExtraSrc @("$TbDir\tb_npu_tile_gemm.v")
 
 # ---- 3. OS Matmul tests ----
-$OsCases = @("os_int8_2x3x2", "os_int8_2x4x3", "os_int8_3x4x3",
-             "sq_int8_4x4", "sq_int8_8x8", "sq_int8_16x16")
+$OsCases = @("os_int8_2x3x2", "os_int8_2x4x3", "os_int8_3x4x3", "os_fp16_2x3x2", "os_fp16_3x4x3",
+             "sq_int8_4x4", "sq_int8_8x8", "sq_int8_16x16", "sq_fp16_4x4", "sq_fp16_8x8")
 
 foreach ($tc in $OsCases) {
     $tcDir = "$TbDir\matmul\$tc"
@@ -244,8 +247,8 @@ foreach ($tc in $OsCases) {
 }
 
 # ---- 4. WS Matmul tests ----
-$WsCases = @("ws_int8_2x3x2", "ws_int8_3x4x3",
-             "ws_sq_int8_4x4", "ws_sq_int8_8x8", "ws_sq_int8_16x16")
+$WsCases = @("ws_int8_2x3x2", "ws_int8_3x4x3", "ws_fp16_2x3x2",
+             "ws_sq_int8_4x4", "ws_sq_int8_8x8", "ws_sq_int8_16x16", "ws_sq_fp16_4x4", "ws_sq_fp16_8x8")
 
 # Check if tb_matmul_ws.v exists, else skip
 $WsTb = "$TbDir\matmul\tb_matmul_ws.v"
@@ -273,7 +276,8 @@ foreach ($tc in $WsCases) {
 $ConvDir = "$TbDir\conv2d"
 $ConvCases = @(
     @{ Name="conv2d_im2col_int8_os_default"; Dtype="int8"; Mode="OS"; Tb="$TbDir\matmul\tb_matmul_os.v" },
-    @{ Name="conv2d_im2col_int8_ws_default"; Dtype="int8"; Mode="WS"; Tb=$WsTb }
+    @{ Name="conv2d_im2col_int8_ws_default"; Dtype="int8"; Mode="WS"; Tb=$WsTb },
+    @{ Name="conv2d_im2col_fp16_os_default"; Dtype="fp16"; Mode="OS"; Tb="$TbDir\matmul\tb_matmul_os.v" }
 )
 
 foreach ($case in $ConvCases) {
@@ -302,7 +306,8 @@ foreach ($case in $ConvCases) {
 # fly from the Conv2D shape registers while W_col remains packed in DRAM.
 $ConvOtfCases = @(
     @{ Name="conv2d_otf_int8_os_default"; Dtype="int8"; Mode="OS"; Tb="$TbDir\matmul\tb_matmul_os.v" },
-    @{ Name="conv2d_otf_int8_ws_default"; Dtype="int8"; Mode="WS"; Tb=$WsTb }
+    @{ Name="conv2d_otf_int8_ws_default"; Dtype="int8"; Mode="WS"; Tb=$WsTb },
+    @{ Name="conv2d_otf_fp16_os_default"; Dtype="fp16"; Mode="OS"; Tb="$TbDir\matmul\tb_matmul_os.v" }
 )
 
 foreach ($case in $ConvOtfCases) {
@@ -331,7 +336,9 @@ foreach ($case in $ConvOtfCases) {
 # to the direct scalar accumulator before each output dot product.
 $MatmulBiasCases = @(
     @{ Name="matmul_bias_int8_os_3x5x4"; Dtype="int8"; Mode="OS"; M=3; K=5; N=4; Tb="$TbDir\matmul\tb_matmul_os.v" },
-    @{ Name="matmul_bias_int8_ws_3x5x4"; Dtype="int8"; Mode="WS"; M=3; K=5; N=4; Tb=$WsTb }
+    @{ Name="matmul_bias_int8_ws_3x5x4"; Dtype="int8"; Mode="WS"; M=3; K=5; N=4; Tb=$WsTb },
+    @{ Name="matmul_bias_fp16_os_3x4x3"; Dtype="fp16"; Mode="OS"; M=3; K=4; N=3; Tb="$TbDir\matmul\tb_matmul_os.v" },
+    @{ Name="matmul_bias_fp16_ws_2x3x2"; Dtype="fp16"; Mode="WS"; M=2; K=3; N=2; Tb=$WsTb }
 )
 
 foreach ($case in $MatmulBiasCases) {
@@ -358,7 +365,8 @@ foreach ($case in $MatmulBiasCases) {
 
 $ConvBiasCases = @(
     @{ Name="conv2d_bias_otf_int8_os_default"; Dtype="int8"; Mode="OS"; Tb="$TbDir\matmul\tb_matmul_os.v" },
-    @{ Name="conv2d_bias_otf_int8_ws_default"; Dtype="int8"; Mode="WS"; Tb=$WsTb }
+    @{ Name="conv2d_bias_otf_int8_ws_default"; Dtype="int8"; Mode="WS"; Tb=$WsTb },
+    @{ Name="conv2d_bias_otf_fp16_os_default"; Dtype="fp16"; Mode="OS"; Tb="$TbDir\matmul\tb_matmul_os.v" }
 )
 
 foreach ($case in $ConvBiasCases) {
@@ -386,7 +394,9 @@ foreach ($case in $ConvBiasCases) {
 # Direct scalar postprocess order is accumulator -> optional bias -> activation.
 $MatmulActCases = @(
     @{ Name="matmul_relu_int8_os_3x5x4"; Dtype="int8"; Mode="OS"; M=3; K=5; N=4; Act="relu"; Tb="$TbDir\matmul\tb_matmul_os.v" },
-    @{ Name="matmul_relu6_int8_ws_3x5x4"; Dtype="int8"; Mode="WS"; M=3; K=5; N=4; Act="relu6"; Tb=$WsTb }
+    @{ Name="matmul_relu6_int8_ws_3x5x4"; Dtype="int8"; Mode="WS"; M=3; K=5; N=4; Act="relu6"; Tb=$WsTb },
+    @{ Name="matmul_relu_fp16_os_3x4x3"; Dtype="fp16"; Mode="OS"; M=3; K=4; N=3; Act="relu"; Tb="$TbDir\matmul\tb_matmul_os.v" },
+    @{ Name="matmul_relu6_fp16_ws_2x3x2"; Dtype="fp16"; Mode="WS"; M=2; K=3; N=2; Act="relu6"; Tb=$WsTb }
 )
 
 foreach ($case in $MatmulActCases) {
@@ -413,7 +423,8 @@ foreach ($case in $MatmulActCases) {
 
 $ConvActCases = @(
     @{ Name="conv2d_relu_otf_int8_os_default"; Dtype="int8"; Mode="OS"; Act="relu"; Tb="$TbDir\matmul\tb_matmul_os.v" },
-    @{ Name="conv2d_relu6_otf_int8_ws_default"; Dtype="int8"; Mode="WS"; Act="relu6"; Tb=$WsTb }
+    @{ Name="conv2d_relu6_otf_int8_ws_default"; Dtype="int8"; Mode="WS"; Act="relu6"; Tb=$WsTb },
+    @{ Name="conv2d_relu6_otf_fp16_os_default"; Dtype="fp16"; Mode="OS"; Act="relu6"; Tb="$TbDir\matmul\tb_matmul_os.v" }
 )
 
 foreach ($case in $ConvActCases) {

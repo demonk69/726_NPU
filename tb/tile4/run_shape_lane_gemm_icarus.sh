@@ -5,7 +5,7 @@
 #
 # Default matrix:
 #   shapes: 4x4, 8x8, 16x16, 8x32
-#   lanes:  1, 2, 4
+#   lanes:  1, 2, 4, 8
 #
 # Generated data and compiled vvp files are created under WORK_DIR and removed
 # automatically unless KEEP_WORK=1 is set.
@@ -47,7 +47,7 @@ SHAPE_CASES=(
     "16x16:16:4:16"
     "8x32:8:4:32"
 )
-LANES_LIST=(1 2 4)
+LANES_LIST=(1 2 4 8)
 
 cleanup() {
     if [[ "$KEEP_WORK" != "1" ]]; then

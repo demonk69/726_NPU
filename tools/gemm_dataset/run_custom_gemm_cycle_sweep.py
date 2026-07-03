@@ -15,7 +15,7 @@ from pathlib import Path
 
 SHAPES = ("4x4", "8x8", "16x16", "8x32")
 FLOWS = ("os", "ws")
-LANES = ("1", "2", "4")
+LANES = ("1", "2", "4", "8")
 SHAPE_DIMS = {
     "4x4": (4, 4),
     "8x8": (8, 8),
@@ -301,7 +301,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None, help="limit rows loaded from --points")
     parser.add_argument("--flows", default="os,ws")
     parser.add_argument("--shapes", default="4x4,8x8,16x16,8x32")
-    parser.add_argument("--lanes", default="1,2,4")
+    parser.add_argument("--lanes", default="1,2,4,8")
     parser.add_argument("--sim", choices=["icarus", "verilator"], default="icarus")
     parser.add_argument("--runner", default="tb/tile4/run_verilator.sh")
     parser.add_argument("--out-dir", default=None)

@@ -18,6 +18,7 @@ module tb_npu_ctrl_tile;
 
     wire [1:0] cfg_shape_latched;
     wire tile_mode;
+    wire router_enable;
     wire vec_consume;
     wire [31:0] tile_m_base;
     wire [31:0] tile_n_base;
@@ -79,6 +80,7 @@ module tb_npu_ctrl_tile;
         .cfg_shape_in(cfg_shape_in),
         .cfg_shape_latched(cfg_shape_latched),
         .tile_mode(tile_mode),
+        .router_enable(router_enable),
         .vec_consume(vec_consume),
         .tile_m_base(tile_m_base),
         .tile_n_base(tile_n_base),
@@ -115,6 +117,7 @@ module tb_npu_ctrl_tile;
         .pe_stat(pe_stat),
         .pe_load_w(pe_load_w),
         .pe_swap_w(pe_swap_w),
+        .pe_array_ready(1'b1),
         .w_ppb_ready(1'b1),
         .w_ppb_empty(1'b0),
         .a_ppb_ready(1'b1),
@@ -220,7 +223,7 @@ module tb_npu_ctrl_tile;
         w_addr = 32'h1000;
         a_addr = 32'h2000;
         r_addr = 32'h3000;
-        arr_cfg = 8'h80;       // bit7 enables 4x4 tile mode
+        arr_cfg = 8'hC0;       // bit7=tile mode, bit6=router enable
         cfg_shape_in = 2'b00;  // 4x4 shape
         dma_w_done = 1'b0;
         dma_a_done = 1'b0;
@@ -238,6 +241,10 @@ module tb_npu_ctrl_tile;
 
         if (!tile_mode) begin
             $display("[FAIL] tile_mode did not latch");
+            errors = errors + 1;
+        end
+        if (!router_enable) begin
+            $display("[FAIL] router_enable did not latch");
             errors = errors + 1;
         end
         if (wb_idx !== 10) begin

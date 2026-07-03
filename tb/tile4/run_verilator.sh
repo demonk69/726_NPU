@@ -147,7 +147,7 @@ run_all() {
 VERILATOR_ONLY=0
 ICARUS_ONLY=0
 ALL=0
-LANES_VAL=4
+LANES_VAL=8
 PERF_ONLY=0
 TIMEOUT_ARG="$TIMEOUT_SEC"
 STRICT_AW=0
@@ -169,7 +169,7 @@ while [[ $# -gt 0 ]]; do
         --strict-aw) STRICT_AW=1 ;;
         --bias)      BIAS_FLAG="--bias" ;;
         --help|-h)
-            echo "Usage: $0 [--all] [--verilator|--icarus] [--shape S --M M --K K --N N] [--flow os|ws] [--lanes 1|2|4] [--bias] [--perf-only] [--timeout-sec SEC] [--strict-aw]"
+            echo "Usage: $0 [--all] [--verilator|--icarus] [--shape S --M M --K K --N N] [--flow os|ws] [--lanes 1|2|4|8] [--bias] [--perf-only] [--timeout-sec SEC] [--strict-aw]"
             exit 0 ;;
         *) die "Unknown arg: $1" ;;
     esac
@@ -177,7 +177,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$ALL" -eq 1 ]]; then
-    [[ "$LANES_VAL" =~ ^(1|2|4)$ ]] || die "--lanes must be 1, 2, or 4"
+    [[ "$LANES_VAL" =~ ^(1|2|4|8)$ ]] || die "--lanes must be 1, 2, 4, or 8"
     [[ "$FLOW_VAL" =~ ^(os|ws)$ ]] || die "--flow must be os or ws"
     if [[ "$VERILATOR_ONLY" -eq 1 ]]; then
         run_all "verilator" "$LANES_VAL" "$PERF_ONLY" "$TIMEOUT_ARG" "$STRICT_AW" "$FLOW_VAL"
@@ -189,7 +189,7 @@ if [[ "$ALL" -eq 1 ]]; then
         run_all "verilator" "$LANES_VAL" "$PERF_ONLY" "$TIMEOUT_ARG" "$STRICT_AW" "$FLOW_VAL"
     fi
 elif [[ -n "$SHAPE" && -n "$M_VAL" && -n "$K_VAL" && -n "$N_VAL" ]]; then
-    [[ "$LANES_VAL" =~ ^(1|2|4)$ ]] || die "--lanes must be 1, 2, or 4"
+    [[ "$LANES_VAL" =~ ^(1|2|4|8)$ ]] || die "--lanes must be 1, 2, 4, or 8"
     [[ "$FLOW_VAL" =~ ^(os|ws)$ ]] || die "--flow must be os or ws"
     if [[ "$VERILATOR_ONLY" -eq 1 ]]; then
         run_test "$SHAPE" "$M_VAL" "$K_VAL" "$N_VAL" "$BIAS_FLAG" "verilator" "$LANES_VAL" "$PERF_ONLY" "$TIMEOUT_ARG" "$STRICT_AW" "$FLOW_VAL"

@@ -26,14 +26,15 @@ module npu_top #(
     parameter COLS         = 16,
     parameter PHY_ROWS     = 16,       // physical rows
     parameter PHY_COLS     = 16,       // physical cols
-    parameter DATA_W       = 32,
+    parameter DATA_W       = 64,
     parameter ACC_W        = 32,
     parameter PPB_DEPTH    = 64,
     parameter PPB_THRESH   = 16,
-    parameter INT8_SIMD_LANES = 4,
+    parameter INT8_SIMD_LANES = (DATA_W >= 64) ? 8 : ((DATA_W >= 32) ? 4 : 2),
     parameter PERF_ENABLE_DERIVED = 0,
     parameter FP16_ENABLE = 0,
-    parameter PPB_SCALAR_READ_ENABLE = 1
+    parameter PPB_SCALAR_READ_ENABLE = 1,
+    parameter USE_ROUTER_MESH = 0
 )(
     // System
     input  wire              sys_clk,
@@ -100,6 +101,7 @@ localparam MAX_TILE_LANES = 16;
 localparam TILE_BIAS_DEPTH = 32;   // max tile columns (8x32)
 localparam MAX_TILE_RESULTS = 256;  // 16x16 or 8x32 grid
 localparam [3:0] PERF_SIMD_LANES = INT8_SIMD_LANES;
+localparam [31:0] ERR_PE_ARRAY_ROUTER = 32'h0000_0800;
 
 function [4:0] shape_tile_lanes;
     input [1:0] shape;
@@ -276,10 +278,13 @@ wire desc_fetch_start, desc_fetch_done;
 wire [31:0] desc_fetch_addr;
 wire [511:0] desc_fetch_words;
 wire [31:0] dma_error_status;
+wire [31:0] core_error_status;
 wire pe_en, pe_flush, pe_mode, pe_stat;
 wire pe_mode_hw = (FP16_ENABLE != 0) && pe_mode;
 wire pe_load_w, pe_swap_w, pe_acc_init_en;   // WS mode weight control and accumulator init
 wire pe_half_en;           // 8x32: half-array enable (0=top, 1=bottom)
+wire pe_array_input_ready;
+wire pe_array_router_overflow;
 wire ctrl_w_ppb_swap, ctrl_a_ppb_swap, ctrl_w_ppb_clear, ctrl_a_ppb_clear;
 wire ctrl_r_fifo_clear;
 wire w_ppb_buf_empty_int, a_ppb_buf_empty_int;
@@ -289,8 +294,14 @@ wire [1:0] ctrl_post_act_mode;
 wire [31:0] ctrl_post_quant_cfg;
 wire       ctrl_bias_en;
 wire ctrl_tile_mode, ctrl_vec_consume;
+wire ctrl_vec_consume_w, ctrl_vec_consume_a;
+wire ctrl_tile_true_ws, ctrl_tile_k_last;
+wire [4:0] ctrl_tile_k_groups;
+wire ctrl_router_enable;
+wire ctrl_os_act_systolic;
+wire ctrl_os_weight_broadcast;
 wire ppb_packed_int8 = ctrl_tile_mode && !pe_mode_hw && (INT8_SIMD_LANES > 1);
-wire tile_ws_direct = ctrl_tile_mode && !pe_mode_hw && !pe_stat;
+wire tile_ws_direct = ctrl_tile_mode && !pe_mode_hw && !pe_stat && !ctrl_tile_true_ws;
 wire [31:0] ctrl_tile_m_base, ctrl_tile_n_base; // global C tile origin: m0/n0
 wire [15:0] ctrl_tile_row_valid, ctrl_tile_col_valid; // valid r/c lanes for edge tiles
 wire [4:0]  ctrl_tile_active_rows;
@@ -299,6 +310,8 @@ wire [31:0] ctrl_tile_k_base, ctrl_tile_k_index;
 wire [15:0] ctrl_tile_k_len;
 wire [15:0] ctrl_tile_k_cycle; // OS feeder cycle, includes row-skew drain cycles
 wire [4:0]  tile_lane_count = shape_tile_lanes(ctrl_cfg_shape);
+wire [4:0]  a_ppb_vec_lane_count = ctrl_tile_true_ws ? ctrl_tile_k_groups
+                                                      : tile_lane_count;
 
 npu_ctrl #(
     .ROWS  (PHY_ROWS),       // controller sees physical dimensions
@@ -339,7 +352,15 @@ npu_ctrl #(
     .post_quant_cfg(ctrl_post_quant_cfg),
     .bias_en    (ctrl_bias_en),
     .tile_mode    (ctrl_tile_mode),
+    .router_enable(ctrl_router_enable),
+    .os_act_systolic(ctrl_os_act_systolic),
+    .os_weight_broadcast(ctrl_os_weight_broadcast),
     .vec_consume  (ctrl_vec_consume),
+    .vec_consume_w(ctrl_vec_consume_w),
+    .vec_consume_a(ctrl_vec_consume_a),
+    .tile_true_ws (ctrl_tile_true_ws),
+    .tile_k_last  (ctrl_tile_k_last),
+    .tile_k_groups(ctrl_tile_k_groups),
     .tile_m_base  (ctrl_tile_m_base),
     .tile_n_base  (ctrl_tile_n_base),
     .tile_row_valid(ctrl_tile_row_valid),
@@ -395,7 +416,7 @@ npu_ctrl #(
     .dma_r_done   (dma_r_done),
     .dma_r_addr   (dma_r_addr),
     .dma_r_len    (dma_r_len),
-    .dma_error_status(dma_error_status),
+    .dma_error_status(core_error_status),
     .pe_en        (pe_en),
     .pe_flush     (pe_flush),
     .pe_mode      (pe_mode),
@@ -404,6 +425,7 @@ npu_ctrl #(
     .pe_swap_w    (pe_swap_w),
     .pe_acc_init_en(pe_acc_init_en),
     .pe_half_en   (pe_half_en),
+    .pe_array_ready(pe_array_input_ready),
     .w_ppb_ready  (w_ppb_buf_ready_int),
     .w_ppb_empty  (w_ppb_buf_empty_int),
     .a_ppb_ready  (a_ppb_buf_ready_int),
@@ -476,7 +498,7 @@ pingpong_buf #(
     .rd_en     (a_ppb_rd_en),
     .rd_data   (a_ppb_rd_data),
     .rd_vec_en  (a_ppb_rd_vec_en),
-    .rd_vec_lanes(tile_lane_count),
+    .rd_vec_lanes(a_ppb_vec_lane_count),
     .rd_vec     (a_ppb_rd_vec),
     .rd_vec_valid(a_ppb_rd_vec_valid),
     .swap      (ctrl_a_ppb_swap),
@@ -660,21 +682,30 @@ axi_monitor #(
 // ---------------------------------------------------------------------------
 
 wire pe_data_ready = !w_ppb_buf_empty_int && !a_ppb_buf_empty_int;
-wire pe_consume = pe_en && (pe_data_ready || pe_flush);
+wire pe_consume = pe_en && pe_array_input_ready && (pe_data_ready || pe_flush);
 wire scalar_pe_en_raw = (!ctrl_tile_mode) && pe_consume;
 wire scalar_pe_en = scalar_pe_en_raw && compute_ce;
-wire tile_vec_fire_raw = ctrl_vec_consume &&
-                         w_ppb_rd_vec_valid &&
-                         a_ppb_rd_vec_valid;
-wire tile_vec_fire = tile_vec_fire_raw && compute_ce;
+wire legacy_tile_vec_fire_raw = ctrl_vec_consume &&
+                                w_ppb_rd_vec_valid &&
+                                a_ppb_rd_vec_valid;
+wire legacy_tile_vec_fire = legacy_tile_vec_fire_raw && pe_array_input_ready && compute_ce;
+wire tile_w_vec_fire = ctrl_tile_true_ws
+    ? (ctrl_vec_consume_w && w_ppb_rd_vec_valid && pe_array_input_ready && compute_ce)
+    : legacy_tile_vec_fire;
+wire tile_a_vec_fire = ctrl_tile_true_ws
+    ? (ctrl_vec_consume_a && a_ppb_rd_vec_valid && pe_array_input_ready && compute_ce)
+    : legacy_tile_vec_fire;
+wire tile_vec_fire = legacy_tile_vec_fire;
+wire pe_array_load_w = ctrl_tile_true_ws ? tile_w_vec_fire
+                                          : pe_load_w;
 wire tile_feed_step_raw = ctrl_tile_mode && pe_en && pe_stat && !pe_flush;
-wire tile_feed_step = tile_feed_step_raw && compute_ce;
+wire tile_feed_step = tile_feed_step_raw && pe_array_input_ready && compute_ce;
 
 wire ppb_scalar_consume = pe_consume && compute_ce;
 assign w_ppb_rd_en = ctrl_tile_mode ? 1'b0 : ppb_scalar_consume;
 assign a_ppb_rd_en = ctrl_tile_mode ? 1'b0 : ppb_scalar_consume;
-assign w_ppb_rd_vec_en = tile_vec_fire;
-assign a_ppb_rd_vec_en = tile_vec_fire;
+assign w_ppb_rd_vec_en = tile_w_vec_fire;
+assign a_ppb_rd_vec_en = tile_a_vec_fire;
 
 `ifdef DIAG_FIRE_K5
 always @(posedge sys_clk) begin
@@ -711,6 +742,16 @@ wire [PHY_ROWS*PHY_COLS-1:0] pe_active_dbg;
 wire pe_array_global_ce;
 wire [PHY_ROWS-1:0] pe_array_row_ce;
 wire [PHY_COLS-1:0] pe_array_col_ce;
+
+wire pe_array_router_selected = (USE_ROUTER_MESH != 0) && ctrl_router_enable;
+wire pe_array_router_mode_supported = !pe_mode_hw && (pe_stat || tile_ws_direct);
+wire pe_array_router_unsupported = pe_array_router_selected &&
+                                   pe_en &&
+                                   pe_array_global_ce &&
+                                   !pe_array_router_mode_supported;
+wire [31:0] pe_array_error_status = (pe_array_router_overflow || pe_array_router_unsupported) ?
+                                    ERR_PE_ARRAY_ROUTER : 32'd0;
+assign core_error_status = dma_error_status | pe_array_error_status;
 
 wire [PHY_ROWS-1:0] power_row_cg = cg_en_r ? ~shape_row_ce_mask(ctrl_cfg_shape)
                                            : {PHY_ROWS{1'b0}};
@@ -754,9 +795,22 @@ npu_power #(
 wire [DATA_W-1:0] pe_w_data = w_ppb_rd_data;
 wire [DATA_W-1:0] pe_a_data = a_ppb_rd_data;
 wire [MAX_TILE_LANES*DATA_W-1:0] a_skew_vec;
-wire [MAX_TILE_LANES*DATA_W-1:0] tile_a_feed_vec = tile_ws_direct
-    ? (tile_vec_fire ? a_ppb_rd_vec : {MAX_TILE_LANES*DATA_W{1'b0}})
-    : a_skew_vec;
+wire [MAX_TILE_LANES*DATA_W-1:0] w_skew_vec;
+wire router_tile_direct_feed = ctrl_tile_mode && pe_array_router_selected;
+wire direct_tile_os_feed = ctrl_tile_mode && pe_stat && !tile_ws_direct && !router_tile_direct_feed;
+wire direct_os_a_row_skew = direct_tile_os_feed && !ctrl_os_weight_broadcast;
+wire direct_os_w_col_skew = direct_tile_os_feed && ctrl_os_act_systolic;
+wire [MAX_TILE_LANES*DATA_W-1:0] tile_a_raw_vec = tile_a_vec_fire
+    ? a_ppb_rd_vec
+    : {MAX_TILE_LANES*DATA_W{1'b0}};
+wire [MAX_TILE_LANES*DATA_W-1:0] tile_w_raw_vec = tile_w_vec_fire
+    ? w_ppb_rd_vec
+    : {MAX_TILE_LANES*DATA_W{1'b0}};
+wire [MAX_TILE_LANES*DATA_W-1:0] tile_a_feed_vec = (tile_ws_direct || router_tile_direct_feed)
+    ? tile_a_raw_vec
+    : (direct_os_a_row_skew ? a_skew_vec : tile_a_raw_vec);
+wire [MAX_TILE_LANES*DATA_W-1:0] tile_w_feed_vec = direct_os_w_col_skew ? w_skew_vec
+                                                                         : tile_w_raw_vec;
 
 // OS row-skew feeder. Row r receives A lane r after r compute cycles, so the
 // A wavefront stays aligned with the W stream as it shifts down the array.
@@ -794,6 +848,43 @@ generate
                 end
             end
             assign a_skew_vec[LANE*DATA_W +: DATA_W] = pipe[LANE-1];
+        end
+    end
+endgenerate
+
+// When A is selected to move horizontally through the array, skew W by column
+// at the boundary so A(k) and W(k) meet at each PE after the same column delay.
+genvar w_skew_lane;
+generate
+    for (w_skew_lane = 0; w_skew_lane < MAX_TILE_LANES; w_skew_lane = w_skew_lane + 1) begin : gen_w_skew
+        localparam integer LANE = w_skew_lane;
+        if (LANE == 0) begin : gen_w_lane0
+            assign w_skew_vec[LANE*DATA_W +: DATA_W] = tile_w_raw_vec[LANE*DATA_W +: DATA_W];
+        end else if (LANE == 1) begin : gen_w_lane1_reg
+            reg [DATA_W-1:0] l1_reg;
+            always @(posedge sys_clk) begin
+                if (!sys_rst_n || !ctrl_tile_mode)
+                    l1_reg <= {DATA_W{1'b0}};
+                else if (tile_feed_step)
+                    l1_reg <= tile_vec_fire ? w_ppb_rd_vec[LANE*DATA_W +: DATA_W]
+                                            : {DATA_W{1'b0}};
+            end
+            assign w_skew_vec[LANE*DATA_W +: DATA_W] = l1_reg;
+        end else begin : gen_w_lane_pipe
+            reg [DATA_W-1:0] pipe [0:LANE-1];
+            integer stage_i;
+            always @(posedge sys_clk) begin
+                if (!sys_rst_n || !ctrl_tile_mode) begin
+                    for (stage_i = 0; stage_i < LANE; stage_i = stage_i + 1)
+                        pipe[stage_i] <= {DATA_W{1'b0}};
+                end else if (tile_feed_step) begin
+                    pipe[0] <= tile_vec_fire ? w_ppb_rd_vec[LANE*DATA_W +: DATA_W]
+                                             : {DATA_W{1'b0}};
+                    for (stage_i = 1; stage_i < LANE; stage_i = stage_i + 1)
+                        pipe[stage_i] <= pipe[stage_i-1];
+                end
+            end
+            assign w_skew_vec[LANE*DATA_W +: DATA_W] = pipe[LANE-1];
         end
     end
 endgenerate
@@ -842,9 +933,8 @@ generate
         if (feed_col < MAX_TILE_LANES) begin : gen_tile_w_lane
             assign pe_w_in[feed_col*DATA_W +: DATA_W] =
                 ctrl_tile_mode
-                    ? ((tile_vec_fire && (COL_IDX < tile_lane_count))
-                        ? w_ppb_rd_vec[feed_col*DATA_W +: DATA_W]
-                        : {DATA_W{1'b0}})
+                    ? ((COL_IDX < tile_lane_count) ? tile_w_feed_vec[feed_col*DATA_W +: DATA_W]
+                                                    : {DATA_W{1'b0}})
                     : ((feed_col == 0) ? pe_w_data : {DATA_W{1'b0}});
         end else begin : gen_zero_w_lane
             assign pe_w_in[feed_col*DATA_W +: DATA_W] = {DATA_W{1'b0}};
@@ -892,8 +982,13 @@ wire [5:0] perf_active_cols = ctrl_tile_mode
     : 6'd1;
 wire       tile_ws_perf_compute = tile_ws_direct && pe_en && !pe_flush &&
                                   (ctrl_vec_consume || (ctrl_tile_k_cycle != 16'd0));
-wire       perf_compute_valid = ctrl_tile_mode ? (tile_feed_step || tile_ws_perf_compute)
+wire       tile_true_ws_perf_compute = ctrl_tile_true_ws && pe_en && !pe_flush;
+wire       perf_compute_valid = ctrl_tile_mode ? (tile_feed_step || tile_ws_perf_compute ||
+                                                  tile_true_ws_perf_compute)
                                                : scalar_pe_en;
+// The scalar compatibility PE has no external psum-chain, so use the PE's OS
+// accumulator even when software selects scalar WS.
+wire scalar_pe_stat_mode = ctrl_tile_mode ? pe_stat : 1'b1;
 
 op_counter #(
     .ROWS(PHY_ROWS),
@@ -939,7 +1034,7 @@ pe_top #(
     .clk      (sys_clk),
     .rst_n    (sys_rst_n),
     .mode     (pe_mode_hw),
-    .stat_mode(pe_stat),
+    .stat_mode(scalar_pe_stat_mode),
     .en       (scalar_pe_en),
     .flush    (pe_flush),
     .load_w   (pe_load_w),
@@ -1070,21 +1165,25 @@ reconfig_pe_array #(
     .MAX_TILE_RESULTS(MAX_TILE_RESULTS),
     .INT8_SIMD_LANES(INT8_SIMD_LANES),
     .FP16_ENABLE(FP16_ENABLE),
-    .INT8_SCALAR_SIGNEXT_COMPAT(0)
+    .INT8_SCALAR_SIGNEXT_COMPAT(0),
+    .USE_ROUTER_MESH(USE_ROUTER_MESH)
 ) u_pe_array (
     .clk            (sys_clk),
     .rst_n          (sys_rst_n),
     .cfg_shape      (ctrl_cfg_shape),
     .mode           (pe_mode_hw),
     .stat_mode      (pe_stat),
-    .en             (pe_en),
+    .en             ((pe_array_router_selected ? (ctrl_vec_consume || pe_flush) : pe_en) && pe_array_input_ready),
     .flush          (pe_flush),
-    .load_w         (pe_load_w),
+    .load_w         (pe_array_load_w),
     .swap_w         (pe_swap_w),
     .ws_direct      (tile_ws_direct),
     .acc_init_en    (1'b0),
     .half_en        (pe_half_en),
     .array_ce       (pe_array_global_ce),
+    .router_enable  (ctrl_router_enable),
+    .os_act_systolic(ctrl_os_act_systolic),
+    .os_weight_broadcast(ctrl_os_weight_broadcast),
     .row_ce         (pe_array_row_ce),
     .col_ce         (pe_array_col_ce),
     .w_in           (pe_w_in),
@@ -1095,7 +1194,9 @@ reconfig_pe_array #(
     .acc_out        (pe_array_result),
     .valid_out      (pe_array_valid),
     .ws_load_row_out(ws_load_row_status),
-    .pe_active      (pe_active_dbg)
+    .pe_active      (pe_active_dbg),
+    .router_ready   (pe_array_input_ready),
+    .router_overflow(pe_array_router_overflow)
 );
 
 // ---------------------------------------------------------------------------
@@ -1148,21 +1249,111 @@ wire [4:0] tile_grid_rows = (ctrl_cfg_shape == 2'b11) ? 5'd8  : tile_lane_count;
 wire [5:0] tile_grid_cols = (ctrl_cfg_shape == 2'b11) ? 6'd32 : {1'b0, tile_lane_count};
 wire [8:0] tile_capture_cnt = {3'd0, tile_grid_rows} * {2'd0, tile_grid_cols}; // max 256
 
+function [MAX_TILE_RESULTS-1:0] tile_active_result_mask;
+    input [4:0] active_rows_f;
+    input [5:0] active_cols_f;
+    input [5:0] grid_cols_f;
+    integer mask_r;
+    integer mask_c;
+    integer mask_idx;
+    begin
+        tile_active_result_mask = {MAX_TILE_RESULTS{1'b0}};
+        for (mask_r = 0; mask_r < 16; mask_r = mask_r + 1) begin
+            for (mask_c = 0; mask_c < 32; mask_c = mask_c + 1) begin
+                mask_idx = mask_r * grid_cols_f + mask_c;
+                if ((mask_r < active_rows_f) &&
+                    (mask_c < active_cols_f) &&
+                    (mask_idx < MAX_TILE_RESULTS))
+                    tile_active_result_mask[mask_idx] = 1'b1;
+            end
+        end
+    end
+endfunction
+
 reg [ACC_W-1:0] tile_result_buf [0:255]; // captured C tile, index = row*grid_cols+col
 reg             tile_ser_busy;
 reg [4:0]       tile_ser_active_rows;   // valid rows in current edge/full tile
 reg [5:0]       tile_ser_active_cols;   // valid cols (6-bit for 8x32)
 reg [4:0]       tile_ser_row;           // serializer row r
 reg [5:0]       tile_ser_col;           // serializer col c
+reg             tile_router_collect_active;
+reg [4:0]       tile_router_active_rows;
+reg [5:0]       tile_router_active_cols;
+reg [5:0]       tile_router_grid_cols;
+reg [MAX_TILE_RESULTS-1:0] tile_router_seen;
+reg [MAX_TILE_RESULTS-1:0] pe_array_valid_d1;
+reg             tile_ws_collect_active;
+reg             tile_ws_collect_done;
+reg [4:0]       tile_ws_capture_row;
+reg [MAX_TILE_RESULTS-1:0] tile_ws_col_seen;
 
 wire [7:0] tile_ser_idx = tile_ser_row * tile_grid_cols + {2'd0, tile_ser_col};
 wire       tile_ser_fire = tile_ser_busy && !r_fifo_full;
 wire       tile_ser_last_col = (tile_ser_col + 6'd1 >= tile_ser_active_cols);
 wire       tile_ser_last_row = (tile_ser_row + 5'd1 >= tile_ser_active_rows);
 wire       tile_ser_last     = tile_ser_last_col && tile_ser_last_row;
+wire [8:0] tile_ws_bottom_base = ({4'd0, tile_lane_count} - 9'd1) * {3'd0, tile_grid_cols};
+wire [MAX_TILE_RESULTS-1:0] tile_ws_cols_mask =
+    tile_active_result_mask(5'd1, ctrl_tile_active_cols, tile_grid_cols);
+wire [MAX_TILE_RESULTS-1:0] tile_ws_bottom_mask =
+    tile_ws_cols_mask << tile_ws_bottom_base[7:0];
+wire       tile_true_ws_bottom_ready = pe_array_router_selected
+                                     ? ((pe_array_valid_d1 & tile_ws_bottom_mask) == tile_ws_bottom_mask)
+                                     : pe_array_valid_d1[tile_ws_bottom_base[7:0]];
+wire [MAX_TILE_RESULTS-1:0] tile_router_ws_cols_valid =
+    (pe_array_valid_d1 >> tile_ws_bottom_base[7:0]) & tile_ws_cols_mask;
+wire [MAX_TILE_RESULTS-1:0] tile_router_ws_seen_next =
+    tile_ws_col_seen | tile_router_ws_cols_valid;
+wire       tile_router_true_ws_collect = ctrl_tile_true_ws &&
+                                         pe_array_router_selected &&
+                                         tile_ws_collect_active &&
+                                         !tile_ser_busy;
+wire       tile_router_true_ws_row_done = tile_router_true_ws_collect &&
+                                          (tile_ws_cols_mask != {MAX_TILE_RESULTS{1'b0}}) &&
+                                          ((tile_router_ws_seen_next & tile_ws_cols_mask) == tile_ws_cols_mask);
+wire [15:0] tile_ws_capture_start_cycle = {11'd0, ctrl_tile_k_groups} +
+                                          ({11'd0, tile_lane_count} * 16'd3) +
+                                          16'd1;
+wire       tile_true_ws_arm_collect = ctrl_tile_true_ws &&
+                                      !tile_ws_collect_active &&
+                                      !tile_ws_collect_done &&
+                                      !tile_ser_busy &&
+                                      (pe_array_router_selected
+                                       ? tile_a_vec_fire
+                                       : (ctrl_tile_k_cycle + 16'd1 >= tile_ws_capture_start_cycle));
+wire       tile_true_ws_capture = ctrl_tile_true_ws &&
+                                  !pe_array_router_selected &&
+                                  tile_ws_collect_active &&
+                                  (tile_ws_capture_row < ctrl_tile_active_rows) &&
+                                  tile_true_ws_bottom_ready &&
+                                  !tile_ser_busy;
 wire tile_result_capture_pending = ctrl_tile_mode &&
-                              pe_array_valid[0] &&
-                              !tile_ser_busy;
+                               !pe_array_router_selected &&
+                               !ctrl_tile_true_ws &&
+                               pe_array_valid[0] &&
+                               !tile_ser_busy;
+wire tile_router_capture_start = ctrl_tile_mode &&
+                                 pe_array_router_selected &&
+                                 pe_flush &&
+                                 !tile_ser_busy &&
+                                 !tile_router_collect_active;
+wire tile_router_collect_step = tile_router_collect_active || tile_router_capture_start;
+wire [4:0] tile_router_rows_sel = tile_router_capture_start ? ctrl_tile_active_rows
+                                                            : tile_router_active_rows;
+wire [5:0] tile_router_cols_sel = tile_router_capture_start ? ctrl_tile_active_cols
+                                                            : tile_router_active_cols;
+wire [5:0] tile_router_grid_cols_sel = tile_router_capture_start ? tile_grid_cols
+                                                                 : tile_router_grid_cols;
+wire [MAX_TILE_RESULTS-1:0] tile_router_expected_mask =
+    tile_active_result_mask(tile_router_rows_sel, tile_router_cols_sel, tile_router_grid_cols_sel);
+wire [MAX_TILE_RESULTS-1:0] tile_router_seen_base = tile_router_capture_start ?
+    {MAX_TILE_RESULTS{1'b0}} : tile_router_seen;
+wire [MAX_TILE_RESULTS-1:0] tile_router_seen_next =
+    tile_router_seen_base | (pe_array_valid_d1 & tile_router_expected_mask);
+wire tile_router_collect_done = tile_router_collect_step &&
+                                (tile_router_expected_mask != {MAX_TILE_RESULTS{1'b0}}) &&
+                                ((tile_router_seen_next & tile_router_expected_mask) ==
+                                 tile_router_expected_mask);
 
 `ifdef DIAG_8X32
 always @(posedge sys_clk) begin
@@ -1182,7 +1373,16 @@ always @(posedge sys_clk) begin
 end
 wire tile_result_capture = tile_cap_d1;
 
+always @(posedge sys_clk) begin
+    if (!sys_rst_n || !ctrl_tile_mode)
+        pe_array_valid_d1 <= {MAX_TILE_RESULTS{1'b0}};
+    else
+        pe_array_valid_d1 <= pe_array_valid;
+end
+
 integer tile_ser_i;
+integer tile_ws_dst_idx;
+integer tile_ws_src_idx;
 always @(posedge sys_clk) begin
     if (!sys_rst_n || !ctrl_tile_mode) begin
         tile_ser_busy       <= 1'b0;
@@ -1190,8 +1390,88 @@ always @(posedge sys_clk) begin
         tile_ser_active_cols <= 6'd0;
         tile_ser_row        <= 5'd0;
         tile_ser_col        <= 6'd0;
+        tile_router_collect_active <= 1'b0;
+        tile_router_active_rows <= 5'd0;
+        tile_router_active_cols <= 6'd0;
+        tile_router_grid_cols <= 6'd0;
+        tile_router_seen <= {MAX_TILE_RESULTS{1'b0}};
+        tile_ws_collect_active <= 1'b0;
+        tile_ws_collect_done <= 1'b0;
+        tile_ws_capture_row <= 5'd0;
+        tile_ws_col_seen <= {MAX_TILE_RESULTS{1'b0}};
         for (tile_ser_i = 0; tile_ser_i < MAX_TILE_RESULTS; tile_ser_i = tile_ser_i + 1)
             tile_result_buf[tile_ser_i] <= {ACC_W{1'b0}};
+    end else if (tile_w_vec_fire) begin
+        tile_ws_collect_done <= 1'b0;
+        tile_ws_col_seen <= {MAX_TILE_RESULTS{1'b0}};
+    end else if (tile_true_ws_arm_collect) begin
+        tile_ws_collect_active <= 1'b1;
+        tile_ws_capture_row <= 5'd0;
+        tile_ws_col_seen <= {MAX_TILE_RESULTS{1'b0}};
+    end else if (tile_router_true_ws_collect) begin
+        for (tile_ser_i = 0; tile_ser_i < 32; tile_ser_i = tile_ser_i + 1) begin
+            if ((tile_ser_i < tile_grid_cols) &&
+                (tile_ser_i < ctrl_tile_active_cols) &&
+                pe_array_valid_d1[tile_ws_bottom_base[7:0] + tile_ser_i] &&
+                !tile_ws_col_seen[tile_ser_i]) begin
+                tile_ws_dst_idx = tile_ws_capture_row * tile_grid_cols + tile_ser_i;
+                tile_ws_src_idx = tile_ws_bottom_base + tile_ser_i;
+                if (ctrl_tile_k_index == 32'd0)
+                    tile_result_buf[tile_ws_dst_idx] <= pe_array_result[tile_ws_src_idx*ACC_W +: ACC_W];
+                else
+                    tile_result_buf[tile_ws_dst_idx] <= $signed(tile_result_buf[tile_ws_dst_idx]) +
+                        $signed(pe_array_result[tile_ws_src_idx*ACC_W +: ACC_W]);
+            end
+        end
+
+        if (tile_router_true_ws_row_done) begin
+            tile_ws_col_seen <= {MAX_TILE_RESULTS{1'b0}};
+            if (tile_ws_capture_row + 5'd1 >= ctrl_tile_active_rows) begin
+                tile_ws_collect_active <= 1'b0;
+                tile_ws_collect_done <= 1'b1;
+                tile_ws_capture_row <= 5'd0;
+                if (ctrl_tile_k_last) begin
+                    tile_ser_active_rows <= ctrl_tile_active_rows;
+                    tile_ser_active_cols <= ctrl_tile_active_cols;
+                    tile_ser_row         <= 5'd0;
+                    tile_ser_col         <= 6'd0;
+                    tile_ser_busy        <= (ctrl_tile_active_rows != 5'd0) &&
+                                            (ctrl_tile_active_cols != 6'd0);
+                end
+            end else begin
+                tile_ws_capture_row <= tile_ws_capture_row + 5'd1;
+            end
+        end else begin
+            tile_ws_col_seen <= tile_router_ws_seen_next;
+        end
+    end else if (tile_true_ws_capture) begin
+        for (tile_ser_i = 0; tile_ser_i < 32; tile_ser_i = tile_ser_i + 1) begin
+            if ((tile_ser_i < tile_grid_cols) && (tile_ser_i < ctrl_tile_active_cols)) begin
+                tile_ws_dst_idx = tile_ws_capture_row * tile_grid_cols + tile_ser_i;
+                tile_ws_src_idx = tile_ws_bottom_base + tile_ser_i;
+                if (ctrl_tile_k_index == 32'd0)
+                    tile_result_buf[tile_ws_dst_idx] <= pe_array_result[tile_ws_src_idx*ACC_W +: ACC_W];
+                else
+                    tile_result_buf[tile_ws_dst_idx] <= $signed(tile_result_buf[tile_ws_dst_idx]) +
+                        $signed(pe_array_result[tile_ws_src_idx*ACC_W +: ACC_W]);
+            end
+        end
+
+        if (tile_ws_capture_row + 5'd1 >= ctrl_tile_active_rows) begin
+            tile_ws_collect_active <= 1'b0;
+            tile_ws_collect_done <= 1'b1;
+            tile_ws_capture_row <= 5'd0;
+            if (ctrl_tile_k_last) begin
+                tile_ser_active_rows <= ctrl_tile_active_rows;
+                tile_ser_active_cols <= ctrl_tile_active_cols;
+                tile_ser_row         <= 5'd0;
+                tile_ser_col         <= 6'd0;
+                tile_ser_busy        <= (ctrl_tile_active_rows != 5'd0) &&
+                                        (ctrl_tile_active_cols != 6'd0);
+            end
+        end else begin
+            tile_ws_capture_row <= tile_ws_capture_row + 5'd1;
+        end
     end else if (tile_result_capture) begin
         // Fixed loop bound keeps synthesis tools from treating tile_capture_cnt
         // as a dynamic generate-style limit.
@@ -1210,6 +1490,29 @@ always @(posedge sys_clk) begin
                  pe_array_result[0*ACC_W +: ACC_W],
                  pe_array_result[16*ACC_W +: ACC_W]);
         `endif
+    end else if (tile_router_collect_step) begin
+        for (tile_ser_i = 0; tile_ser_i < MAX_TILE_RESULTS; tile_ser_i = tile_ser_i + 1) begin
+            if (pe_array_valid_d1[tile_ser_i] && tile_router_expected_mask[tile_ser_i])
+                tile_result_buf[tile_ser_i] <= pe_array_result[tile_ser_i*ACC_W +: ACC_W];
+        end
+
+        tile_router_active_rows <= tile_router_rows_sel;
+        tile_router_active_cols <= tile_router_cols_sel;
+        tile_router_grid_cols <= tile_router_grid_cols_sel;
+
+        if (tile_router_collect_done) begin
+            tile_router_collect_active <= 1'b0;
+            tile_router_seen <= {MAX_TILE_RESULTS{1'b0}};
+            tile_ser_active_rows <= tile_router_rows_sel;
+            tile_ser_active_cols <= tile_router_cols_sel;
+            tile_ser_row         <= 5'd0;
+            tile_ser_col         <= 6'd0;
+            tile_ser_busy        <= (tile_router_rows_sel != 5'd0) &&
+                                    (tile_router_cols_sel != 6'd0);
+        end else begin
+            tile_router_collect_active <= 1'b1;
+            tile_router_seen <= tile_router_seen_next;
+        end
     end else if (tile_ser_fire) begin
         if (tile_ser_last) begin
             tile_ser_busy <= 1'b0;
@@ -1243,6 +1546,39 @@ always @(posedge sys_clk) begin
         $display("[DIAG_FIFO] seq=%0d (r=%0d c=%0d) data=0x%08h",
                  diag_fifo_idx, tile_ser_row, tile_ser_col, r_fifo_din);
         diag_fifo_idx <= diag_fifo_idx + 9'd1;
+    end
+end
+`endif
+
+`ifdef DIAG_TRUE_WS
+always @(posedge sys_clk) begin
+    if (ctrl_tile_true_ws && (tile_w_vec_fire || tile_a_vec_fire || pe_swap_w || tile_true_ws_capture || r_fifo_wr_en || tile_true_ws_bottom_ready)) begin
+        $display("[DIAG_TRUE_WS] cyc=%0d kcyc=%0d wfire=%0b afire=%0b load=%0b swap=%0b en=%0b arm=%0b active=%0b bottom=%0b cap=%0b cap_row=%0d w0=%h a0=%h a1=%h v=%b%b%b%b r0=%0d r1=%0d r2=%0d r3=%0d fifo_wr=%0b fifo_din=%0d",
+                 perf_total_cycles,
+                 ctrl_tile_k_cycle,
+                 tile_w_vec_fire,
+                 tile_a_vec_fire,
+                 pe_load_w,
+                 pe_swap_w,
+                 pe_en,
+                 tile_true_ws_arm_collect,
+                 tile_ws_collect_active,
+                 tile_true_ws_bottom_ready,
+                 tile_true_ws_capture,
+                 tile_ws_capture_row,
+                 tile_w_raw_vec[0*DATA_W +: DATA_W],
+                 tile_a_raw_vec[0*DATA_W +: DATA_W],
+                 tile_a_raw_vec[1*DATA_W +: DATA_W],
+                 pe_array_valid_d1[0],
+                 pe_array_valid_d1[4],
+                 pe_array_valid_d1[8],
+                 pe_array_valid_d1[12],
+                 pe_array_result[0*ACC_W +: ACC_W],
+                 pe_array_result[4*ACC_W +: ACC_W],
+                 pe_array_result[8*ACC_W +: ACC_W],
+                 pe_array_result[12*ACC_W +: ACC_W],
+                 r_fifo_wr_en,
+                 r_fifo_din);
     end
 end
 `endif

@@ -56,6 +56,9 @@ module tb_reconfig_pe_8x32;
         .acc_init_en    (acc_init_en),
         .half_en        (half_en),
         .array_ce       (1'b1),
+        .router_enable  (1'b0),
+        .os_act_systolic(1'b0),
+        .os_weight_broadcast(1'b0),
         .row_ce         ({PHY_ROWS{1'b1}}),
         .col_ce         ({PHY_COLS{1'b1}}),
         .w_in           (w_in),
@@ -66,7 +69,9 @@ module tb_reconfig_pe_8x32;
         .acc_out        (acc_out),
         .valid_out      (valid_out),
         .ws_load_row_out(ws_load_row_out),
-        .pe_active      (pe_active)
+        .pe_active      (pe_active),
+        .router_ready   (),
+        .router_overflow()
     );
 
     initial clk = 1'b0;

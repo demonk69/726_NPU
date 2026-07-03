@@ -8,6 +8,7 @@ localparam REG_STATUS     = 32'h04;
 localparam REG_INT_EN     = 32'h08;
 localparam REG_INT_CLR    = 32'h0C;
 localparam REG_M_DIM      = 32'h10;
+localparam REG_ARR_CFG    = 32'h30;
 localparam REG_DESC_BASE  = 32'h40;
 localparam REG_DESC_COUNT = 32'h44;
 localparam REG_ERR_STATUS = 32'h74;
@@ -284,6 +285,14 @@ initial begin
 
     expect_read(REG_DESC_BASE, 32'd0);
     expect_read(REG_DESC_COUNT, 32'd0);
+    expect_read(REG_ARR_CFG, 32'd0);
+
+    axi_write(REG_ARR_CFG, 32'h0000_00C0);
+    expect_read(REG_ARR_CFG, 32'h0000_00C0);
+    if (arr_cfg !== 8'hC0) begin
+        $display("[FAIL] ARR_CFG router/tile bits not preserved arr_cfg=0x%02h", arr_cfg);
+        $fatal;
+    end
 
     axi_write_delayed_bready(REG_M_DIM, 32'd17);
     expect_read(REG_M_DIM, 32'd17);
@@ -351,7 +360,7 @@ initial begin
         $fatal;
     end
 
-    $display("[PASS] tb_npu_axi_lite_desc: descriptor regs, IRQ, STATUS, and ERR_STATUS W1C passed");
+    $display("[PASS] tb_npu_axi_lite_desc: descriptor regs, ARR_CFG, IRQ, STATUS, and ERR_STATUS W1C passed");
     $finish;
 end
 

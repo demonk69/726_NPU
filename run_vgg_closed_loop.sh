@@ -9,7 +9,7 @@
 #   ./run_vgg_closed_loop.sh --num-cores 1 --image cat.jpg
 #   ./run_vgg_closed_loop.sh --num-cores 2 --shape 16x16 --flow os
 #   ./run_vgg_closed_loop.sh --num-cores 2 --shape 4x4 --flow ws --image cat.jpg
-#   ./run_vgg_closed_loop.sh --num-cores 2 --lanes 2
+#   ./run_vgg_closed_loop.sh --num-cores 2 --lanes 8
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -20,7 +20,7 @@ IMG_IDX="0"
 IMAGE=""
 SHAPE="16x16"
 FLOW="os"
-LANES="${VGG_CLOSED_LANES:-4}"
+LANES="${VGG_CLOSED_LANES:-8}"
 CLK_DIV="${VGG_CLOSED_CLK_DIV:-0}"
 PPB_DEPTH="${VGG_CLOSED_PPB_DEPTH:-8192}"
 TIMEOUT_CYCLES="${VGG_CLOSED_TIMEOUT_CYCLES:-500000000}"
@@ -67,7 +67,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --help|-h)
-            echo "Usage: $0 [img_idx] [--num-cores 1|2|4] [--image <file>] [--shape 4x4|8x8|16x16|8x32] [--flow os|ws] [--lanes 1|2|4] [--clk-div 0|1|2|3] [--ppb-depth <words>] [--diag [--diag-interval N]]"
+            echo "Usage: $0 [img_idx] [--num-cores 1|2|4] [--image <file>] [--shape 4x4|8x8|16x16|8x32] [--flow os|ws] [--lanes 1|2|4|8] [--clk-div 0|1|2|3] [--ppb-depth <words>] [--diag [--diag-interval N]]"
             exit 0
             ;;
         --*)
@@ -107,9 +107,9 @@ case "$FLOW" in
 esac
 
 case "$LANES" in
-    1|2|4) ;;
+    1|2|4|8) ;;
     *)
-        echo "Invalid lanes: $LANES (expected 1, 2, or 4)" >&2
+        echo "Invalid lanes: $LANES (expected 1, 2, 4, or 8)" >&2
         exit 2
         ;;
 esac

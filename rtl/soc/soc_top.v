@@ -39,11 +39,12 @@ module soc_top #(
     parameter DRAM_WORDS  = 15360,      // DRAM: ~60KB
     parameter NPU_ROWS    = 4,
     parameter NPU_COLS    = 4,
-    parameter NPU_DATA_W  = 32,
+    parameter NPU_DATA_W  = 64,
     parameter NPU_ACC_W   = 32,
     parameter NPU_PPB_DEPTH  = 64,
     parameter NPU_PPB_THRESH = 16,
-    parameter NPU_INT8_SIMD_LANES = 4
+    parameter NPU_INT8_SIMD_LANES = (NPU_DATA_W >= 64) ? 8 : ((NPU_DATA_W >= 32) ? 4 : 2),
+    parameter NPU_USE_ROUTER_MESH = 0
 )(
     input  wire        clk,
     input  wire        rst_n
@@ -265,7 +266,8 @@ npu_top #(
     .ACC_W     (NPU_ACC_W),
     .PPB_DEPTH (NPU_PPB_DEPTH),
     .PPB_THRESH(NPU_PPB_THRESH),
-    .INT8_SIMD_LANES(NPU_INT8_SIMD_LANES)
+    .INT8_SIMD_LANES(NPU_INT8_SIMD_LANES),
+    .USE_ROUTER_MESH(NPU_USE_ROUTER_MESH)
 ) u_npu (
     .sys_clk       (clk),
     .sys_rst_n     (rst_n),

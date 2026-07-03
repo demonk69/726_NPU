@@ -72,7 +72,26 @@ localparam REG_PERF_COMPUTE_CYCLES = 32'hB4;
 localparam REG_PERF_DMA_CYCLES     = 32'hB8;
 localparam REG_PERF_PEAK_OPS_CYCLE = 32'hC8;
 
+`ifdef ARR_CFG
+localparam ARR_TILE     = `ARR_CFG;
+`else
 localparam ARR_TILE     = 32'h80; // ARR_CFG[7]: enable tile planner/data path
+`endif
+`ifdef USE_ROUTER_MESH_VAL
+localparam TB_USE_ROUTER_MESH = `USE_ROUTER_MESH_VAL;
+`else
+localparam TB_USE_ROUTER_MESH = 0;
+`endif
+`ifdef DUT_PHY_ROWS
+localparam TB_PHY_ROWS = `DUT_PHY_ROWS;
+`else
+localparam TB_PHY_ROWS = 16;
+`endif
+`ifdef DUT_PHY_COLS
+localparam TB_PHY_COLS = `DUT_PHY_COLS;
+`else
+localparam TB_PHY_COLS = 16;
+`endif
 `ifdef CFG_SHAPE_VAL
 localparam CFG_SHAPE    = `CFG_SHAPE_VAL;
 `else
@@ -219,9 +238,12 @@ initial begin
 end
 
 npu_top #(
+    .PHY_ROWS(TB_PHY_ROWS),
+    .PHY_COLS(TB_PHY_COLS),
     .DATA_W(DATA_W),
     .ACC_W (ACC_W),
-    .INT8_SIMD_LANES(INT8_SIMD_LANES)
+    .INT8_SIMD_LANES(INT8_SIMD_LANES),
+    .USE_ROUTER_MESH(TB_USE_ROUTER_MESH)
 ) u_npu (
     .sys_clk       (clk),
     .sys_rst_n     (rst_n),
@@ -445,6 +467,38 @@ task wait_done;
         end
         if (!status[1]) begin
             $display("[FAIL] NPU timeout (status[1]=%0d)", status[1]);
+`ifdef DIAG_TIMEOUT
+            $display("[DIAG_TIMEOUT] ctrl state=%0d busy=%0d done=%0d pe_en=%0d pe_flush=%0d pe_ready=%0d tile_i=%0d tile_j=%0d kidx=%0d pass=%0d kcyc=%0d wb_row=%0d",
+                     u_npu.u_ctrl.state,
+                     u_npu.u_ctrl.busy,
+                     u_npu.u_ctrl.done,
+                     u_npu.u_ctrl.pe_en,
+                     u_npu.u_ctrl.pe_flush,
+                     u_npu.u_ctrl.pe_array_ready,
+                     u_npu.u_ctrl.tile_i,
+                     u_npu.u_ctrl.tile_j,
+                     u_npu.u_ctrl.k_tile_idx,
+                     u_npu.u_ctrl.pass_idx,
+                     u_npu.u_ctrl.tile_k_cycle,
+                     u_npu.u_ctrl.wb_row);
+            $display("[DIAG_TIMEOUT] dma_state=%0d wb_state=%0d r_pending=%0d r_fill=%0d awvalid=%0d wvalid=%0d bready=%0d",
+                     u_npu.u_dma.dma_state,
+                     u_npu.u_dma.wb_state,
+                     u_npu.u_dma.r_pending,
+                     u_npu.u_dma.r_fill,
+                     m_awvalid,
+                     m_wvalid,
+                     m_bready);
+            $display("[DIAG_TIMEOUT] ser_busy=%0d ser_row=%0d ser_col=%0d router_collect=%0d router_seen_lo=0x%016h pe_valid_lo=0x%016h router_ready=%0d overflow=%0d",
+                     u_npu.tile_ser_busy,
+                     u_npu.tile_ser_row,
+                     u_npu.tile_ser_col,
+                     u_npu.tile_router_collect_active,
+                     u_npu.tile_router_seen[63:0],
+                     u_npu.pe_array_valid[63:0],
+                     u_npu.pe_array_input_ready,
+                     u_npu.pe_array_router_overflow);
+`endif
             $finish;
         end
         axi_write(REG_CTRL, 32'h0);
@@ -516,7 +570,9 @@ initial begin
 
     $display("");
     $display("################################################################");
-    $display("  Tile GEMM Test: %s DATA_W=%0d INT8_SIMD_LANES=%0d PERF_ONLY=%0d", `TEST_NAME, DATA_W, INT8_SIMD_LANES, PERF_ONLY_MODE);
+    $display("  Tile GEMM Test: %s DATA_W=%0d INT8_SIMD_LANES=%0d PERF_ONLY=%0d USE_ROUTER_MESH=%0d ARR_CFG=0x%02h",
+             `TEST_NAME, DATA_W, INT8_SIMD_LANES, PERF_ONLY_MODE,
+             TB_USE_ROUTER_MESH, ARR_TILE[7:0]);
     $display("################################################################");
 
     axi_write(REG_CLK_DIV, CLK_DIV);

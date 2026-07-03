@@ -62,23 +62,26 @@ module pingpong_buf #(
 // ---------------------------------------------------------------------------
 localparam ADDR_W    = $clog2(DEPTH);
 localparam FILL_W    = ADDR_W + 1;
-localparam SUBW_W    = $clog2(SUBW);             // 2 bits for SUBW=4 index
-localparam RD_FILL_W = $clog2(DEPTH * SUBW) + 1; // max fill: DEPTH*4 sub-words
+localparam SUBW_W    = $clog2(SUBW);
+localparam RD_FILL_W = $clog2(DEPTH * SUBW) + 1;
 localparam VEC_W      = VEC_LANES * OUT_WIDTH;
 localparam [4:0] VEC_LANES_5 = VEC_LANES;
-localparam [2:0] PACKED_LANES = (OUT_WIDTH + 7) / 8;  // 2 for 16b, 4 for 32b
+localparam [5:0] SUBW_6 = SUBW;
+localparam [5:0] PACKED_LANES = (OUT_WIDTH + 7) / 8;  // 2/4/8 for 16/32/64b
 localparam [SUBW_W-1:0] SUBW_LAST = {SUBW_W{1'b1}};
 
 wire [4:0] rd_vec_lanes_eff =
     (rd_vec_lanes == 5'd0)      ? VEC_LANES_5 :
     (rd_vec_lanes > VEC_LANES_5) ? VEC_LANES_5 :
                                    rd_vec_lanes;
-wire [RD_FILL_W-1:0] rd_vec_lanes_fill = packed_int8 ? (rd_vec_lanes_eff * PACKED_LANES) : rd_vec_lanes_eff;
-wire [2:0] vec_words_per_k = (rd_vec_lanes_eff <= 5'd4)  ? 3'd1 :
-                             (rd_vec_lanes_eff <= 5'd8)  ? 3'd2 :
-                             (rd_vec_lanes_eff <= 5'd12) ? 3'd3 : 3'd4;
-wire [5:0] vec_group_words = packed_int8 ? ({3'd0, vec_words_per_k} * {3'd0, PACKED_LANES})
-                                         : {3'd0, vec_words_per_k};
+wire [RD_FILL_W-1:0] rd_vec_lanes_eff_fill = rd_vec_lanes_eff;
+wire [9:0] packed_vec_bytes = {5'd0, rd_vec_lanes_eff} * {4'd0, PACKED_LANES};
+wire [5:0] vec_group_words = packed_int8
+    ? ((packed_vec_bytes + {4'd0, SUBW_6} - 10'd1) / {4'd0, SUBW_6})
+    : (({1'b0, rd_vec_lanes_eff} + SUBW_6 - 6'd1) / SUBW_6);
+wire [RD_FILL_W-1:0] rd_vec_lanes_fill = packed_int8
+    ? ({{(RD_FILL_W-6){1'b0}}, vec_group_words} * {{(RD_FILL_W-6){1'b0}}, SUBW_6})
+    : rd_vec_lanes_eff_fill;
 
 function [ADDR_W-1:0] vec_group_idx;
     input [ADDR_W-1:0] ptr;
@@ -93,6 +96,8 @@ function [ADDR_W-1:0] vec_group_idx;
             6'd8:    vec_group_idx = ptr >> 3;
             6'd12:   vec_group_idx = ptr / 12;
             6'd16:   vec_group_idx = ptr >> 4;
+            6'd24:   vec_group_idx = ptr / 24;
+            6'd32:   vec_group_idx = ptr >> 5;
             default: vec_group_idx = ptr;
         endcase
     end
@@ -111,35 +116,9 @@ function [5:0] vec_word_in_group;
             6'd8:    vec_word_in_group = ptr - ((ptr >> 3) << 3);
             6'd12:   vec_word_in_group = ptr - ((ptr / 12) * 12);
             6'd16:   vec_word_in_group = ptr - ((ptr >> 4) << 4);
+            6'd24:   vec_word_in_group = ptr - ((ptr / 24) * 24);
+            6'd32:   vec_word_in_group = ptr - ((ptr >> 5) << 5);
             default: vec_word_in_group = 6'd0;
-        endcase
-    end
-endfunction
-
-function [2:0] vec_k_idx;
-    input [5:0] word_in_group;
-    input [2:0] words_per_k;
-    begin
-        case (words_per_k)
-            3'd1:    vec_k_idx = word_in_group[2:0];
-            3'd2:    vec_k_idx = word_in_group[3:1];
-            3'd3:    vec_k_idx = word_in_group / 3;
-            3'd4:    vec_k_idx = word_in_group[4:2];
-            default: vec_k_idx = 3'd0;
-        endcase
-    end
-endfunction
-
-function [2:0] vec_lane_word;
-    input [5:0] word_in_group;
-    input [2:0] words_per_k;
-    begin
-        case (words_per_k)
-            3'd1:    vec_lane_word = 3'd0;
-            3'd2:    vec_lane_word = {2'd0, word_in_group[0]};
-            3'd3:    vec_lane_word = word_in_group - ((word_in_group / 3) * 3);
-            3'd4:    vec_lane_word = {1'd0, word_in_group[1:0]};
-            default: vec_lane_word = 3'd0;
         endcase
     end
 endfunction
@@ -147,22 +126,29 @@ endfunction
 function [VEC_W-1:0] vec_line_update;
     input [VEC_W-1:0] line_in;
     input [DATA_W-1:0] data_in;
-    input [2:0] lane_word;
-    input [2:0] k_idx;
+    input [5:0] word_in_group;
     input [4:0] lane_limit;
     input       is_packed;
     integer byte_i;
+    integer linear_i;
     integer lane_i_local;
+    integer k_i_local;
     reg [7:0] byte_val;
     begin
         vec_line_update = line_in;
         for (byte_i = 0; byte_i < SUBW; byte_i = byte_i + 1) begin
-            lane_i_local = lane_word * SUBW + byte_i;
             byte_val = data_in[byte_i*8 +: 8];
-            if (lane_i_local < VEC_LANES && lane_i_local < lane_limit) begin
-                if (is_packed)
-                    vec_line_update[lane_i_local*OUT_WIDTH + k_idx*8 +: 8] = byte_val;
-                else
+            if (is_packed) begin
+                linear_i = word_in_group * SUBW + byte_i;
+                lane_i_local = (lane_limit == 5'd0) ? 0 : (linear_i % lane_limit);
+                k_i_local = (lane_limit == 5'd0) ? 0 : (linear_i / lane_limit);
+                if (lane_i_local < VEC_LANES &&
+                    lane_i_local < lane_limit &&
+                    k_i_local < PACKED_LANES)
+                    vec_line_update[lane_i_local*OUT_WIDTH + k_i_local*8 +: 8] = byte_val;
+            end else begin
+                lane_i_local = word_in_group * SUBW + byte_i;
+                if (lane_i_local < VEC_LANES && lane_i_local < lane_limit)
                     vec_line_update[lane_i_local*OUT_WIDTH +: OUT_WIDTH] = {{(OUT_WIDTH-8){byte_val[7]}}, byte_val};
             end
         end
@@ -216,14 +202,11 @@ reg [VEC_W-1:0] vec_build_b;
 wire do_write = rst_n && !clear && !swap && wr_en && !buf_full;
 wire [ADDR_W-1:0] wr_vec_group_idx = vec_group_idx(wr_ptr, vec_group_words);
 wire [5:0] wr_vec_word_in_group = vec_word_in_group(wr_ptr, vec_group_words);
-wire [2:0] wr_vec_k_idx = packed_int8 ? vec_k_idx(wr_vec_word_in_group, vec_words_per_k) : 3'd0;
-wire [2:0] wr_vec_lane_word = packed_int8 ? vec_lane_word(wr_vec_word_in_group, vec_words_per_k)
-                                          : wr_vec_word_in_group[2:0];
 wire [VEC_W-1:0] wr_vec_build_cur = wr_sel ? vec_build_b : vec_build_a;
 wire [VEC_W-1:0] wr_vec_build_base = (wr_vec_word_in_group == 6'd0) ? {VEC_W{1'b0}}
                                                                     : wr_vec_build_cur;
 wire [VEC_W-1:0] wr_vec_build_next = vec_line_update(wr_vec_build_base, wr_data,
-                                                     wr_vec_lane_word, wr_vec_k_idx,
+                                                     wr_vec_word_in_group,
                                                      rd_vec_lanes_eff, packed_int8);
 
 always @(posedge clk) begin
@@ -257,10 +240,7 @@ generate
             : mem_b[rd_ptr];
 
         // ---- INT8 path: read one byte, sign-extend to OUT_WIDTH ----
-        wire [7:0] rd_byte = (rd_sub == 0) ? rd_mem[ 7: 0] :
-                             (rd_sub == 1) ? rd_mem[15: 8] :
-                             (rd_sub == 2) ? rd_mem[23:16] :
-                                             rd_mem[31:24];
+        wire [7:0] rd_byte = rd_mem[rd_sub*8 +: 8];
         wire [OUT_WIDTH-1:0] rd_int8 = {{(OUT_WIDTH-8){rd_byte[7]}}, rd_byte};
 
         // When buffer is empty, output 0 to avoid PE latching stale data.
@@ -317,12 +297,16 @@ wire [VEC_W-1:0] rd_vec_cached = (rd_sel == 1'b0) ? vec_mem_a[rd_vec_group_idx]
                                                    : vec_mem_b[rd_vec_group_idx];
 assign rd_vec = rd_vec_valid ? rd_vec_cached : {VEC_W{1'b0}};
 
-wire [7:0] vec_abs_next = packed_int8
-    ? ({4'b0000, rd_sub} + (rd_vec_lanes_eff * PACKED_LANES))
-    : ({4'b0000, rd_sub} + {1'b0, rd_vec_lanes_eff});
-wire [ADDR_W:0] vec_word_inc = (vec_abs_next >> 2);
-wire [SUBW_W-1:0] vec_next_sub = packed_int8 ? vec_abs_next[SUBW_W-1:0]
-    : vec_abs_next[SUBW_W-1:0];
+wire [8:0] vec_rd_sub_ext = rd_sub;
+wire [8:0] vec_lane_advance = rd_vec_lanes_eff;
+wire [8:0] vec_group_advance = {3'd0, vec_group_words} * {3'd0, SUBW_6};
+wire [8:0] vec_packed_advance = packed_int8 ? vec_group_advance
+                                            : vec_lane_advance;
+wire [8:0] vec_abs_next = packed_int8
+    ? (vec_rd_sub_ext + vec_packed_advance)
+    : (vec_rd_sub_ext + vec_lane_advance);
+wire [ADDR_W:0] vec_word_inc = vec_abs_next / SUBW;
+wire [SUBW_W-1:0] vec_next_sub = vec_abs_next % SUBW;
 
 // Update read pointers & fill counts
 always @(posedge clk) begin

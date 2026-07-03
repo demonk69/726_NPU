@@ -89,7 +89,15 @@ module npu_ctrl #(
     output wire              bias_en,
     // 4x4 tile planner outputs (T2.3)
     output wire              tile_mode,
+    output wire              router_enable,
+    output wire              os_act_systolic,
+    output wire              os_weight_broadcast,
     output wire              vec_consume,
+    output wire              vec_consume_w,
+    output wire              vec_consume_a,
+    output wire              tile_true_ws,
+    output wire              tile_k_last,
+    output wire [4:0]        tile_k_groups,
     output wire [31:0]       tile_m_base,
     output wire [31:0]       tile_n_base,
     output wire [15:0]        tile_row_valid,
@@ -157,6 +165,7 @@ module npu_ctrl #(
     output reg               pe_swap_w,   // WS mode: swap dual weight regs
     output reg               pe_acc_init_en,
     output wire              pe_half_en,  // 8x32: 0=top half, 1=bottom half
+    input  wire              pe_array_ready,
     // Ping-Pong Buffer status
     input  wire              w_ppb_ready,
     input  wire              w_ppb_empty,
@@ -174,6 +183,8 @@ module npu_ctrl #(
     // DFS clock-enable: controller advances compute progress only when high
     input  wire              compute_ce
 );
+
+wire compute_fire = compute_ce && pe_array_ready;
 
 // ---------------------------------------------------------------------------
 // FSM state encoding
@@ -267,17 +278,26 @@ wire        cfg_fp16_disabled = (FP16_ENABLE == 0) && cfg_non_int8_mode;
 wire        cfg_dma_fp16_mode = (FP16_ENABLE != 0) && (cfg_mode == 2'b10);
 wire [1:0]  cfg_data_bytes = ((FP16_ENABLE != 0) && cfg_non_int8_mode) ? 2'd2 : 2'd1;
 wire [4:0]  cfg_shape_lanes = shape_tile_a_lanes(cfg_shape_in);
+wire        cfg_tile_true_ws = arr_cfg[7] && (cfg_stat == 2'b00) &&
+                               !cfg_non_int8_mode && (cfg_shape_in != 2'b11);
 wire [15:0] cfg_scalar_elem_bytes = {14'b0, cfg_data_bytes};
 wire [15:0] cfg_vector_elem_bytes_max = (cfg_half_bytes_w_8x32 > cfg_vector_elem_bytes_a)
     ? cfg_half_bytes_w_8x32 : cfg_vector_elem_bytes_a;
 wire [31:0] cfg_bytes_per_k = {16'd0, cfg_vector_elem_bytes_max};
-wire [31:0] cfg_k_tile_elems_raw = arr_cfg[7]
+wire [31:0] cfg_k_tile_elems_capacity = arr_cfg[7]
     ? ((PPB_DEPTH_WORDS << 2) / cfg_bytes_per_k)
     : k_dim;
+wire [31:0] cfg_ws_k_tile_elems_limit = {27'd0, cfg_shape_lanes} * INT8_SIMD_LANES_32;
+wire [31:0] cfg_k_tile_elems_raw = cfg_tile_true_ws &&
+                                    (cfg_k_tile_elems_capacity > cfg_ws_k_tile_elems_limit)
+    ? cfg_ws_k_tile_elems_limit
+    : cfg_k_tile_elems_capacity;
 wire [31:0] cfg_k_tile_elems = (cfg_k_tile_elems_raw == 32'd0) ? 32'd1
                                                                : cfg_k_tile_elems_raw;
 wire [31:0] cfg_start_k_len_32 = (k_dim <= cfg_k_tile_elems) ? k_dim
-                                                             : cfg_k_tile_elems;
+                                                              : cfg_k_tile_elems;
+wire [31:0] cfg_dma_k_len_32 = cfg_tile_true_ws ? cfg_k_tile_elems
+                                                : cfg_start_k_len_32;
 // Warm-up uses live config because shadow registers latch on the same start edge.
 // In tile mode W and A may have different lane counts (e.g. 8x32).
 wire [5:0]  cfg_shape_n_lanes = shape_tile_n_lanes(cfg_shape_in);
@@ -288,17 +308,17 @@ wire [15:0] cfg_half_bytes_w_8x32 = (cfg_shape_in == 2'b11) ?
 // cfg_start uses live arr_cfg (not latched lk_arr_cfg) because config is
 // latched in the same cycle the initial DMA is launched.  Using tile_mode
 // (which reads lk_arr_cfg) would see stale 0 and drop the packed pad.
-wire [3:0]  cfg_packed_k_rem = cfg_start_k_len_32 % {28'd0, INT8_SIMD_LANES};
+wire [3:0]  cfg_packed_k_rem = cfg_dma_k_len_32 % {28'd0, INT8_SIMD_LANES};
 wire [15:0] cfg_packed_pad   = arr_cfg[7] && (INT8_SIMD_LANES > 1) && (cfg_packed_k_rem != 4'd0)
     ? (cfg_half_bytes_w_8x32 * ({4'd0, INT8_SIMD_LANES} - {1'b0, cfg_packed_k_rem}))
     : 16'd0;
 wire [15:0] cfg_packed_pad_a = arr_cfg[7] && (INT8_SIMD_LANES > 1) && (cfg_packed_k_rem != 4'd0)
     ? (cfg_vector_elem_bytes_a * ({4'd0, INT8_SIMD_LANES} - {1'b0, cfg_packed_k_rem}))
     : 16'd0;
-wire [15:0] cfg_start_tile_len_raw_w = cfg_start_k_len_32[15:0] *
+wire [15:0] cfg_start_tile_len_raw_w = cfg_dma_k_len_32[15:0] *
     (arr_cfg[7] ? cfg_half_bytes_w_8x32 : cfg_scalar_elem_bytes)
     + (arr_cfg[7] ? cfg_packed_pad : 16'd0);
-wire [15:0] cfg_start_tile_len_raw_a = cfg_start_k_len_32[15:0] *
+wire [15:0] cfg_start_tile_len_raw_a = cfg_dma_k_len_32[15:0] *
     (arr_cfg[7] ? cfg_vector_elem_bytes_a : cfg_scalar_elem_bytes)
     + (arr_cfg[7] ? cfg_packed_pad_a : 16'd0);
 // Tile mode already moves whole words per k and is naturally aligned.
@@ -416,6 +436,9 @@ assign post_act_mode = lk_post_act_mode;
 assign post_quant_cfg = lk_quant_cfg;
 assign bias_en = lk_bias_en;
 assign tile_mode = lk_arr_cfg[7];
+assign router_enable = lk_arr_cfg[6];
+assign os_act_systolic = lk_arr_cfg[5];
+assign os_weight_broadcast = lk_arr_cfg[4];
 
 wire lk_non_int8_mode = (lk_mode != 2'b00);
 wire lk_fp16_mode = (FP16_ENABLE != 0) && lk_non_int8_mode;
@@ -527,16 +550,34 @@ wire [15:0] vector_elem_bytes_a = scalar_elem_bytes * {11'd0, tile_shape_a_lanes
 wire [15:0] vector_elem_bytes_w = scalar_elem_bytes * {11'd0, tile_shape_n_lanes};
 wire [15:0] bytes_per_k_w = tile_mode ? vector_elem_bytes_w : scalar_elem_bytes;
 wire [15:0] bytes_per_k_a = tile_mode ? vector_elem_bytes_a : scalar_elem_bytes;
+wire        is_8x32 = tile_mode && (lk_shape == 2'b11);
+wire        tile_true_ws_mode = tile_mode && !lk_fp16_mode && !lk_stat[0] && !is_8x32;
+assign tile_true_ws = tile_true_ws_mode;
 wire [15:0] half_vector_elem_bytes_w = scalar_elem_bytes * 16'd16;  // 16 cols for 8x32 pass
 wire [15:0] bytes_per_k_w_8x32 = is_8x32 ? half_vector_elem_bytes_w : bytes_per_k_w;
 wire [31:0] bytes_per_k_w_32 = {16'd0, bytes_per_k_w_8x32};
 wire [31:0] bytes_per_k_a_32 = {16'd0, bytes_per_k_a};
+wire [31:0] bytes_per_k_max = (bytes_per_k_w_32 > bytes_per_k_a_32)
+    ? bytes_per_k_w_32 : bytes_per_k_a_32;
+wire [31:0] k_tile_elems_capacity = tile_mode
+    ? ((PPB_DEPTH_WORDS << 2) / bytes_per_k_max)
+    : lk_k_dim;
+wire [31:0] ws_k_tile_elems_limit = {27'd0, tile_shape_lanes} * INT8_SIMD_LANES_32;
+wire [31:0] k_tile_elems_raw = tile_true_ws_mode &&
+                                (k_tile_elems_capacity > ws_k_tile_elems_limit)
+    ? ws_k_tile_elems_limit
+    : k_tile_elems_capacity;
+wire [31:0] k_tile_elems = (k_tile_elems_raw == 32'd0) ? 32'd1 : k_tile_elems_raw;
+wire [31:0] k_tile_count_raw = (lk_k_dim + k_tile_elems - 32'd1) / k_tile_elems;
+wire [31:0] k_tile_count = (k_tile_count_raw == 32'd0) ? 32'd1 : k_tile_count_raw;
 // Packed tile streams pad each N/M tile's K dimension to a full SIMD group.
 // Internal tile-to-tile address strides must include that pad; k_tile offsets
 // still use tile_k_base because full k_tile_elems is SIMD-aligned.
-wire [31:0] k_dim_padded = (INT8_SIMD_LANES_32 <= 32'd1)
+wire [31:0] k_dim_padded_simd = (INT8_SIMD_LANES_32 <= 32'd1)
     ? lk_k_dim
     : (((lk_k_dim + INT8_SIMD_LANES_32 - 32'd1) / INT8_SIMD_LANES_32) * INT8_SIMD_LANES_32);
+wire [31:0] k_dim_padded = tile_true_ws_mode ? (k_tile_count * k_tile_elems)
+                                             : k_dim_padded_simd;
 wire [31:0] w_addr_pass1_offset = is_8x32 ? (k_dim_padded * {16'd0, half_vector_elem_bytes_w}) : 32'd0;
 wire [31:0] w_tile_stride_n = is_8x32
     ? (k_dim_padded * {16'd0, half_vector_elem_bytes_w} * 32'd2)
@@ -555,22 +596,12 @@ reg [4:0]  wb_row;  // tile-mode writeback row r within the current C tile
 reg [5:0]  bias_col; // tile-mode bias fetch column counter
 reg         bias_pending; // set when bias_start issued, cleared when done received
 reg         pass_idx; // 0 or 1 for 8x32 two-pass weight scheduling
-wire        is_8x32 = tile_mode && (lk_shape == 2'b11);
 assign pe_half_en = is_8x32 && pass_idx;
 // Scalar mode iterates individual C[i,j]; tile mode iterates one shape-sized C tile.
 wire [31:0] tile_m_tiles = tile_mode ? ((lk_m_dim + tile_shape_lanes_32 - 32'd1) / tile_shape_lanes_32) : lk_m_dim;
 wire [31:0] tile_n_tiles = tile_mode ? ((lk_n_dim + tile_shape_n_lanes_32 - 32'd1) / tile_shape_n_lanes_32) : lk_n_dim;
 wire [31:0] tile_iter_m_count = (tile_m_tiles == 32'd0) ? 32'd1 : tile_m_tiles;
 wire [31:0] tile_iter_n_count = (tile_n_tiles == 32'd0) ? 32'd1 : tile_n_tiles;
-wire [31:0] bytes_per_k_max = (bytes_per_k_w_32 > bytes_per_k_a_32)
-    ? bytes_per_k_w_32 : bytes_per_k_a_32;
-wire [31:0] k_tile_elems_raw = tile_mode
-    ? ((PPB_DEPTH_WORDS << 2) / bytes_per_k_max)
-    : lk_k_dim;
-wire [31:0] k_tile_elems = (k_tile_elems_raw == 32'd0) ? 32'd1 : k_tile_elems_raw;
-wire [31:0] k_tile_count_raw = (lk_k_dim + k_tile_elems - 32'd1) / k_tile_elems;
-wire [31:0] k_tile_count = (k_tile_count_raw == 32'd0) ? 32'd1 : k_tile_count_raw;
-
 assign tile_m_base = tile_mode ? (tile_i * tile_shape_lanes_32) : tile_i; // global M row of tile row 0
 assign tile_n_base = tile_mode ? (tile_j * tile_shape_n_lanes_32) : tile_j; // global N col of tile col 0
 assign tile_k_index = k_tile_idx;
@@ -589,6 +620,12 @@ wire [31:0] tile_active_rows_32 = !tile_mode ? 32'd1 :
 wire [31:0] tile_active_cols_32 = !tile_mode ? 32'd1 :
                                   (tile_col_rem >= tile_shape_n_lanes_32) ? tile_shape_n_lanes_32 :
                                   tile_col_rem;
+wire [31:0] tile_phys_cols_limit_32 = (lk_shape == 2'b00) ? 32'd4 :
+                                      (lk_shape == 2'b01) ? 32'd8 :
+                                                            32'd16;
+wire [31:0] tile_active_phys_cols_32 = !tile_mode ? 32'd1 :
+                                       (tile_col_rem >= tile_phys_cols_limit_32) ? tile_phys_cols_limit_32 :
+                                       tile_col_rem;
 
 assign tile_active_rows = !tile_mode ? 5'd1 : tile_active_rows_32[4:0];
 assign tile_active_cols = !tile_mode ? 6'd1 : tile_active_cols_32[5:0];
@@ -607,16 +644,18 @@ endgenerate
 // Packed INT8 SIMD: pad so the last lane block has a full SIMD group.
 // General: pad = vector_bytes * (SIMD_LANES - k_len mod SIMD_LANES) when
 // remainder non-zero.  For K=4/LANES=2 this gives 0; K=3/LANES=4 gives 1.
-wire [3:0] packed_k_rem = tile_mode ? (tile_k_len % {12'd0, INT8_SIMD_LANES}) : 4'd0;
+wire [15:0] tile_dma_k_len = tile_true_ws_mode ? k_tile_elems[15:0]
+                                                : tile_k_len;
+wire [3:0] packed_k_rem = tile_mode ? (tile_dma_k_len % {12'd0, INT8_SIMD_LANES}) : 4'd0;
 wire [15:0] packed_pad = tile_mode && (INT8_SIMD_LANES > 1) && (packed_k_rem != 4'd0)
     ? (bytes_per_k_w_8x32 * ({4'd0, INT8_SIMD_LANES} - {1'b0, packed_k_rem}))
     : 16'd0;
 wire [15:0] packed_pad_a = tile_mode && (INT8_SIMD_LANES > 1) && (packed_k_rem != 4'd0)
     ? (vector_elem_bytes_a * ({4'd0, INT8_SIMD_LANES} - {1'b0, packed_k_rem}))
     : 16'd0;
-wire [15:0] tile_len_raw_w = tile_k_len * (tile_mode ? bytes_per_k_w_8x32 : scalar_elem_bytes)
+wire [15:0] tile_len_raw_w = tile_dma_k_len * (tile_mode ? bytes_per_k_w_8x32 : scalar_elem_bytes)
                                + (tile_mode ? packed_pad : 16'd0);
-wire [15:0] tile_len_raw_a = tile_k_len * (tile_mode ? vector_elem_bytes_a : scalar_elem_bytes)
+wire [15:0] tile_len_raw_a = tile_dma_k_len * (tile_mode ? vector_elem_bytes_a : scalar_elem_bytes)
                               + (tile_mode ? packed_pad_a : 16'd0);
 wire [15:0] tile_len_w = tile_mode ? tile_len_raw_w
                                    : ((tile_len_raw_w + 16'd3) & 16'hfffc);
@@ -641,28 +680,59 @@ wire is_last_tile = (tile_i == tile_iter_m_count - 1) &&
 // Result DMA: scalar mode writes one word; tile mode writes one row burst.
 localparam [15:0] TILE_R_LEN = 16'd4;
 
-wire [15:0] tile_k_cycles = tile_mode
+wire [15:0] tile_k_cycles_actual = tile_mode
     ? ((tile_k_len + {12'd0, INT8_SIMD_LANES} - 16'd1) / {12'd0, INT8_SIMD_LANES})
     : tile_k_len;
-wire tile_direct_ws = tile_mode && !lk_fp16_mode && !lk_stat[0];
-// Direct WS has no array row-skew drain, but the PE's input/multiply stages
-// still need two enabled cycles before a pass transition or flush.
-wire [15:0] tile_compute_drain_cycles = tile_direct_ws ? 16'd2
-                                                        : (tile_active_rows_32[15:0] - 16'd1);
-wire [15:0] tile_compute_cycles = tile_k_cycles + tile_compute_drain_cycles;
+wire [15:0] tile_k_cycles_full = tile_mode
+    ? ((k_tile_elems[15:0] + {12'd0, INT8_SIMD_LANES} - 16'd1) / {12'd0, INT8_SIMD_LANES})
+    : tile_k_len;
+wire [15:0] tile_k_cycles = tile_true_ws_mode ? tile_k_cycles_full
+                                               : tile_k_cycles_actual;
+assign tile_k_groups = tile_k_cycles[4:0];
+wire tile_direct_ws = tile_mode && !lk_fp16_mode && !lk_stat[0] && !tile_true_ws_mode;
+wire tile_router_os = tile_mode && router_enable && !lk_fp16_mode && lk_stat[0];
+wire [15:0] tile_os_row_drain_cycles = os_weight_broadcast ? 16'd0
+                                                           : (tile_active_rows_32[15:0] - 16'd1);
+wire [15:0] tile_os_col_drain_cycles = os_act_systolic ? (tile_active_phys_cols_32[15:0] - 16'd1)
+                                                       : 16'd0;
+// True WS preloads W rows, swaps once, streams one A vector per output row,
+// then drains the registered psum chain to the bottom row.
+wire [15:0] tile_true_ws_a_start_cycle = tile_k_cycles + 16'd1;
+wire [15:0] tile_true_ws_a_end_cycle = tile_true_ws_a_start_cycle + tile_active_rows_32[15:0];
+wire [15:0] tile_true_ws_drain_cycles = (tile_shape_lanes_32[15:0] * 16'd3) + 16'd4;
+wire [15:0] tile_true_ws_compute_cycles = tile_true_ws_a_end_cycle + tile_true_ws_drain_cycles;
+wire [15:0] tile_compute_drain_cycles = tile_router_os ? 16'd0
+                                                         : (tile_direct_ws ? 16'd2
+                                                                           : (tile_os_row_drain_cycles +
+                                                                              tile_os_col_drain_cycles));
+wire [15:0] tile_compute_cycles = tile_true_ws_mode ? tile_true_ws_compute_cycles
+                                                    : (tile_k_cycles + tile_compute_drain_cycles);
 
 // Packed INT8 tile WS uses a direct feeder: W and A vectors are sent to the PE
 // grid in lockstep and each PE accumulates internally.  Do not promote WS to OS.
 wire tile_force_os = 1'b0;
 wire lk_stat0_eff = lk_stat[0];
 
-// vec_consume advances one packed A vector and one packed W vector for each
-// logical k. Extra cycles after K drain row-skewed activations through the array.
-assign vec_consume = tile_mode &&
-                      pe_en &&
-                      (state == S_OVERLAP_COMPUTE) &&
-                      ((lk_stat0_eff == 1'b1) || tile_direct_ws) &&
-                       (tile_k_cycle < tile_k_cycles);
+// vec_consume advances packed tile vectors. True WS consumes W during preload
+// and A during the row-stream phase; OS/direct-WS consume both in lockstep.
+wire legacy_vec_consume = tile_mode &&
+                          pe_en &&
+                          pe_array_ready &&
+                          (state == S_OVERLAP_COMPUTE) &&
+                          ((lk_stat0_eff == 1'b1) || tile_direct_ws) &&
+                          (tile_k_cycle < tile_k_cycles);
+wire true_ws_w_consume = tile_true_ws_mode &&
+                         pe_array_ready &&
+                         (state == S_OVERLAP_COMPUTE) &&
+                         (tile_k_cycle < tile_k_cycles);
+wire true_ws_a_consume = tile_true_ws_mode &&
+                         pe_array_ready &&
+                         (state == S_OVERLAP_COMPUTE) &&
+                         (tile_k_cycle >= tile_true_ws_a_start_cycle) &&
+                         (tile_k_cycle < tile_true_ws_a_end_cycle);
+assign vec_consume_w = tile_true_ws_mode ? true_ws_w_consume : legacy_vec_consume;
+assign vec_consume_a = tile_true_ws_mode ? true_ws_a_consume : legacy_vec_consume;
+assign vec_consume = vec_consume_w || vec_consume_a;
 
 // ---------------------------------------------------------------------------
 // DMA completion latches
@@ -711,6 +781,7 @@ end
 //         load/compute current K slice
 // ---------------------------------------------------------------------------
 wire k_tile_last = !tile_mode || (k_tile_idx + 32'd1 >= k_tile_count);
+assign tile_k_last = k_tile_last;
 wire cur_has_next_k = tile_mode && !k_tile_last;
 wire [31:0] next_mn_j = (tile_j + 1 < tile_iter_n_count) ? (tile_j + 1) : 32'd0;
 wire [31:0] next_mn_i = (tile_j + 1 < tile_iter_n_count) ? tile_i       : (tile_i + 1);
@@ -720,14 +791,16 @@ wire [31:0] seq1_j = cur_has_next_k ? tile_j               : next_mn_j;
 wire [31:0] seq1_i = cur_has_next_k ? tile_i               : next_mn_i;
 
 wire is_last_seq = is_last_tile && k_tile_last;
-wire can_prefetch_next = !is_last_seq && (!is_8x32 || pass_idx);
+wire can_prefetch_next = !is_last_seq && (!is_8x32 || pass_idx) && !tile_true_ws_mode;
 
 wire [31:0] seq1_k_base = tile_mode ? (seq1_k * k_tile_elems) : 32'd0;
 wire [31:0] seq1_k_rem = (lk_k_dim > seq1_k_base) ? (lk_k_dim - seq1_k_base) : 32'd0;
 wire [31:0] seq1_k_len_32 = tile_mode ?
                             ((seq1_k_rem > k_tile_elems) ? k_tile_elems : seq1_k_rem) :
                             lk_k_dim;
-wire [3:0] seq1_packed_k_rem = tile_mode ? (seq1_k_len_32 % {28'd0, INT8_SIMD_LANES}) : 4'd0;
+wire [31:0] seq1_dma_k_len_32 = tile_true_ws_mode ? k_tile_elems
+                                                   : seq1_k_len_32;
+wire [3:0] seq1_packed_k_rem = tile_mode ? (seq1_dma_k_len_32 % {28'd0, INT8_SIMD_LANES}) : 4'd0;
 wire [15:0] seq1_packed_pad = tile_mode && (INT8_SIMD_LANES > 1) && (seq1_packed_k_rem != 4'd0)
     ? (bytes_per_k_w_8x32 * ({4'd0, INT8_SIMD_LANES} - {1'b0, seq1_packed_k_rem}))
     : 16'd0;
@@ -735,11 +808,11 @@ wire [15:0] seq1_packed_pad_a = tile_mode && (INT8_SIMD_LANES > 1) && (seq1_pack
     ? (vector_elem_bytes_a * ({4'd0, INT8_SIMD_LANES} - {1'b0, seq1_packed_k_rem}))
     : 16'd0;
 wire [15:0] seq1_len_bytes_raw_w = tile_mode
-    ? (seq1_k_len_32[15:0] * bytes_per_k_w_8x32 + seq1_packed_pad)
-    : (seq1_k_len_32[15:0] * bytes_per_k_w_8x32);
+    ? (seq1_dma_k_len_32[15:0] * bytes_per_k_w_8x32 + seq1_packed_pad)
+    : (seq1_dma_k_len_32[15:0] * bytes_per_k_w_8x32);
 wire [15:0] seq1_len_bytes_raw_a = tile_mode
-    ? (seq1_k_len_32[15:0] * bytes_per_k_a + seq1_packed_pad_a)
-    : (seq1_k_len_32[15:0] * bytes_per_k_a);
+    ? (seq1_dma_k_len_32[15:0] * bytes_per_k_a + seq1_packed_pad_a)
+    : (seq1_dma_k_len_32[15:0] * bytes_per_k_a);
 wire [15:0] seq1_len_bytes_w = tile_mode ? seq1_len_bytes_raw_w
                                        : ((seq1_len_bytes_raw_w + 16'd3) & 16'hfffc);
 wire [15:0] seq1_len_bytes_a = tile_mode ? seq1_len_bytes_raw_a
@@ -1097,7 +1170,8 @@ always @(posedge clk) begin
             // =================================================================
             S_WARMUP_WAIT: begin
                 pe_stat        <= lk_stat[0];
-                pe_load_w      <= ((lk_stat[0] == 1'b0) && (!tile_mode || tile_direct_ws)) ? 1'b1 : 1'b0;
+                pe_load_w      <= ((lk_stat[0] == 1'b0) &&
+                                   (!tile_mode || tile_direct_ws || tile_true_ws_mode)) ? 1'b1 : 1'b0;
                 ws_consume_cnt <= 16'd0;
                 tile_k_cycle   <= 16'd0;
 
@@ -1196,7 +1270,7 @@ always @(posedge clk) begin
                     pe_load_w <= (ws_consume_cnt < lk_k_dim[15:0]) ? 1'b1 : 1'b0;
                     if (ws_consume_cnt < lk_k_dim[15:0] + 16'd2) begin
                         pe_en <= 1'b1;
-                        if (compute_ce) ws_consume_cnt <= ws_consume_cnt + 1;
+                        if (compute_fire) ws_consume_cnt <= ws_consume_cnt + 1;
                     end else begin
                         pe_en     <= 1'b0;
                         pe_load_w <= 1'b0;
@@ -1204,6 +1278,65 @@ always @(posedge clk) begin
                     end
 
                 end else begin
+                    if (tile_true_ws_mode) begin
+                        pe_load_w <= (tile_k_cycle + 16'd1 < tile_k_cycles);
+                        pe_swap_w <= (tile_k_cycle == tile_k_cycles);
+                        pe_en     <= (tile_k_cycle + 16'd1 >= tile_true_ws_a_start_cycle);
+
+                        if (compute_fire && (tile_k_cycle + 16'd1 >= tile_compute_cycles)) begin
+                            tile_k_cycle <= 16'd0;
+                            pe_en        <= 1'b0;
+                            pe_load_w    <= 1'b0;
+
+                            if (!k_tile_last) begin
+                                tile_i     <= seq1_i;
+                                tile_j     <= seq1_j;
+                                k_tile_idx <= seq1_k;
+                                pass_idx   <= 1'b0;
+
+                                dma_w_addr  <= pfetch_w_addr;
+                                dma_w_len   <= seq1_len_bytes_w;
+                                dma_a_addr  <= (lk_a_from_prev_ofm && tile_mode) ? lk_a_addr :
+                                               (lk_conv_im2col) ? lk_a_addr :
+                                               pfetch_a_addr;
+                                dma_a_len   <= seq1_len_bytes_a;
+                                dma_a_ofm_mode <= lk_a_from_prev_ofm && tile_mode;
+                                dma_a_im2col_mode <= lk_conv_im2col && !lk_a_from_prev_ofm;
+                                dma_a_ofm_stride <= lk_k_dim;
+                                dma_a_ofm_m_base <= seq1_m_base;
+                                dma_a_ofm_k_base <= seq1_k_base;
+                                dma_a_ofm_k_len <= seq1_k_len_32[15:0];
+                                dma_a_ofm_active_rows <= seq1_active_rows;
+                                dma_a_ofm_fp16_mode <= lk_dma_fp16_mode;
+                                dma_a_im2col_m_index <= seq1_m_base;
+                                dma_a_im2col_k_len <= lk_k_dim[15:0];
+                                dma_a_im2col_ih <= lk_conv_ih;
+                                dma_a_im2col_iw <= lk_conv_iw;
+                                dma_a_im2col_cin <= lk_conv_cin;
+                                dma_a_im2col_kh <= lk_conv_kh;
+                                dma_a_im2col_kw <= lk_conv_kw;
+                                dma_a_im2col_oh <= lk_conv_oh;
+                                dma_a_im2col_ow <= lk_conv_ow;
+                                dma_a_im2col_stride_h <= lk_conv_stride_h;
+                                dma_a_im2col_stride_w <= lk_conv_stride_w;
+                                dma_a_im2col_pad_h <= lk_conv_pad_h;
+                                dma_a_im2col_pad_w <= lk_conv_pad_w;
+                                dma_a_im2col_dilation_h <= lk_conv_dilation_h;
+                                dma_a_im2col_dilation_w <= lk_conv_dilation_w;
+                                dma_a_im2col_fp16_mode <= lk_dma_fp16_mode;
+                                dma_w_start <= 1'b1;
+                                dma_a_start <= 1'b1;
+                                dma_w_done_r <= 1'b0;
+                                dma_a_done_r <= 1'b0;
+                                dma_bias_done_r <= 1'b0;
+                                state <= S_WARMUP_LOAD;
+                            end else begin
+                                state <= S_DRAIN;
+                            end
+                        end else if (compute_fire) begin
+                            tile_k_cycle <= tile_k_cycle + 16'd1;
+                        end
+                    end else begin
                     // ─── Tile OS or packed direct-WS mode ───
                     pe_load_w <= tile_direct_ws && (tile_k_cycle < tile_k_cycles);
                     if (tile_mode) begin
@@ -1250,7 +1383,7 @@ always @(posedge clk) begin
                                 dma_a_done_r <= 1'b0;
                             end
                             tile_k_cycle <= 16'd0;
-                        end else if (compute_ce && (tile_k_cycle + 16'd1 >= tile_compute_cycles)) begin
+                        end else if (compute_fire && (tile_k_cycle + 16'd1 >= tile_compute_cycles)) begin
                     // Keep pe_en=1 so the PE pipeline drains completely
                     // before S_DRAIN asserts flush on the next cycle.
                     tile_k_cycle <= 16'd0;
@@ -1294,7 +1427,7 @@ always @(posedge clk) begin
                     end else begin
                         state <= S_DRAIN;
                     end
-                        end else if (compute_ce) begin
+                        end else if (compute_fire) begin
                             tile_k_cycle <= tile_k_cycle + 16'd1;
                         end
                     end else begin
@@ -1302,6 +1435,7 @@ always @(posedge clk) begin
                         if (w_ppb_empty && a_ppb_empty) begin
                             state <= S_DRAIN;
                         end
+                    end
                     end
                 end
             end
@@ -1313,7 +1447,7 @@ always @(posedge clk) begin
                 pe_en    <= 1'b1;
                 pe_flush <= 1'b1;
                 pe_load_w <= 1'b0;
-                if (compute_ce) state <= S_DRAIN2;
+                if (compute_fire) state <= S_DRAIN2;
             end
 
             // =================================================================
@@ -1322,7 +1456,7 @@ always @(posedge clk) begin
             S_DRAIN2: begin
                 pe_en    <= 1'b1;
                 pe_flush <= 1'b0;
-                if (compute_ce) state <= S_WRITE_BACK;
+                if (compute_fire) state <= S_WRITE_BACK;
             end
 
             // =================================================================
@@ -1397,8 +1531,50 @@ always @(posedge clk) begin
                         k_tile_idx <= seq1_k;
                         pass_idx   <= 1'b0;
 
-                        // Decide what to do based on prefetch status
-                        if (dma_load_done) begin
+                        // Decide what to do based on prefetch status. True WS
+                        // disables overlap prefetch because A's vector-lane
+                        // layout depends on the current K tile group count.
+                        if (tile_true_ws_mode) begin
+                            r_fifo_clear <= 1'b1;
+                            dma_w_addr  <= pfetch_w_addr;
+                            dma_w_len   <= seq1_len_bytes_w;
+                            dma_a_addr  <= (lk_a_from_prev_ofm && tile_mode) ? lk_a_addr :
+                                           (lk_conv_im2col) ? lk_a_addr :
+                                           pfetch_a_addr;
+                            dma_a_len   <= seq1_len_bytes_a;
+                            dma_a_ofm_mode <= lk_a_from_prev_ofm && tile_mode;
+                            dma_a_im2col_mode <= lk_conv_im2col && !lk_a_from_prev_ofm;
+                            dma_a_ofm_stride <= lk_k_dim;
+                            dma_a_ofm_m_base <= seq1_m_base;
+                            dma_a_ofm_k_base <= seq1_k_base;
+                            dma_a_ofm_k_len <= seq1_k_len_32[15:0];
+                            dma_a_ofm_active_rows <= seq1_active_rows;
+                            dma_a_ofm_fp16_mode <= lk_dma_fp16_mode;
+                            dma_a_im2col_m_index <= seq1_m_base;
+                            dma_a_im2col_k_len <= lk_k_dim[15:0];
+                            dma_a_im2col_ih <= lk_conv_ih;
+                            dma_a_im2col_iw <= lk_conv_iw;
+                            dma_a_im2col_cin <= lk_conv_cin;
+                            dma_a_im2col_kh <= lk_conv_kh;
+                            dma_a_im2col_kw <= lk_conv_kw;
+                            dma_a_im2col_oh <= lk_conv_oh;
+                            dma_a_im2col_ow <= lk_conv_ow;
+                            dma_a_im2col_stride_h <= lk_conv_stride_h;
+                            dma_a_im2col_stride_w <= lk_conv_stride_w;
+                            dma_a_im2col_pad_h <= lk_conv_pad_h;
+                            dma_a_im2col_pad_w <= lk_conv_pad_w;
+                            dma_a_im2col_dilation_h <= lk_conv_dilation_h;
+                            dma_a_im2col_dilation_w <= lk_conv_dilation_w;
+                            dma_a_im2col_fp16_mode <= lk_dma_fp16_mode;
+                            dma_w_start <= 1'b1;
+                            dma_a_start <= 1'b1;
+                            ws_consume_cnt <= 16'd0;
+                            tile_k_cycle   <= 16'd0;
+                            dma_w_done_r   <= 1'b0;
+                            dma_a_done_r   <= 1'b0;
+                            dma_bias_done_r <= 1'b0;
+                            state <= S_WARMUP_LOAD;
+                        end else if (dma_load_done) begin
                             // Prefetch already finished — swap banks
                             w_ppb_swap   <= 1'b1;
                             a_ppb_swap   <= 1'b1;

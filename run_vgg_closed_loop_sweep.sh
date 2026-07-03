@@ -3,12 +3,12 @@
 # and ping-pong buffer depth.
 #
 # Usage examples:
-#   ./run_vgg_closed_loop_sweep.sh --lanes 4 --num-cores 1,2
-#       → lanes=4, all shapes×flows×cores(1,2)
+#   ./run_vgg_closed_loop_sweep.sh --lanes 8 --num-cores 1,2
+#       → lanes=8, all shapes×flows×cores(1,2)
 #   ./run_vgg_closed_loop_sweep.sh --num-cores 2 --shapes 16x16 --flows os,ws
-#       → cores=2, shapes=16x16, both flows, default lanes=4
-#   ./run_vgg_closed_loop_sweep.sh --clk-divs 0,1,2 --ppb-depths 1024,4096,8192 --shapes 16x16 --lanes 4
-#       → DFS + buffer-depth sweep on 16x16, all flows, cores=1, lanes=4
+#       → cores=2, shapes=16x16, both flows, default lanes=8
+#   ./run_vgg_closed_loop_sweep.sh --clk-divs 0,1,2 --ppb-depths 1024,4096,8192 --shapes 16x16 --lanes 8
+#       → DFS + buffer-depth sweep on 16x16, all flows, cores=1, lanes=8
 
 set -euo pipefail
 
@@ -16,7 +16,7 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 SHAPES=(4x4 8x8 16x16 8x32)
 FLOWS=(os ws)
-LANES_LIST=(4)
+LANES_LIST=(8)
 NUM_CORES_LIST=(1)
 CLK_DIVS=(0)
 PPB_DEPTHS=(8192)
@@ -35,7 +35,7 @@ Options:
   --img-idx <idx>         Run the sweep on a CIFAR-10 index (default: 0).
   --shapes <csv>          Tile shapes.      Default: 4x4,8x8,16x16,8x32
   --flows <csv>           Dataflows.        Default: os,ws
-  --lanes <csv>           INT8 SIMD lanes.  Default: 4
+  --lanes <csv>           INT8 SIMD lanes.  Default: 8
   --num-cores <csv>       Number of cores (1 uses single-core runner). Default: 1
   --clk-divs <csv>        CLK_DIV divisors. Default: 0
   --ppb-depths <csv>      Ping-pong buffer depth in 32-bit words. Default: 8192
@@ -81,7 +81,7 @@ validate_lanes() {
     local lanes
     for lanes in "${LANES_LIST[@]}"; do
         case "$lanes" in
-            1|2|4) ;;
+            1|2|4|8) ;;
             *) echo "Invalid lanes: $lanes" >&2; exit 2 ;;
         esac
     done

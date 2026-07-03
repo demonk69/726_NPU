@@ -59,6 +59,9 @@ module tb_reconfig_pe_acc_init;
         .acc_init_en    (acc_init_en),
         .half_en        (1'b0),
         .array_ce       (array_ce),
+        .router_enable  (1'b0),
+        .os_act_systolic(1'b0),
+        .os_weight_broadcast(1'b0),
         .row_ce         (row_ce),
         .col_ce         (col_ce),
         .w_in           (w_in),
@@ -69,7 +72,9 @@ module tb_reconfig_pe_acc_init;
         .acc_out        (acc_out),
         .valid_out      (valid_out),
         .ws_load_row_out(ws_load_row_out),
-        .pe_active      (pe_active)
+        .pe_active      (pe_active),
+        .router_ready   (),
+        .router_overflow()
     );
 
     initial clk = 1'b0;
@@ -256,14 +261,14 @@ module tb_reconfig_pe_acc_init;
         act_in = {PHY_ROWS*DATA_W{1'b0}};
         repeat (3) tick();
 
-        if ($signed(dut.gen_row[0].gen_col[0].u_pe.os_acc) !== 32'sd16) begin
+        if ($signed(dut.gen_direct_pe_grid.gen_row[0].gen_col[0].u_pe.os_acc) !== 32'sd16) begin
             $display("[FAIL] CE active row PE(0,0) os_acc=%0d expected=16",
-                     $signed(dut.gen_row[0].gen_col[0].u_pe.os_acc));
+                     $signed(dut.gen_direct_pe_grid.gen_row[0].gen_col[0].u_pe.os_acc));
             errors = errors + 1;
         end
-        if (dut.gen_row[1].gen_col[0].u_pe.os_acc !== 32'd0) begin
+        if (dut.gen_direct_pe_grid.gen_row[1].gen_col[0].u_pe.os_acc !== 32'd0) begin
             $display("[FAIL] CE disabled row PE(1,0) os_acc=%0d expected=0",
-                     $signed(dut.gen_row[1].gen_col[0].u_pe.os_acc));
+                     $signed(dut.gen_direct_pe_grid.gen_row[1].gen_col[0].u_pe.os_acc));
             errors = errors + 1;
         end
 

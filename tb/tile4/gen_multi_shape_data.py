@@ -24,6 +24,11 @@ SHAPE_CONFIGS = {
 PPB_DEPTH = 64       # PPBuf word depth
 SIMD_LANES = 4
 
+def data_w_for_lanes(lanes):
+    if lanes <= 1:
+        return 16
+    return lanes * 8
+
 def align_up(v, align):
     return ((v + align - 1) // align) * align
 
@@ -35,7 +40,7 @@ def estimate_timeout_cycles(M, K, N, grid_rows, grid_cols, kt_elems):
     per_tile_budget = kt_elems + grid_rows + grid_cols + 256
     return max(1_000_000, tile_work * per_tile_budget + M * N * 4 + 100_000)
 
-def compute_k_tile_elems(shape_cfg, is_8x32_half=False):
+def compute_k_tile_elems(shape_cfg, is_8x32_half=False, flow="os"):
     """Max K elements per k_tile matching controller logic.
        For 8x32 half-pass, W uses only 16 columns."""
     rows = shape_cfg["grid_rows"]
@@ -43,7 +48,10 @@ def compute_k_tile_elems(shape_cfg, is_8x32_half=False):
     bytes_a = rows * 1  # INT8
     bytes_w = (16 if is_8x32_half else cols) * 1
     max_bytes = max(bytes_a, bytes_w)
-    return max(1, (PPB_DEPTH * 4) // max_bytes)
+    capacity = max(1, (PPB_DEPTH * 4) // max_bytes)
+    if flow == "ws" and not is_8x32_half:
+        return max(1, min(capacity, rows * SIMD_LANES))
+    return capacity
 
 def packed_pad_words(elem_bytes_per_k, k_len):
     """Zero-word pad count when k_len not multiple of SIMD_LANES."""
@@ -104,6 +112,60 @@ def pack_tile_w_ksplit(W, K, N, grid_cols, kt_elems):
             for _ in range(pw):
                 packed.append(0)
             kpos += k_len
+    return packed
+
+def pack_tile_w_ws_ksplit(W, K, N, grid_cols, kt_elems):
+    """Pack W for true WS. Each K tile is padded to kt_elems so RTL can
+       preload a fixed number of K/SIMD groups per tile."""
+    words_per_k = (grid_cols + 3) // 4
+    packed = []
+    num_n = (N + grid_cols - 1) // grid_cols
+    for nt in range(num_n):
+        n0 = nt * grid_cols
+        kpos = 0
+        while kpos < K:
+            for k in range(kpos, kpos + kt_elems):
+                for w in range(words_per_k):
+                    word = 0
+                    for c in range(4):
+                        lane = w * 4 + c
+                        if lane < grid_cols:
+                            nc = n0 + lane
+                            val = W[k][nc] if (k < K and nc < N) else 0
+                            word |= (val & 0xFF) << (c * 8)
+                    packed.append(word)
+            kpos += kt_elems
+    return packed
+
+def pack_tile_a_ws_ksplit(A, M, K, grid_rows, kt_elems):
+    """Pack A for true WS.
+
+       One PPBuf vector read corresponds to one output M row. Vector lane g is
+       the g-th K/SIMD group, and bytes within that lane are SIMD K elements.
+    """
+    groups = (kt_elems + SIMD_LANES - 1) // SIMD_LANES
+    bytes_per_m_row = align_up(groups * SIMD_LANES, 4)
+    words_per_m_row = bytes_per_m_row // 4
+    packed = []
+    num_m = (M + grid_rows - 1) // grid_rows
+    for mt in range(num_m):
+        m0 = mt * grid_rows
+        kpos = 0
+        while kpos < K:
+            for r in range(grid_rows):
+                mr = m0 + r
+                for word_idx in range(words_per_m_row):
+                    word = 0
+                    for b in range(4):
+                        linear = word_idx * 4 + b
+                        if linear < groups * SIMD_LANES:
+                            group = linear % groups
+                            simd = linear // groups
+                            k = kpos + group * SIMD_LANES + simd
+                            val = A[mr][k] if (mr < M and k < K) else 0
+                            word |= (val & 0xFF) << (b * 8)
+                    packed.append(word)
+            kpos += kt_elems
     return packed
 
 def gen_golden(A, W, M, K, N):
@@ -298,7 +360,7 @@ def main():
     parser.add_argument("--M", type=int, required=True)
     parser.add_argument("--K", type=int, required=True)
     parser.add_argument("--N", type=int, required=True)
-    parser.add_argument("--lanes", type=int, choices=[1, 2, 4], default=4)
+    parser.add_argument("--lanes", type=int, choices=[1, 2, 4, 8], default=8)
     parser.add_argument("--out-dir", default=".")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--name", default=None)
@@ -311,19 +373,27 @@ def main():
     parser.add_argument("--quant-round", action="store_true")
     parser.add_argument("--perf-only", action="store_true", help="Skip golden C generation/checking for cycle-only runs")
     parser.add_argument("--strict-aw", action="store_true", help="Fail if observed result AW bursts differ from the model")
+    parser.add_argument("--router", action="store_true", help="Set ARR_CFG[6] for router-mesh tile smoke")
+    parser.add_argument("--arr-cfg-extra", type=lambda x: int(x, 0), default=0,
+                        help="OR additional bits into generated ARR_CFG")
     parser.add_argument("--timeout-cycles", type=int, default=None, help="Override testbench global timeout cycles")
     parser.add_argument("--wait-timeout", type=int, default=None, help="Override AXI-Lite status poll timeout")
     args = parser.parse_args()
     SIMD_LANES = args.lanes
 
+    if args.router and args.flow != "os":
+        parser.error("--router top-level currently supports only OS flow")
+
     cfg = SHAPE_CONFIGS[args.shape]
     grid_rows = cfg["grid_rows"]
     grid_cols = cfg["grid_cols"]
-    kt_elems = compute_k_tile_elems(cfg, is_8x32_half=(args.shape == "8x32"))
+    kt_elems = compute_k_tile_elems(cfg,
+                                    is_8x32_half=(args.shape == "8x32"),
+                                    flow=args.flow)
     M = args.M
     K = args.K
     N = args.N
-    data_w = 32 if SIMD_LANES == 4 else 16
+    data_w = data_w_for_lanes(SIMD_LANES)
 
     case_name = args.name or f"{args.shape}_M{M}_K{K}_N{N}"
     out_dir = Path(args.out_dir) / case_name
@@ -374,10 +444,14 @@ def main():
     # Effective tile lanes for A PPBuf = shape_tile_lanes(shape)
     # 8x32: 16, 16x16: 16, 8x8: 8, 4x4: 4
     a_eff_lanes = 16 if args.shape == "8x32" else grid_rows
-    a_tile = pack_tile_a_ksplit(A, M, K, grid_rows, kt_elems, a_eff_lanes)
+    if args.flow == "ws" and args.shape != "8x32":
+        a_tile = pack_tile_a_ws_ksplit(A, M, K, grid_rows, kt_elems)
+        w_tile = pack_tile_w_ws_ksplit(W, K, N, grid_cols, kt_elems)
+    else:
+        a_tile = pack_tile_a_ksplit(A, M, K, grid_rows, kt_elems, a_eff_lanes)
     if args.shape == "8x32":
         w_tile = pack_tile_w_8x32(W, K, N, kt_elems)
-    else:
+    elif not (args.flow == "ws" and args.shape != "8x32"):
         w_tile = pack_tile_w_ksplit(W, K, N, grid_cols, kt_elems)
 
     # DRAM layout is packed dynamically so large perf-only cases do not
@@ -443,7 +517,8 @@ def main():
             f.write(f"`define W_ADDR2 32'h{W_ADDR2:08X}\n")
         f.write(f"`define A_ADDR 32'h{A_BASE:08X}\n")
         f.write(f"`define R_ADDR 32'h{R_BASE:08X}\n")
-        f.write(f"`define ARR_CFG 32'h{0x80:02X}\n")
+        arr_cfg = 0x80 | (0x40 if args.router else 0x00) | (args.arr_cfg_extra & 0xFF)
+        f.write(f"`define ARR_CFG 32'h{arr_cfg:02X}\n")
         f.write(f"`define CFG_SHAPE_VAL {cfg['cfg_shape']}\n")
         f.write(f"`define GRID_COLS_VAL {grid_cols}\n")
         # Compute exact AW count: each tile row writes one or more bursts,

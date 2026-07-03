@@ -20,11 +20,12 @@ module soc_mc_top #(
     parameter NUM_CORES      = 2,
     parameter NPU_ROWS       = 4,
     parameter NPU_COLS       = 4,
-    parameter NPU_DATA_W     = 32,
+    parameter NPU_DATA_W     = 64,
     parameter NPU_ACC_W      = 32,
     parameter NPU_PPB_DEPTH  = 64,
     parameter NPU_PPB_THRESH = 16,
-    parameter NPU_INT8_SIMD_LANES = 4
+    parameter NPU_INT8_SIMD_LANES = (NPU_DATA_W >= 64) ? 8 : ((NPU_DATA_W >= 32) ? 4 : 2),
+    parameter NPU_USE_ROUTER_MESH = 0
 )(
     input  wire        clk,
     input  wire        rst_n
@@ -257,7 +258,8 @@ npu_mc_top #(
     .PPB_THRESH      (NPU_PPB_THRESH),
     .INT8_SIMD_LANES (NPU_INT8_SIMD_LANES),
     .FP16_ENABLE     (0),
-    .PPB_SCALAR_READ_ENABLE(1)
+    .PPB_SCALAR_READ_ENABLE(1),
+    .USE_ROUTER_MESH (NPU_USE_ROUTER_MESH)
 ) u_npu_mc (
     .sys_clk        (clk),
     .sys_rst_n      (rst_n),

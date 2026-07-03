@@ -42,12 +42,16 @@ SHAPE_CONFIGS = {
     "8x32": {"cfg_shape": 0x3, "tile_rows": 8, "tile_cols": 32},
 }
 DEFAULT_SHAPE = "16x16"
+TRUE_WS_FLOW = False
 
 
-def shape_kt_elems(tile_rows, tile_cols):
+def shape_kt_elems(tile_rows, tile_cols, true_ws=False):
     # 8x32 consumes the 32 logical columns as two 16-column physical passes.
     w_lanes = 16 if (tile_rows, tile_cols) == (8, 32) else tile_cols
-    return (PPB_DEPTH * 4) // max(tile_rows, w_lanes)
+    capacity = (PPB_DEPTH * 4) // max(tile_rows, w_lanes)
+    if true_ws:
+        return max(1, min(capacity, tile_rows * SIMD))
+    return capacity
 
 
 TR = SHAPE_CONFIGS[DEFAULT_SHAPE]["tile_rows"]
@@ -114,6 +118,12 @@ def pack4(values):
     for lane, value in enumerate(values):
         word |= (int(value) & 0xFF) << (lane * 8)
     return word & 0xFFFFFFFF
+
+
+def npu_data_w_for_lanes(lanes):
+    if lanes <= 1:
+        return 16
+    return lanes * 8
 
 
 def write_hex(path, words):
@@ -190,26 +200,27 @@ def pack_weight_tile(qweight, n_base, n_count, k_dim):
     out = []
     kpos = 0
     while kpos < k_dim:
-        k_len = min(k_dim - kpos, KT_ELEMS)
+        k_len = KT_ELEMS if TRUE_WS_FLOW else min(k_dim - kpos, KT_ELEMS)
         for k_rel in range(k_len):
             k_index = kpos + k_rel
-            chan = k_index // (kh * kw)
-            rem = k_index % (kh * kw)
-            ker_h = rem // kw
-            ker_w = rem % kw
             for group in range((n_count + WORD_INT8_LANES - 1) // WORD_INT8_LANES):
                 vals = []
                 for lane in range(WORD_INT8_LANES):
                     out_c = n_base + group * WORD_INT8_LANES + lane
-                    if group * WORD_INT8_LANES + lane < n_count:
+                    if k_index < k_dim and group * WORD_INT8_LANES + lane < n_count:
+                        chan = k_index // (kh * kw)
+                        rem = k_index % (kh * kw)
+                        ker_h = rem // kw
+                        ker_w = rem % kw
                         vals.append(int(w_int[out_c, chan, ker_h, ker_w].item()))
                     else:
                         vals.append(0)
                 out.append(pack4(vals))
-        padded_k = ((k_len + SIMD - 1) // SIMD) * SIMD
-        words_per_k = (n_count + WORD_INT8_LANES - 1) // WORD_INT8_LANES
-        for _ in range((padded_k - k_len) * words_per_k):
-            out.append(0)
+        if not TRUE_WS_FLOW:
+            padded_k = ((k_len + SIMD - 1) // SIMD) * SIMD
+            words_per_k = (n_count + WORD_INT8_LANES - 1) // WORD_INT8_LANES
+            for _ in range((padded_k - k_len) * words_per_k):
+                out.append(0)
         kpos += k_len
     return out
 
@@ -425,6 +436,99 @@ def emit_pack_group_padded(a):
     emit_load_u32_unaligned(a)
 
 
+def emit_pack_a_true_ws(a):
+    """Pack A_WORK_SHARED for true WS.
+
+    Layout per k-tile:
+      for output row r:
+        byte[simd * TR + group] = A[m_base+r, k_tile + group*SIMD + simd]
+    The RTL reads each row as one A vector whose lanes are K/SIMD groups.
+    """
+    if KT_ELEMS & (KT_ELEMS - 1):
+        raise RuntimeError(f"true WS KT_ELEMS must be a power of two, got {KT_ELEMS}")
+    kt_shift = KT_ELEMS.bit_length() - 1
+    tile_bytes = TR * KT_ELEMS
+    tile_words = tile_bytes // 4
+
+    zero_loop = a.unique("ws_zero_loop")
+    zero_done = a.unique("ws_zero_done")
+    c_loop = a.unique("ws_pack_c_loop")
+    kh_loop = a.unique("ws_pack_kh_loop")
+    kw_loop = a.unique("ws_pack_kw_loop")
+    no_group_inc = a.unique("ws_no_group_inc")
+    no_tile_inc = a.unique("ws_no_tile_inc")
+
+    # Clear the full padded A tile buffer: ceil(K/KT_ELEMS) * TR * KT_ELEMS bytes.
+    a.li("gp", A_WORK_SHARED)
+    a.emit(ADDI("t0", "s9", KT_ELEMS - 1))
+    a.emit(SRLI("t0", "t0", kt_shift))
+    a.li("t1", tile_words)
+    a.emit(MUL("t0", "t0", "t1"))
+    a.branch("beq", "t0", "zero", zero_done)
+    a.emit(ADD("t1", "gp", "zero"))
+    a.label(zero_loop)
+    a.emit(SW("zero", "t1", 0))
+    a.emit(ADDI("t1", "t1", 4))
+    a.emit(ADDI("t0", "t0", -1))
+    a.branch("bne", "t0", "zero", zero_loop)
+    a.label(zero_done)
+
+    a.li("gp", A_WORK_SHARED)          # current k-tile destination base
+    a.li("a5", 0)                      # K/SIMD group within current k-tile
+    a.li("a0", 0)                      # SIMD byte index within group
+    a.label(c_loop)
+    a.li("a7", 0)                      # kh
+    a.label(kh_loop)
+    a.li("t6", 0)                      # kw
+    a.label(kw_loop)
+
+    # offset = simd * TR + group
+    a.li("t1", TR)
+    a.emit(MUL("t5", "a0", "t1"))
+    a.emit(ADD("t5", "t5", "a5"))
+
+    for row in range(TR):
+        a.li("t1", row)
+        a.emit(ADD("t1", "t1", "s10"))    # m = m_base + row
+        a.emit(SRL("t2", "t1", "a4"))     # oh = m >> ow_shift
+        a.emit(ADD("t4", "t1", "zero"))
+        a.emit(AND("t4", "t4", "t3"))     # ow = m & ow_mask
+        a.emit(ADD("t2", "t2", "a7"))     # padded row = oh + kh
+        a.emit(MUL("t2", "t2", "tp"))     # row byte offset
+        a.emit(ADD("t4", "t4", "t6"))     # padded col = ow + kw
+        a.emit(ADD("t2", "t2", "t4"))
+        a.emit(ADD("t2", "t2", "a2"))     # input byte address
+        a.emit(LBU("t0", "t2", 0))
+        a.li("t4", row * KT_ELEMS)
+        a.emit(ADD("t4", "gp", "t4"))
+        a.emit(ADD("t4", "t4", "t5"))     # output byte address
+        a.emit(SB("t0", "t4", 0))
+
+    # Advance natural K order. When group wraps, move to the next padded k-tile.
+    a.emit(ADDI("a0", "a0", 1))
+    a.li("t1", SIMD)
+    a.branch("bne", "a0", "t1", no_group_inc)
+    a.li("a0", 0)
+    a.emit(ADDI("a5", "a5", 1))
+    a.li("t1", TR)
+    a.branch("bne", "a5", "t1", no_tile_inc)
+    a.li("a5", 0)
+    a.li("t1", tile_bytes)
+    a.emit(ADD("gp", "gp", "t1"))
+    a.label(no_tile_inc)
+    a.label(no_group_inc)
+
+    a.emit(ADDI("t6", "t6", 1))
+    a.li("t1", 3)
+    a.branch("bne", "t6", "t1", kw_loop)
+    a.emit(ADDI("a7", "a7", 1))
+    a.li("t1", 3)
+    a.branch("bne", "a7", "t1", kh_loop)
+    a.emit(ADD("a2", "a2", "s11"))
+    a.emit(ADDI("a6", "a6", -1))
+    a.branch("bne", "a6", "zero", c_loop)
+
+
 def emit_requant_nonnegative(a):
     relu_ok = a.unique("relu_ok")
     clamp = a.unique("clamp")
@@ -484,31 +588,34 @@ def emit_run_conv_layer(a):
     a.emit(LW("a6", "s1", 32))     # Cin remaining
     a.emit(ADD("a2", "s2", "zero"))
 
-    a.label("pack_c_loop")
-    a.li("a7", 0)                  # kh
-    a.label("pack_kh_loop")
-    a.li("t6", 0)                  # kw
-    a.label("pack_kw_loop")
-    a.li("a5", 0)                  # lane group
-    a.label("pack_group_loop")
-    emit_pack_group_padded(a)
-    a.emit(SW("t0", "gp", 0))
-    a.emit(ADDI("gp", "gp", 4))
-    a.emit(ADDI("a5", "a5", 1))
-    a.li("t1", TR // WORD_INT8_LANES)
-    a.branch("bne", "a5", "t1", "pack_group_loop")
-    for _ in range((A_PACK_LANES - TR) // WORD_INT8_LANES):
-        a.emit(SW("zero", "gp", 0))
+    if TRUE_WS_FLOW:
+        emit_pack_a_true_ws(a)
+    else:
+        a.label("pack_c_loop")
+        a.li("a7", 0)                  # kh
+        a.label("pack_kh_loop")
+        a.li("t6", 0)                  # kw
+        a.label("pack_kw_loop")
+        a.li("a5", 0)                  # lane group
+        a.label("pack_group_loop")
+        emit_pack_group_padded(a)
+        a.emit(SW("t0", "gp", 0))
         a.emit(ADDI("gp", "gp", 4))
-    a.emit(ADDI("t6", "t6", 1))
-    a.li("t1", 3)
-    a.branch("bne", "t6", "t1", "pack_kw_loop")
-    a.emit(ADDI("a7", "a7", 1))
-    a.li("t1", 3)
-    a.branch("bne", "a7", "t1", "pack_kh_loop")
-    a.emit(ADD("a2", "a2", "s11"))
-    a.emit(ADDI("a6", "a6", -1))
-    a.branch("bne", "a6", "zero", "pack_c_loop")
+        a.emit(ADDI("a5", "a5", 1))
+        a.li("t1", TR // WORD_INT8_LANES)
+        a.branch("bne", "a5", "t1", "pack_group_loop")
+        for _ in range((A_PACK_LANES - TR) // WORD_INT8_LANES):
+            a.emit(SW("zero", "gp", 0))
+            a.emit(ADDI("gp", "gp", 4))
+        a.emit(ADDI("t6", "t6", 1))
+        a.li("t1", 3)
+        a.branch("bne", "t6", "t1", "pack_kw_loop")
+        a.emit(ADDI("a7", "a7", 1))
+        a.li("t1", 3)
+        a.branch("bne", "a7", "t1", "pack_kh_loop")
+        a.emit(ADD("a2", "a2", "s11"))
+        a.emit(ADDI("a6", "a6", -1))
+        a.branch("bne", "a6", "zero", "pack_c_loop")
 
     a.li("s11", 0)                 # n_base
     a.emit(LW("s4", "s1", 8))      # reset W ptr
@@ -637,31 +744,34 @@ def emit_run_conv_layer_mc(a):
     a.emit(LW("a6", "s1", 32))
     a.emit(ADD("a2", "s2", "zero"))
 
-    a.label("mc_pack_c_loop")
-    a.li("a7", 0)
-    a.label("mc_pack_kh_loop")
-    a.li("t6", 0)
-    a.label("mc_pack_kw_loop")
-    a.li("a5", 0)
-    a.label("mc_pack_group_loop")
-    emit_pack_group_padded(a)
-    a.emit(SW("t0", "gp", 0))
-    a.emit(ADDI("gp", "gp", 4))
-    a.emit(ADDI("a5", "a5", 1))
-    a.li("t1", TR // WORD_INT8_LANES)
-    a.branch("bne", "a5", "t1", "mc_pack_group_loop")
-    for _ in range((A_PACK_LANES - TR) // WORD_INT8_LANES):
-        a.emit(SW("zero", "gp", 0))
+    if TRUE_WS_FLOW:
+        emit_pack_a_true_ws(a)
+    else:
+        a.label("mc_pack_c_loop")
+        a.li("a7", 0)
+        a.label("mc_pack_kh_loop")
+        a.li("t6", 0)
+        a.label("mc_pack_kw_loop")
+        a.li("a5", 0)
+        a.label("mc_pack_group_loop")
+        emit_pack_group_padded(a)
+        a.emit(SW("t0", "gp", 0))
         a.emit(ADDI("gp", "gp", 4))
-    a.emit(ADDI("t6", "t6", 1))
-    a.li("t1", 3)
-    a.branch("bne", "t6", "t1", "mc_pack_kw_loop")
-    a.emit(ADDI("a7", "a7", 1))
-    a.li("t1", 3)
-    a.branch("bne", "a7", "t1", "mc_pack_kh_loop")
-    a.emit(ADD("a2", "a2", "s11"))
-    a.emit(ADDI("a6", "a6", -1))
-    a.branch("bne", "a6", "zero", "mc_pack_c_loop")
+        a.emit(ADDI("a5", "a5", 1))
+        a.li("t1", TR // WORD_INT8_LANES)
+        a.branch("bne", "a5", "t1", "mc_pack_group_loop")
+        for _ in range((A_PACK_LANES - TR) // WORD_INT8_LANES):
+            a.emit(SW("zero", "gp", 0))
+            a.emit(ADDI("gp", "gp", 4))
+        a.emit(ADDI("t6", "t6", 1))
+        a.li("t1", 3)
+        a.branch("bne", "t6", "t1", "mc_pack_kw_loop")
+        a.emit(ADDI("a7", "a7", 1))
+        a.li("t1", 3)
+        a.branch("bne", "a7", "t1", "mc_pack_kh_loop")
+        a.emit(ADD("a2", "a2", "s11"))
+        a.emit(ADDI("a6", "a6", -1))
+        a.branch("bne", "a6", "zero", "mc_pack_c_loop")
 
     a.emit(LW("s4", "s1", 8))
     a.li("s11", 0)  # n_tile index
@@ -1011,7 +1121,7 @@ def emit_firmware(conv_descs, pool_descs, cls_w_base, cls_b_base, expected_label
 
 
 def generate(args):
-    global TR, TC, CFG_SHAPE, KT_ELEMS, A_PACK_LANES, CTRL_BIAS_TILE, SIMD, NUM_CORES, CLK_DIV_VAL, PPB_DEPTH
+    global TR, TC, CFG_SHAPE, KT_ELEMS, A_PACK_LANES, CTRL_BIAS_TILE, SIMD, NUM_CORES, CLK_DIV_VAL, PPB_DEPTH, TRUE_WS_FLOW
 
     NUM_CORES = args.num_cores
     CLK_DIV_VAL = args.clk_div
@@ -1024,7 +1134,8 @@ def generate(args):
     TR = shape["tile_rows"]
     TC = shape["tile_cols"]
     CFG_SHAPE = shape["cfg_shape"]
-    KT_ELEMS = shape_kt_elems(TR, TC)
+    TRUE_WS_FLOW = args.flow == "ws" and (TR, TC) != (8, 32)
+    KT_ELEMS = shape_kt_elems(TR, TC, TRUE_WS_FLOW)
     A_PACK_LANES = 16 if (TR, TC) == (8, 32) else TR
     CTRL_BIAS_TILE = CTRL_BIAS_TILE_WS if args.flow == "ws" else CTRL_BIAS_TILE_OS
 
@@ -1234,7 +1345,7 @@ def generate(args):
         f.write(f'`define VGG_CLOSED_SHAPE "{args.shape}"\n')
         f.write(f'`define VGG_CLOSED_FLOW "{args.flow}"\n')
         f.write(f'`define VGG_CLOSED_INT8_SIMD_LANES {args.lanes}\n')
-        f.write(f'`define VGG_CLOSED_NPU_DATA_W {32 if args.lanes == 4 else 16}\n')
+        f.write(f'`define VGG_CLOSED_NPU_DATA_W {npu_data_w_for_lanes(args.lanes)}\n')
         f.write(f'`define VGG_CLOSED_NUM_CORES {NUM_CORES}\n')
         f.write(f'`define VGG_CLOSED_PPB_DEPTH {PPB_DEPTH}\n')
 
@@ -1249,7 +1360,7 @@ def generate(args):
         "shape": args.shape,
         "flow": args.flow,
         "int8_simd_lanes": args.lanes,
-        "npu_data_w": 32 if args.lanes == 4 else 16,
+        "npu_data_w": npu_data_w_for_lanes(args.lanes),
         "ppb_depth": PPB_DEPTH,
         "tile_rows": TR,
         "tile_cols": TC,
@@ -1285,8 +1396,8 @@ def main():
                         help="NPU tile shape: 4x4, 8x8, 16x16, or 8x32")
     parser.add_argument("--flow", choices=("os", "ws"), default="os",
                         help="Tile dataflow mode for NPU conv GEMMs")
-    parser.add_argument("--lanes", type=int, choices=(1, 2, 4), default=4,
-                        help="INT8 SIMD lanes per PE: 1, 2, or 4")
+    parser.add_argument("--lanes", type=int, choices=(1, 2, 4, 8), default=8,
+                        help="INT8 SIMD lanes per PE: 1, 2, 4, or 8")
     parser.add_argument("--timeout-cycles", type=int, default=500000000)
     parser.add_argument("--num-cores", type=int, default=1, choices=(1, 2, 4),
                         help="Number of NPU cores: 1, 2, or 4")

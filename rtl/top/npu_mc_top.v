@@ -14,14 +14,15 @@ module npu_mc_top #(
     parameter NUM_CORES       = 2,
     parameter PHY_ROWS        = 16,
     parameter PHY_COLS        = 16,
-    parameter DATA_W          = 32,
+    parameter DATA_W          = 64,
     parameter ACC_W           = 32,
     parameter PPB_DEPTH       = 64,
     parameter PPB_THRESH      = 16,
-    parameter INT8_SIMD_LANES = 4,
+    parameter INT8_SIMD_LANES = (DATA_W >= 64) ? 8 : ((DATA_W >= 32) ? 4 : 2),
     parameter PERF_ENABLE_DERIVED = 0,
     parameter FP16_ENABLE     = 0,
-    parameter PPB_SCALAR_READ_ENABLE = 1
+    parameter PPB_SCALAR_READ_ENABLE = 1,
+    parameter USE_ROUTER_MESH = 0
 )(
     input  wire                          sys_clk,
     input  wire                          sys_rst_n,
@@ -101,7 +102,8 @@ generate
             .INT8_SIMD_LANES      (INT8_SIMD_LANES),
             .PERF_ENABLE_DERIVED  (PERF_ENABLE_DERIVED),
             .FP16_ENABLE          (FP16_ENABLE),
-            .PPB_SCALAR_READ_ENABLE(PPB_SCALAR_READ_ENABLE)
+            .PPB_SCALAR_READ_ENABLE(PPB_SCALAR_READ_ENABLE),
+            .USE_ROUTER_MESH      (USE_ROUTER_MESH)
         ) u_npu_core (
             .sys_clk              (sys_clk),
             .sys_rst_n            (sys_rst_n),

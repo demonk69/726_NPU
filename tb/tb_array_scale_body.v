@@ -500,14 +500,14 @@ always @(posedge clk) begin
         if (u_npu.u_ctrl.state >= 3 && u_npu.u_ctrl.state <= 9) begin
             $display("[DBG] cyc=%0d | s0_v=%b s0_w=0x%04h s0_a=0x%04h | s1_v=%b s1_m=0x%08h | ws_acc=0x%08h | v=%b acc=0x%08h",
                 dbg_cycle,
-                u_npu.u_pe_array.gen_row[0].gen_col[0].u_pe.s0_valid,
-                u_npu.u_pe_array.gen_row[0].gen_col[0].u_pe.s0_w[15:0],
-                u_npu.u_pe_array.gen_row[0].gen_col[0].u_pe.s0_a[15:0],
-                u_npu.u_pe_array.gen_row[0].gen_col[0].u_pe.s1_valid,
-                u_npu.u_pe_array.gen_row[0].gen_col[0].u_pe.s1_mul[31:0],
-                u_npu.u_pe_array.gen_row[0].gen_col[0].u_pe.ws_acc,
-                u_npu.u_pe_array.gen_row[0].gen_col[0].u_pe.valid_out,
-                u_npu.u_pe_array.gen_row[0].gen_col[0].u_pe.acc_out);
+                u_npu.u_pe_array.gen_direct_pe_grid.gen_row[0].gen_col[0].u_pe.s0_valid,
+                u_npu.u_pe_array.gen_direct_pe_grid.gen_row[0].gen_col[0].u_pe.s0_w[15:0],
+                u_npu.u_pe_array.gen_direct_pe_grid.gen_row[0].gen_col[0].u_pe.s0_a[15:0],
+                u_npu.u_pe_array.gen_direct_pe_grid.gen_row[0].gen_col[0].u_pe.s1_valid,
+                u_npu.u_pe_array.gen_direct_pe_grid.gen_row[0].gen_col[0].u_pe.s1_mul[31:0],
+                u_npu.u_pe_array.gen_direct_pe_grid.gen_row[0].gen_col[0].u_pe.ws_acc,
+                u_npu.u_pe_array.gen_direct_pe_grid.gen_row[0].gen_col[0].u_pe.valid_out,
+                u_npu.u_pe_array.gen_direct_pe_grid.gen_row[0].gen_col[0].u_pe.acc_out);
         end
         // Show FIFO writes and AXI writes
         if (u_npu.r_fifo_wr_en)
